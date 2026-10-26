@@ -94,7 +94,7 @@ class TwitchHelix:
         output = []
         for clip in payload.get("data", []):
             url = str(clip.get("url", "")).strip()
-            if not url.startswith("https://www.twitch.tv/"):
+            if not (url.startswith("https://www.twitch.tv/") or url.startswith("https://clips.twitch.tv/")):
                 continue
             output.append({
                 "url":url,
