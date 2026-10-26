@@ -27,13 +27,29 @@ def initialize(path):
     with session(path) as c:
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)")
-        for migration in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):
-            version = int(migration.name.split("_", 1)[0])
-            applied = c.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone()
+        migration_files=sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
+        versions=[int(path.name.split("_",1)[0]) for path in migration_files]
+        if len(versions)!=len(set(versions)):
+            raise RuntimeError("Duplicate SQL migration version detected. Each migration filename must have a unique three-digit prefix.")
+        for migration in migration_files:
+            version=int(migration.name.split("_",1)[0])
+            applied=c.execute("SELECT 1 FROM schema_migrations WHERE version=?",(version,)).fetchone()
             if applied:
                 continue
-            c.executescript(migration.read_text(encoding="utf-8"))
-            c.execute("INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)", (version, now()))
+            # Apply schema statements and their version marker atomically. executescript()
+            # otherwise commits the surrounding transaction before running arbitrary SQL;
+            # that can leave half-applied ALTER TABLE operations if the process stops.
+            script=migration.read_text(encoding="utf-8")
+            stamp=now().replace("'","''")
+            c.executescript(
+                "BEGIN IMMEDIATE;\\n"
+                + script
+                + "\\nINSERT INTO schema_migrations(version,applied_at) VALUES("
+                + str(version)
+                + ",'"
+                + stamp
+                + "');\\nCOMMIT;"
+            )
         c.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('global_paused','false',?)",(now(),))
         c.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('operating_mode','supervised',?)",(now(),))
 def event(c, level, kind, message, details=None):
