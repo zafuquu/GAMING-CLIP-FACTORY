@@ -92,6 +92,12 @@ class Worker(threading.Thread):
                         if cid: c.execute("UPDATE candidate_moments SET state='RENDER_FAILED' WHERE id=? AND state='APPROVED'",(cid,))
                     except (ValueError, TypeError):
                         pass
+                if status == "FAILED" and job["job_type"] == "UPLOAD_YOUTUBE":
+                    try:
+                        published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
+                        if published_id: c.execute("UPDATE published_videos SET publishing_status='FAILED',updated_at=? WHERE id=? AND publishing_status='UPLOADING'",(t,published_id))
+                    except (ValueError, TypeError):
+                        pass
                 event(c,"ERROR","job.reconciliation_required" if status=="RECONCILE_REQUIRED" else "job.failed" if status=="FAILED" else "job.retry_queued",str(e),{"job_id":job["id"]}); c.commit()
             finally: c.close()
         return True
