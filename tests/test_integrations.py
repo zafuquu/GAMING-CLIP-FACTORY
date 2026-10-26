@@ -113,7 +113,7 @@ def test_private_upload_uses_private_default_without_guessing_made_for_kids(tmp_
     assert captured["body"]["status"]["privacyStatus"]=="private"
     assert "selfDeclaredMadeForKids" not in captured["body"]["status"]
     assert captured["part"]=="snippet,status"
-    assert captured["media_body"].mimetype=="video/mp4"
+    assert captured["media_body"].mimetype()=="video/mp4"
 
 def test_youtube_oauth_scopes_include_private_upload_and_video_update_permissions():
     from app.integrations.youtube import SCOPES
