@@ -123,6 +123,30 @@ class AnalyticsScheduleIn(BaseModel):
     interval_minutes: int = Field(default=1440,ge=360,le=1440)
     window_days: int = Field(default=7,ge=1,le=90)
 
+class CaptionSegmentIn(BaseModel):
+    start_seconds: float = Field(ge=0,le=3600)
+    end_seconds: float = Field(gt=0,le=3600)
+    text: str = Field(min_length=1,max_length=500)
+    @model_validator(mode="after")
+    def validate_segment(self):
+        if self.end_seconds<=self.start_seconds:
+            raise ValueError("Caption end_seconds must be after start_seconds.")
+        self.text=self.text.strip()
+        if not self.text:
+            raise ValueError("Caption text cannot be empty.")
+        return self
+
+class CaptionEditIn(BaseModel):
+    segments: list[CaptionSegmentIn] = Field(max_length=300)
+    @model_validator(mode="after")
+    def validate_order(self):
+        ordered=sorted(self.segments,key=lambda seg:seg.start_seconds)
+        for previous,current in zip(ordered,ordered[1:]):
+            if current.start_seconds<previous.end_seconds:
+                raise ValueError("Caption timings cannot overlap. Adjust the segments and retry.")
+        self.segments=ordered
+        return self
+
 class PauseIn(BaseModel): paused: bool
 class ModeIn(BaseModel):
     mode: str
@@ -281,6 +305,32 @@ def create_app(settings=None,start_worker=True):
             data["segments"]=[dict(r) for r in c.execute("SELECT segment_index,start_seconds,end_seconds,text,confidence FROM transcript_segments WHERE transcript_id=? ORDER BY segment_index",(row["id"],))]
             return data
 
+    @app.put("/api/candidates/{cid}/captions")
+    def edit_candidate_captions(cid: str, data: CaptionEditIn):
+        t=now()
+        with session(cfg.database_path) as c:
+            row=c.execute("""SELECT cm.start_seconds,cm.end_seconds,cm.state,p.status AS rights_status,p.expires_at
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Candidate not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Caption editing blocked: current AUTHORIZED permission is required.")
+            if row["state"]!="NEEDS_REVIEW":
+                raise HTTPException(409,detail=f"Captions can only be edited while a candidate is in NEEDS_REVIEW (state={row['state']}).")
+            duration=float(row["end_seconds"])-float(row["start_seconds"])
+            for segment in data.segments:
+                if segment.end_seconds>duration+0.001:
+                    raise HTTPException(422,detail=f"Caption end time {segment.end_seconds:.3f}s exceeds candidate duration {duration:.3f}s.")
+            c.execute("DELETE FROM caption_segments WHERE candidate_id=?",(cid,))
+            base=float(row["start_seconds"])
+            for index,segment in enumerate(data.segments):
+                c.execute("""INSERT INTO caption_segments(id,candidate_id,segment_index,start_seconds,end_seconds,text,confidence,created_at)
+                    VALUES(?,?,?,?,?,?,NULL,?)""",
+                    (str(uuid4()),cid,index,round(base+segment.start_seconds,3),round(base+segment.end_seconds,3),segment.text,t))
+            event(c,"INFO","captions.edited","Owner saved caption timing/text corrections.",{"candidate_id":cid,"segment_count":len(data.segments)})
+        return {"candidate_id":cid,"caption_segment_count":len(data.segments),"state":"NEEDS_REVIEW","saved":True}
+
     @app.get("/api/candidates")
     def candidates(state: str | None = None):
         with connect(cfg.database_path) as c:
@@ -307,7 +357,12 @@ def create_app(settings=None,start_worker=True):
                     row["vision_assessment"]=visual_data
                 else:
                     row["vision_assessment"]=None
-                row["caption_segment_count"]=c.execute("SELECT COUNT(*) FROM caption_segments WHERE candidate_id=?",(row["id"],)).fetchone()[0]
+                caption_rows=c.execute("SELECT segment_index,start_seconds,end_seconds,text,confidence FROM caption_segments WHERE candidate_id=? ORDER BY segment_index",(row["id"],)).fetchall()
+                row["caption_segments"]=[{"segment_index":cap["segment_index"],
+                    "start_seconds":round(max(0.0,float(cap["start_seconds"])-float(row["start_seconds"])),3),
+                    "end_seconds":round(max(0.0,float(cap["end_seconds"])-float(row["start_seconds"])),3),
+                    "text":cap["text"],"confidence":cap["confidence"]} for cap in caption_rows]
+                row["caption_segment_count"]=len(caption_rows)
             return rows
 
     @app.get("/api/vision/status")
