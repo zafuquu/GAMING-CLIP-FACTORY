@@ -1,4 +1,4 @@
-import json, sqlite3, hashlib, subprocess, re, os
+import json, sqlite3, hashlib, subprocess, re, os, importlib.util
 from pathlib import Path
 from uuid import uuid4
 from datetime import datetime, timezone, date, timedelta
@@ -176,6 +176,15 @@ def create_app(settings=None,start_worker=True):
             for row in rows:
                 if row["rights_status"] == "AUTHORIZED" and expiry_passed(row.get("expires_at")):
                     row["rights_status"] = "EXPIRED"
+                plan=c.execute("SELECT * FROM content_plans WHERE candidate_id=?",(row["id"],)).fetchone()
+                if plan:
+                    plan_data=dict(plan)
+                    plan_data["tags"]=json.loads(plan_data.pop("tags_json") or "[]")
+                    plan_data["evidence"]=json.loads(plan_data.pop("evidence_json") or "{}")
+                    row["content_plan"]=plan_data
+                else:
+                    row["content_plan"]=None
+                row["caption_segment_count"]=c.execute("SELECT COUNT(*) FROM caption_segments WHERE candidate_id=?",(row["id"],)).fetchone()[0]
             return rows
     @app.post("/api/sources",status_code=201)
     def add_source(data: SourceIn):
@@ -231,6 +240,35 @@ def create_app(settings=None,start_worker=True):
             c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,created_at,updated_at) VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?,?,?)",(jid,r["source_id"],mid,t,t))
             event(c,"INFO","job.queued","Media analysis queued.",{"job_id":jid,"media_id":mid})
         return {"id":jid,"status":"QUEUED","job_type":"ANALYZE_MEDIA"}
+
+    @app.post("/api/media/{mid}/transcribe",status_code=202)
+    def transcribe_media(mid: str):
+        if os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()!="true":
+            raise HTTPException(403,detail="Local transcription is disabled. Configure GCF_ENABLE_TRANSCRIPTION=true in the local .env file.")
+        if importlib.util.find_spec("faster_whisper") is None:
+            raise HTTPException(503,detail="Optional dependency missing. Run scripts/setup-ml-windows.bat or install backend/requirements-ml.txt.")
+        t=now(); jid=str(uuid4())
+        with session(cfg.database_path) as c:
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
+            r=c.execute("SELECT m.source_id,p.status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(mid,)).fetchone()
+            if not r: raise HTTPException(404,detail="Media asset not found.")
+            if r["status"]!="AUTHORIZED" or expiry_passed(r["expires_at"]): raise HTTPException(409,detail="Rights gate blocked transcription.")
+            active=c.execute("SELECT id,status FROM jobs WHERE job_type='TRANSCRIBE_MEDIA' AND media_id=? AND status IN ('QUEUED','RUNNING')",(mid,)).fetchone()
+            if active: return {"id":active["id"],"status":"ALREADY_QUEUED"}
+            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,created_at,updated_at) VALUES(?,'TRANSCRIBE_MEDIA','QUEUED',?,?,?,?)",(jid,r["source_id"],mid,t,t))
+            event(c,"INFO","transcription.queued","Local transcription queued by owner.",{"job_id":jid,"media_id":mid})
+        return {"id":jid,"status":"QUEUED","local_only":True}
+
+    @app.get("/api/media/{mid}/transcript")
+    def transcript(mid: str):
+        with connect(cfg.database_path) as c:
+            row=c.execute("SELECT * FROM transcripts WHERE media_id=?",(mid,)).fetchone()
+            if not row: raise HTTPException(404,detail="Transcript not available for this media.")
+            data=dict(row)
+            data["segments"]=[dict(r) for r in c.execute("SELECT segment_index,start_seconds,end_seconds,text,confidence FROM transcript_segments WHERE transcript_id=? ORDER BY segment_index",(row["id"],))]
+            return data
+
     @app.get("/api/candidates")
     def candidates(state: str | None = None):
         with connect(cfg.database_path) as c:
@@ -320,6 +358,7 @@ def create_app(settings=None,start_worker=True):
             values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('youtube_uploads_enabled','twitch_discovery_enabled','twitch_discovery_queries','twitch_discovery_interval_minutes','twitch_discovery_next_at')")}
         return {
             "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":json.loads(values.get("twitch_discovery_queries","[]")),"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at")},
+            "transcription":{"enabled":os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true","dependency_installed":importlib.util.find_spec("faster_whisper") is not None,"model_path_configured":bool(os.getenv("GCF_WHISPER_MODEL_PATH")),"model_download_allowed":os.getenv("GCF_WHISPER_ALLOW_MODEL_DOWNLOAD","").lower()=="true","device":os.getenv("GCF_WHISPER_DEVICE","cpu")},
             "youtube":{"credentials_present":youtube_credentials_present,"upload_gate_configured":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true","uploads_enabled":values.get("youtube_uploads_enabled")=="true","scheduled_public_gate_configured":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true","public_publishing_enabled":False},
         }
 
