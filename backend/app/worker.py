@@ -1,4 +1,4 @@
-import json, re, subprocess, threading, hashlib, os, sys, importlib.util
+import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -6,6 +6,7 @@ from .db import connect, now, event
 from .integrations.twitch import TwitchHelix
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, search_public_videos
 from .content_director import plan_candidate
+from .vision import assess_candidate_images, VisionNotConfigured
 
 def expiry_passed(value):
     if not value:
@@ -74,6 +75,8 @@ class Worker(threading.Thread):
                 self.render_candidate(job)
             elif job["job_type"] == "TRANSCRIBE_MEDIA":
                 self.transcribe_media(job)
+            elif job["job_type"] == "ANALYZE_CANDIDATE_VISION":
+                self.analyze_candidate_vision(job)
             elif job["job_type"] == "DISCOVER_TWITCH_CLIPS":
                 self.discover_twitch(job)
             elif job["job_type"] == "DISCOVER_YOUTUBE_VIDEOS":
@@ -101,7 +104,7 @@ class Worker(threading.Thread):
                     if published_id:
                         c.execute("UPDATE published_videos SET publishing_status='RECONCILE_REQUIRED',updated_at=? WHERE id=?",(t,published_id))
                 else:
-                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,YouTubeNotConfigured)
+                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,YouTubeNotConfigured) and not isinstance(e,VisionNotConfigured)
                     should_retry = bool(r and r["attempt_count"]<r["max_attempts"] and retryable)
                     status="QUEUED" if should_retry else "FAILED"
                     next_attempt = None
@@ -121,6 +124,17 @@ class Worker(threading.Thread):
                         published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
                         if published_id: c.execute("UPDATE published_videos SET publishing_status='FAILED',updated_at=? WHERE id=? AND publishing_status='UPLOADING'",(t,published_id))
                     except (ValueError, TypeError):
+                        pass
+                if status == "FAILED" and job["job_type"] == "ANALYZE_CANDIDATE_VISION":
+                    try:
+                        cid=json.loads(job["payload_json"] or "{}").get("candidate_id")
+                        if cid:
+                            model=os.getenv("GCF_VISION_MODEL","llama3.2-vision").strip() or "unknown"
+                            c.execute("""INSERT INTO candidate_vision_assessments(id,candidate_id,model_name,status,error,created_at,updated_at)
+                                VALUES(?,?,?,'FAILED',?,?,?)
+                                ON CONFLICT(candidate_id) DO UPDATE SET model_name=excluded.model_name,status='FAILED',error=excluded.error,updated_at=excluded.updated_at""",
+                                (str(uuid4()),cid,model,str(e)[:2000],t,t))
+                    except (ValueError,TypeError,sqlite3.Error):
                         pass
                 if status == "FAILED" and job["job_type"] == "CHECK_YOUTUBE_PROCESSING":
                     try:
@@ -185,6 +199,25 @@ class Worker(threading.Thread):
                 try:
                     event(c,"WARNING","transcription.not_installed","Transcription is enabled but faster-whisper is not installed; install backend/requirements-ml.txt.",{"media_id":job["media_id"]}); c.commit()
                 finally: c.close()
+        if os.getenv("GCF_ENABLE_VISION_ANALYSIS","").lower()=="true":
+            try: maximum=max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","25"))))
+            except (TypeError,ValueError): maximum=25
+            c=connect(self.db)
+            try:
+                candidates=c.execute("SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY created_at DESC LIMIT ?",(job["media_id"],maximum)).fetchall()
+                queued=0; stamp=now()
+                for candidate in candidates:
+                    active=c.execute("SELECT id FROM jobs WHERE job_type='ANALYZE_CANDIDATE_VISION' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",("%"+candidate["id"]+"%",)).fetchone()
+                    if active: continue
+                    jid=str(uuid4())
+                    c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'ANALYZE_CANDIDATE_VISION','QUEUED',?,?, ?,?,?)",
+                              (jid,job["source_id"],job["media_id"],json.dumps({"candidate_id":candidate["id"]}),stamp,stamp))
+                    queued+=1
+                if queued:
+                    event(c,"INFO","vision.batch_queued","Optional local vision assessment jobs queued after media analysis.",{"media_id":job["media_id"],"queued":queued,"maximum":maximum})
+                    c.commit()
+            finally:
+                c.close()
 
     def render_candidate(self, job):
         if not self.ffmpeg or not self.ffprobe:
@@ -630,6 +663,90 @@ class Worker(threading.Thread):
         finally:
             c.close()
 
+
+
+    def analyze_candidate_vision(self, job):
+        payload=json.loads(job["payload_json"] or "{}")
+        cid=payload.get("candidate_id")
+        if not cid: raise ValueError("Vision analysis job is missing candidate_id.")
+        if not self.ffmpeg: raise RuntimeError("FFmpeg is required to sample candidate frames for vision assessment.")
+        c=connect(self.db)
+        try:
+            row=c.execute("""SELECT cm.*,m.original_path,m.source_id,m.id AS media_id,s.game,s.title AS source_title,
+                p.status AS rights_status,p.expires_at
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id
+                WHERE cm.id=?""",(cid,)).fetchone()
+            if not row: raise FileNotFoundError("Candidate for vision analysis not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked vision analysis: current AUTHORIZED permission is required.")
+            if row["state"]!="NEEDS_REVIEW":
+                raise PermissionError(f"Vision analysis only runs on human-review candidates (state={row['state']}).")
+            source=Path(row["original_path"])
+            if not source.is_file(): raise FileNotFoundError("Source media for vision analysis is missing.")
+            start=float(row["start_seconds"]); end=float(row["end_seconds"])
+            if start<0 or end<=start: raise ValueError("Candidate time boundaries are invalid.")
+            transcript_rows=c.execute("""SELECT ts.start_seconds,ts.end_seconds,ts.text FROM transcript_segments ts
+                JOIN transcripts tr ON tr.id=ts.transcript_id WHERE tr.media_id=? AND ts.end_seconds>? AND ts.start_seconds<?
+                ORDER BY ts.start_seconds LIMIT 20""",(row["media_id"],start,end)).fetchall()
+            transcript_excerpt=" ".join(str(x["text"]) for x in transcript_rows)[:1200]
+            old_assessment=c.execute("SELECT id FROM candidate_vision_assessments WHERE candidate_id=?",(cid,)).fetchone()
+            assessment_id=old_assessment["id"] if old_assessment else str(uuid4())
+        finally:
+            c.close()
+        frame_times=[round(start+(end-start)*fraction,3) for fraction in (0.2,0.5,0.8)]
+        images=[]
+        with tempfile.TemporaryDirectory(prefix="gcf-vision-") as temp:
+            for index,frame_time in enumerate(frame_times):
+                frame=Path(temp)/f"frame-{index}.jpg"
+                args=[self.ffmpeg,"-hide_banner","-loglevel","error","-nostdin","-ss",f"{frame_time:.3f}","-i",str(source),"-frames:v","1","-vf","scale=768:-2","-q:v","3","-y",str(frame)]
+                run(args,min(45,self.timeout))
+                if not frame.is_file() or frame.stat().st_size<=0:
+                    raise RuntimeError(f"FFmpeg did not extract candidate sample frame at {frame_time:.3f}s.")
+                images.append(frame.read_bytes())
+        result=assess_candidate_images(images,str(row["game"] or ""),str(row["source_title"] or ""),transcript_excerpt)
+        t=now()
+        c=connect(self.db)
+        try:
+            # Re-check rights after inference, immediately before persisting/ranking.
+            latest=c.execute("""SELECT cm.state,p.status AS rights_status,p.expires_at,cm.ranking_score,cm.ranking_components_json
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
+            if not latest: raise FileNotFoundError("Candidate disappeared during vision analysis.")
+            if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights expired during vision analysis; results were not applied.")
+            if latest["state"]!="NEEDS_REVIEW":
+                raise PermissionError("Candidate state changed while vision analysis was running; results were not applied.")
+            c.execute("""INSERT INTO candidate_vision_assessments(id,candidate_id,model_name,status,gameplay_context,event_type,visible_event,
+                is_actionable_highlight,highlight_score,confidence,evidence_json,quality_issues_json,frame_times_json,raw_response_json,error,created_at,updated_at)
+                VALUES(?,?,?,'COMPLETED',?,?,?,?,?,?,?,?,?,?, '',?,?)
+                ON CONFLICT(candidate_id) DO UPDATE SET model_name=excluded.model_name,status='COMPLETED',
+                gameplay_context=excluded.gameplay_context,event_type=excluded.event_type,visible_event=excluded.visible_event,
+                is_actionable_highlight=excluded.is_actionable_highlight,highlight_score=excluded.highlight_score,confidence=excluded.confidence,
+                evidence_json=excluded.evidence_json,quality_issues_json=excluded.quality_issues_json,frame_times_json=excluded.frame_times_json,
+                raw_response_json=excluded.raw_response_json,error='',updated_at=excluded.updated_at""",
+                (assessment_id,cid,result["model_name"],result["gameplay_context"],result["event_type"],result["visible_event"],
+                 int(result["is_actionable_highlight"]),result["highlight_score"],result["confidence"],json.dumps(result["evidence"]),
+                 json.dumps(result["quality_issues"]),json.dumps(frame_times),json.dumps(result),t,t))
+            try: components=json.loads(latest["ranking_components_json"] or "{}")
+            except (ValueError,TypeError): components={}
+            base=float(latest["ranking_score"]) if latest["ranking_score"] is not None else 0.45
+            confidence=result["confidence"]
+            evidence_score=(0.7*result["highlight_score"]+0.3*base)
+            combined=round(max(0,min(1,confidence*evidence_score+(1-confidence)*base)),4)
+            components.update({"vision_model":result["model_name"],"vision_event_type":result["event_type"],
+                "vision_confidence":confidence,"vision_highlight_score":result["highlight_score"],
+                "vision_assessment_method":"local-vision-model-estimate","vision_score_calibrated":False,
+                "vision_frame_times_seconds":frame_times})
+            c.execute("UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",(combined,json.dumps(components),cid))
+            summary={"candidate_id":cid,"assessment_id":assessment_id,"model_name":result["model_name"],"event_type":result["event_type"],
+                "highlight_score":result["highlight_score"],"confidence":confidence,"combined_ranking_score":combined,
+                "score_calibrated":False,"automatic_approval":False,"sampled_frame_times_seconds":frame_times}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","vision.assessment_completed","Local vision assessment saved as a review aid; candidate remains human-review-only.",{"job_id":job["id"],**summary})
+            c.commit()
+        finally:
+            c.close()
 
     def transcribe_media(self, job):
         if os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()!="true":
