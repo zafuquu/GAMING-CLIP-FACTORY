@@ -77,6 +77,8 @@ class Worker(threading.Thread):
                 self.discover_youtube(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
                 self.upload_youtube(job)
+            elif job["job_type"] == "CHECK_YOUTUBE_PROCESSING":
+                self.check_youtube_processing(job)
             elif job["job_type"] == "PUBLISH_YOUTUBE":
                 self.publish_youtube(job)
             elif job["job_type"] == "SYNC_YOUTUBE_ANALYTICS":
@@ -115,6 +117,21 @@ class Worker(threading.Thread):
                     try:
                         published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
                         if published_id: c.execute("UPDATE published_videos SET publishing_status='FAILED',updated_at=? WHERE id=? AND publishing_status='UPLOADING'",(t,published_id))
+                    except (ValueError, TypeError):
+                        pass
+                if status == "FAILED" and job["job_type"] == "CHECK_YOUTUBE_PROCESSING":
+                    try:
+                        published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
+                        if published_id:
+                            c.execute("UPDATE published_videos SET remote_processing_status='check_error',processing_checked_at=?,processing_failure_reason=?,publishing_status='PROCESSING_STATUS_ERROR',updated_at=? WHERE id=? AND remote_processing_status NOT IN ('succeeded','failed','terminated')",
+                                      (t,str(e)[:1000],t,published_id))
+                    except (ValueError, TypeError):
+                        pass
+                if status == "FAILED" and job["job_type"] == "PUBLISH_YOUTUBE":
+                    try:
+                        published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
+                        if published_id:
+                            c.execute("UPDATE published_videos SET publishing_status='PUBLICATION_FAILED',updated_at=? WHERE id=? AND publishing_status IN ('SCHEDULED','PROCESSING','READY_PRIVATE')")
                     except (ValueError, TypeError):
                         pass
                 event(c,"ERROR","job.reconciliation_required" if status=="RECONCILE_REQUIRED" else "job.failed" if status=="FAILED" else "job.retry_queued",str(e),{"job_id":job["id"]}); c.commit()
@@ -386,7 +403,6 @@ class Worker(threading.Thread):
             output=Path(row["output_path"])
             if not output.is_file() or output.stat().st_size != row["render_size"]:
                 raise PermissionError("Upload blocked: output is missing or its size changed since QC.")
-            import hashlib
             digest=hashlib.sha256()
             with output.open("rb") as h:
                 for block in iter(lambda:h.read(1024*1024),b""): digest.update(block)
@@ -408,46 +424,114 @@ class Worker(threading.Thread):
             t=now()
             c.execute("UPDATE published_videos SET publishing_status='UPLOADING',upload_request_started_at=?,updated_at=? WHERE id=?",(t,t,published_id))
             c.commit()
-            title=row["title"]; description=row["description"]
             tags=payload.get("tags",[])
             if not isinstance(tags,list): tags=[]
-            # Upload always starts private. A separate scheduled worker rechecks rights immediately before publication.
-            result=upload_video(output,title,description,[str(x) for x in tags])
-            final_status="SCHEDULED" if publish_at else "UPLOADED_PRIVATE"
-            c.execute("UPDATE published_videos SET youtube_video_id=?,publishing_status=?,scheduled_publish_at=?,updated_at=? WHERE id=?",(result["video_id"],final_status,publish_at.isoformat() if publish_at else None,now(),published_id))
+            # Remote upload always starts private. A separate worker polls processing status,
+            # then schedules public release only after YouTube reports processing succeeded.
+            result=upload_video(output,row["title"],row["description"],[str(x) for x in tags])
             t=now()
-            summary={"published_video_id":published_id,"youtube_video_id":result["video_id"],"url":result["url"],"publishing_status":final_status,"scheduled_publish_at":publish_at.isoformat() if publish_at else None,"initial_privacy_status":"private"}
+            c.execute("""UPDATE published_videos SET youtube_video_id=?,publishing_status='PROCESSING',
+                remote_processing_status='unknown',processing_checked_at=NULL,processing_failure_reason='',
+                scheduled_publish_at=?,updated_at=? WHERE id=?""",
+                (result["video_id"],publish_at.isoformat() if publish_at else None,t,published_id))
+            summary={"published_video_id":published_id,"youtube_video_id":result["video_id"],"url":result["url"],
+                     "publishing_status":"PROCESSING","scheduled_publish_at":publish_at.isoformat() if publish_at else None,
+                     "initial_privacy_status":"private","processing_status":"pending"}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            if publish_at:
-                publish_job_id=str(uuid4())
-                c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at) VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)",
-                    (publish_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"publish_at":publish_at.isoformat()}),t,t,publish_at.astimezone(timezone.utc).isoformat(timespec="seconds")))
-            event(c,"INFO","youtube.upload_completed","Video uploaded as private; any scheduled public release uses a separate rights-rechecking job.",{"job_id":job["id"],**summary})
+            check_job_id=str(uuid4())
+            check_at=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+            c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at)
+                VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?, ?,?,?,?)""",
+                (check_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20}),t,t,check_at))
+            event(c,"INFO","youtube.upload_completed","Upload accepted by YouTube as private; a bounded processing-status poll is queued before any public release.",{"job_id":job["id"],"processing_job_id":check_job_id,**summary})
             c.commit()
         finally:
             c.close()
 
-    def sync_youtube_analytics(self, job):
+    def check_youtube_processing(self, job):
         payload=json.loads(job["payload_json"] or "{}")
-        start_date=str(payload.get("start_date",""))[:10]; end_date=str(payload.get("end_date",""))[:10]
-        try:
-            datetime.strptime(start_date,"%Y-%m-%d"); datetime.strptime(end_date,"%Y-%m-%d")
-        except ValueError as exc:
-            raise ValueError("Analytics job needs valid ISO dates (YYYY-MM-DD).") from exc
-        rows=fetch_video_analytics(start_date,end_date,max_results=200)
+        published_id=payload.get("published_video_id")
+        if not published_id:
+            raise ValueError("Processing check is missing published_video_id.")
         c=connect(self.db)
         try:
-            inserted=0
-            t=now()
-            for metrics in rows:
-                vid=str(metrics.get("video",""))
-                record=c.execute("SELECT id FROM published_videos WHERE youtube_video_id=?",(vid,)).fetchone()
-                if not record: continue
-                c.execute("INSERT INTO analytics_snapshots(id,published_video_id,captured_at,metrics_json,provider) VALUES(?,?,?,?,?)",(str(uuid4()),record["id"],t,json.dumps({"start_date":start_date,"end_date":end_date,"metrics":metrics}),"youtube_analytics_api"))
-                inserted+=1
-            summary={"start_date":start_date,"end_date":end_date,"rows_returned":len(rows),"snapshots_saved":inserted}
-            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","youtube.analytics_synced","YouTube Analytics snapshots synchronized.",{"job_id":job["id"],**summary})
+            row=c.execute("SELECT id,youtube_video_id,scheduled_publish_at,publishing_status FROM published_videos WHERE id=?",(published_id,)).fetchone()
+            if not row or not row["youtube_video_id"]:
+                raise FileNotFoundError("Published video record or remote YouTube ID is missing.")
+            if row["publishing_status"] in {"BLOCKED_RIGHTS","PROCESSING_FAILED","PROCESSING_TERMINATED","PROCESSING_TIMEOUT","PUBLICATION_FAILED"}:
+                t=now()
+                c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                          (json.dumps({"published_video_id":published_id,"skipped":True,"reason":row["publishing_status"]}),t,t,job["id"]))
+                c.commit()
+                return
+            video_id=row["youtube_video_id"]
+        finally:
+            c.close()
+        response=youtube_service().videos().list(part="processingDetails,status",id=video_id).execute()
+        items=response.get("items",[]) or []
+        remote=items[0] if items else {}
+        details=remote.get("processingDetails") or {}
+        remote_status=str(details.get("processingStatus","unknown")).lower()
+        failure_reason=str(details.get("processingFailureReason","") or "")
+        t=now()
+        c=connect(self.db)
+        try:
+            row=c.execute("SELECT pv.*,m.source_id,m.id AS media_id FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id WHERE pv.id=?",(published_id,)).fetchone()
+            if not row: raise FileNotFoundError("Published record disappeared during processing poll.")
+            if remote_status in {"failed","terminated"}:
+                final_state="PROCESSING_FAILED" if remote_status=="failed" else "PROCESSING_TERMINATED"
+                reason=failure_reason or ("YouTube reported that processing failed." if remote_status=="failed" else "YouTube no longer exposes processing status for this video.")
+                c.execute("UPDATE published_videos SET remote_processing_status=?,processing_checked_at=?,processing_failure_reason=?,publishing_status=?,updated_at=? WHERE id=?",
+                          (remote_status,t,reason,final_state,t,published_id))
+                c.execute("UPDATE jobs SET status='CANCELLED',error=?,updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",
+                          (reason,t,t,"%"+published_id+"%"))
+                c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                          (json.dumps({"published_video_id":published_id,"processing_status":remote_status,"failure_reason":reason}),t,t,job["id"]))
+                event(c,"ERROR","youtube.processing_failed","YouTube could not complete processing; no public release will be scheduled.",{"job_id":job["id"],"published_video_id":published_id,"youtube_video_id":video_id,"processing_status":remote_status,"reason":reason})
+                c.commit()
+                return
+            if remote_status=="succeeded":
+                scheduled_at=row["scheduled_publish_at"]
+                final_state="SCHEDULED" if scheduled_at else "READY_PRIVATE"
+                c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',publishing_status=?,updated_at=? WHERE id=?",
+                          (t,final_state,t,published_id))
+                scheduled_job_id=None
+                if scheduled_at and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true" and os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true":
+                    existing=c.execute("SELECT id FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING','COMPLETED','RECONCILE_REQUIRED') AND payload_json LIKE ? ORDER BY created_at DESC LIMIT 1",("%"+published_id+"%",)).fetchone()
+                    if not existing:
+                        parsed=datetime.fromisoformat(scheduled_at.replace("Z","+00:00"))
+                        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+                        due=max(parsed,datetime.now(timezone.utc)).isoformat(timespec="seconds")
+                        scheduled_job_id=str(uuid4())
+                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at)
+                            VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)""",
+                            (scheduled_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"publish_at":parsed.isoformat()}),t,t,due))
+                c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                          (json.dumps({"published_video_id":published_id,"processing_status":"succeeded","publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id}),t,t,job["id"]))
+                event(c,"INFO","youtube.processing_succeeded","YouTube processing succeeded; video is ready for private viewing or separately gated publication.",{"job_id":job["id"],"published_video_id":published_id,"youtube_video_id":video_id,"publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id})
+                c.commit()
+                return
+            poll_attempt=int(payload.get("poll_attempt",0))
+            max_polls=max(1,min(60,int(payload.get("max_polls",20))))
+            if poll_attempt>=max_polls:
+                c.execute("UPDATE published_videos SET remote_processing_status=?,processing_checked_at=?,processing_failure_reason='Processing poll limit reached; owner may request a new check.',publishing_status='PROCESSING_TIMEOUT',updated_at=? WHERE id=?",
+                          (remote_status,t,t,published_id))
+                c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                          (json.dumps({"published_video_id":published_id,"processing_status":remote_status,"timed_out":True,"polls":poll_attempt+1}),t,t,job["id"]))
+                event(c,"WARNING","youtube.processing_poll_limit","YouTube processing is still pending after bounded polling; no public release was scheduled.",{"job_id":job["id"],"published_video_id":published_id,"polls":poll_attempt+1})
+                c.commit()
+                return
+            delay=min(300,15*(2**min(poll_attempt,5)))
+            due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=delay)).isoformat(timespec="seconds")
+            next_id=str(uuid4())
+            c.execute("UPDATE published_videos SET remote_processing_status=?,processing_checked_at=?,publishing_status='PROCESSING',updated_at=? WHERE id=?",
+                      (remote_status,t,t,published_id))
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                      (json.dumps({"published_video_id":published_id,"processing_status":remote_status,"next_poll_at":due}),t,t,job["id"]))
+            c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at)
+                VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?, ?,?,?,?)""",
+                (next_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"poll_attempt":poll_attempt+1,"max_polls":max_polls}),t,t,due))
+            event(c,"INFO","youtube.processing_pending","YouTube is still processing; next status check is scheduled with a bounded poll count.",{"job_id":job["id"],"next_job_id":next_id,"published_video_id":published_id,"processing_status":remote_status,"next_poll_at":due,"poll_attempt":poll_attempt+1})
             c.commit()
         finally:
             c.close()
