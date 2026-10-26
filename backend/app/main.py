@@ -314,6 +314,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(503,detail="FFmpeg is required to extract candidate frames.")
         t=now(); jid=str(uuid4())
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
             row=c.execute("""SELECT cm.id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at
@@ -337,6 +338,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(503, detail="Rendering is unavailable: configure FFmpeg and FFprobe first.")
         t=now()
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if pause and pause["value"]=="true":
                 raise HTTPException(423, detail="Global pause is enabled.")
@@ -459,6 +461,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(503,detail="YouTube metadata discovery requires GCF_YOUTUBE_API_KEY or a stored YouTube OAuth connection.")
         t=now(); jid=str(uuid4())
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true":
                 raise HTTPException(423,detail="Global pause is enabled.")
@@ -506,6 +509,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(503,detail="Twitch discovery is not configured. Add Twitch app credentials to local .env.")
         t=now(); jid=str(uuid4())
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
             active=c.execute("SELECT id FROM jobs WHERE job_type='DISCOVER_TWITCH_CLIPS' AND status IN ('QUEUED','RUNNING') LIMIT 1").fetchone()
@@ -550,6 +554,7 @@ def create_app(settings=None,start_worker=True):
     def schedule_publication(data: PublishRequest):
         t=now()
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
             enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
@@ -595,6 +600,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(503,detail="YouTube channel is not connected: "+str(channel.get("reason") or "connection check failed"))
         t=now(); jid=str(uuid4())
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true":
                 raise HTTPException(423,detail="Global pause is enabled.")
@@ -615,6 +621,7 @@ def create_app(settings=None,start_worker=True):
     def cancel_public_release(published_id: str):
         t=now()
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             row=c.execute("SELECT id,publishing_status,scheduled_publish_at,remote_processing_status,youtube_video_id FROM published_videos WHERE id=?",(published_id,)).fetchone()
             if not row: raise HTTPException(404,detail="Publication record not found.")
             if not row["scheduled_publish_at"] or row["publishing_status"] not in {"UPLOAD_PENDING","PROCESSING","SCHEDULED"}:
@@ -643,6 +650,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(403,detail="Scheduled public release is disabled by local environment policy.")
         t=now(); scheduled=datetime.fromisoformat(data.publish_at.replace("Z","+00:00"))
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
             uploads=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
@@ -697,6 +705,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(503,detail="YouTube channel is not connected: "+str(status.get("reason") or "connection check failed"))
         t=now(); jid=str(uuid4())
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
             active=c.execute("SELECT id FROM jobs WHERE job_type='SYNC_YOUTUBE_ANALYTICS' AND status IN ('QUEUED','RUNNING') LIMIT 1").fetchone()
