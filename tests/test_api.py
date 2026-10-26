@@ -449,3 +449,56 @@ def test_analytics_summary_rejects_malformed_or_incomplete_date_windows(tmp_path
     assert c.get("/api/youtube/analytics/summary?start_date=2026-10-20&end_date=2026-10-19").status_code==422
     assert c.get("/api/youtube/analytics/summary?end_date=2026-10-26").status_code==422
     c.__exit__(None,None,None)
+
+def test_candidate_caption_edits_round_trip_as_candidate_relative_times(tmp_path):
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"caption-source.mp4").write_bytes(b"authorized fixture bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"caption-source.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    cid="caption-edit-candidate"
+    stamp="2026-10-20T00:00:00+00:00"
+    db_path=c.app.state.settings.database_path
+    with sqlite3.connect(db_path) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (cid,mid,10.0,20.0,"test","caption test","NEEDS_REVIEW",stamp))
+        raw.execute("INSERT INTO caption_segments(id,candidate_id,segment_index,start_seconds,end_seconds,text,confidence,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            ("caption-original",cid,0,11.0,13.0,"Original phrase",0.9,stamp))
+    before=next(x for x in c.get("/api/candidates").json() if x["id"]==cid)
+    assert before["caption_segments"][0]["start_seconds"]==1.0
+    assert before["caption_segments"][0]["end_seconds"]==3.0
+    edited=c.put(f"/api/candidates/{cid}/captions",json={"segments":[
+        {"start_seconds":0.5,"end_seconds":1.5,"text":"Corrected first line"},
+        {"start_seconds":2.0,"end_seconds":4.0,"text":"Second line"}
+    ]})
+    assert edited.status_code==200,edited.text
+    after=next(x for x in c.get("/api/candidates").json() if x["id"]==cid)
+    assert after["caption_segment_count"]==2
+    assert after["caption_segments"][0]["text"]=="Corrected first line"
+    assert after["caption_segments"][0]["start_seconds"]==0.5
+    assert after["caption_segments"][1]["start_seconds"]==2.0
+    with sqlite3.connect(db_path) as raw:
+        rows=raw.execute("SELECT start_seconds,end_seconds,text FROM caption_segments WHERE candidate_id=? ORDER BY segment_index",(cid,)).fetchall()
+    assert rows==[(10.5,11.5,"Corrected first line"),(12.0,14.0,"Second line")]
+    overlap=c.put(f"/api/candidates/{cid}/captions",json={"segments":[
+        {"start_seconds":0.0,"end_seconds":2.0,"text":"Overlaps"},
+        {"start_seconds":1.0,"end_seconds":3.0,"text":"Second"}
+    ]})
+    assert overlap.status_code==422
+    c.__exit__(None,None,None)
+
+def test_candidate_caption_edit_requires_current_rights_and_review_state(tmp_path):
+    c,media=setup_client(tmp_path); sid=add_source(c); authorize(c,sid); media.mkdir(parents=True,exist_ok=True)
+    (media/"caption-state.mp4").write_bytes(b"authorized fixture bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"caption-state.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]; cid="caption-state-candidate"; stamp="2026-10-20T00:00:00+00:00"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (cid,mid,0.0,5.0,"test","state test","APPROVED",stamp))
+    response=c.put(f"/api/candidates/{cid}/captions",json={"segments":[{"start_seconds":0,"end_seconds":1,"text":"Caption"}]})
+    assert response.status_code==409
+    c.__exit__(None,None,None)
