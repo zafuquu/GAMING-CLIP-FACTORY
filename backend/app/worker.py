@@ -552,8 +552,8 @@ class Worker(threading.Thread):
                 WHERE pv.id=?""",(published_id,)).fetchone()
             if not row:
                 raise FileNotFoundError("Scheduled publication record not found.")
-            if row["publishing_status"]!="SCHEDULED" or not row["youtube_video_id"]:
-                raise PermissionError("Publication is not in a valid scheduled state.")
+            if not row["youtube_video_id"]:
+                raise PermissionError("Publication has no reconciled YouTube video ID.")
             if row["qc_status"]!="PASS" or row["render_qc"]!="PASS":
                 raise PermissionError("Scheduled publication blocked: output no longer has QC PASS.")
             if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
@@ -570,9 +570,50 @@ class Worker(threading.Thread):
             enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
             if not enabled or enabled["value"]!="true":
                 raise PermissionError("Scheduled publication blocked: owner disabled YouTube uploads.")
+            service=youtube_service()
+            remote_items=service.videos().list(part="processingDetails,status",id=row["youtube_video_id"]).execute().get("items",[]) or []
+            remote=remote_items[0] if remote_items else {}
+            remote_processing=str((remote.get("processingDetails") or {}).get("processingStatus","unknown")).lower()
+            remote_privacy=str((remote.get("status") or {}).get("privacyStatus","unknown")).lower()
+            if remote_processing in {"failed","terminated"}:
+                failure=(remote.get("processingDetails") or {}).get("processingFailureReason") or remote_processing
+                c.execute("UPDATE published_videos SET remote_processing_status=?,processing_checked_at=?,processing_failure_reason=?,publishing_status='PROCESSING_FAILED',updated_at=? WHERE id=?",
+                          (remote_processing,now(),str(failure),now(),published_id))
+                c.commit()
+                raise PermissionError(f"Scheduled publication blocked: YouTube processing status is {remote_processing} ({failure}).")
+            if remote_processing!="succeeded":
+                # A transient processing lag is not a publishing failure. Keep the release queued
+                # and request another bounded processing check; public state remains unchanged.
+                t=now()
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=60)).isoformat(timespec="seconds")
+                c.execute("UPDATE published_videos SET remote_processing_status=?,processing_checked_at=?,publishing_status='PROCESSING',updated_at=? WHERE id=?",
+                          (remote_processing,t,t,published_id))
+                active=c.execute("SELECT id FROM jobs WHERE job_type='CHECK_YOUTUBE_PROCESSING' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+                if not active:
+                    check_id=str(uuid4())
+                    c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at) VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?, ?,?,?,?)",
+                              (check_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20}),t,t,due))
+                c.execute("UPDATE jobs SET status='QUEUED',error='Waiting for YouTube processing to succeed before public release.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",
+                          (t,due,job["id"]))
+                event(c,"WARNING","youtube.publication_deferred","Public release deferred because YouTube processing is not yet successful.",{"job_id":job["id"],"published_video_id":published_id,"processing_status":remote_processing,"next_attempt_at":due})
+                c.commit()
+                return
+            if remote_privacy=="public":
+                t=now()
+                c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,publishing_status='PUBLISHED',updated_at=? WHERE id=?",(t,t,published_id))
+                c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                          (json.dumps({"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"],"publishing_status":"PUBLISHED","already_public":True}),t,t,job["id"]))
+                event(c,"INFO","youtube.publication_confirmed","YouTube already reports this video public; remote state reconciled after rights and QC checks.",{"job_id":job["id"],"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"]})
+                c.commit()
+                return
+            if remote_privacy!="private":
+                raise UploadReconciliationRequired(f"YouTube privacy state is unexpectedly '{remote_privacy}'. Reconcile the channel video before attempting public release.")
+            if row["remote_processing_status"]!="succeeded":
+                # Keep remote processing state as a recorded precondition; the live query above is authoritative.
+                c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,updated_at=? WHERE id=?",(now(),now(),published_id))
             t=now()
             try:
-                youtube_service().videos().update(part="status",body={"id":row["youtube_video_id"],"status":{"privacyStatus":"public"}}).execute()
+                service.videos().update(part="status",body={"id":row["youtube_video_id"],"status":{"privacyStatus":"public"}}).execute()
             except Exception as exc:
                 status=getattr(getattr(exc,"resp",None),"status",None)
                 if status in {400,401,403,404,409,422}:
