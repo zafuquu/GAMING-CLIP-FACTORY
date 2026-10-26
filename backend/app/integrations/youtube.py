@@ -2,7 +2,9 @@
 from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import json
+import json, os, time
+import httplib2
+from google_auth_httplib2 import AuthorizedHttp
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -38,11 +40,21 @@ def load_credentials():
         raise YouTubeNotConfigured("YouTube authorization is no longer valid; reconnect the channel.")
     return credentials
 
+def _api_timeout() -> float:
+    try:
+        return float(max(5, min(120, int(os.getenv("GCF_GOOGLE_API_TIMEOUT_SECONDS", "30")))))
+    except (TypeError, ValueError):
+        return 30.0
+
 def youtube_service():
-    return build("youtube", "v3", credentials=load_credentials(), cache_discovery=False)
+    credentials=load_credentials()
+    http=AuthorizedHttp(credentials, http=httplib2.Http(timeout=_api_timeout()))
+    return build("youtube", "v3", http=http, cache_discovery=False)
 
 def analytics_service():
-    return build("youtubeAnalytics", "v2", credentials=load_credentials(), cache_discovery=False)
+    credentials=load_credentials()
+    http=AuthorizedHttp(credentials, http=httplib2.Http(timeout=_api_timeout()))
+    return build("youtubeAnalytics", "v2", http=http, cache_discovery=False)
 
 def connected_status():
     try:
@@ -74,7 +86,12 @@ def upload_video(path: Path, title: str, description: str, tags: list[str], publ
     request = service.videos().insert(part="snippet,status", body=body, media_body=media)
     try:
         result = None
+        try: total_timeout=max(60,min(21600,int(os.getenv("GCF_YOUTUBE_UPLOAD_TIMEOUT_SECONDS","7200"))))
+        except (TypeError,ValueError): total_timeout=7200
+        deadline=time.monotonic()+total_timeout
         while result is None:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"YouTube upload exceeded configured total timeout of {total_timeout} seconds.")
             _status, result = request.next_chunk()
         video_id = result.get("id") if isinstance(result, dict) else None
         if not video_id:
@@ -119,7 +136,7 @@ def search_public_videos(query: str, days: int = 7, max_results: int = 50) -> li
         return []
     api_key=os.getenv("GCF_YOUTUBE_API_KEY","").strip()
     if api_key:
-        service=build("youtube","v3",developerKey=api_key,cache_discovery=False)
+        service=build("youtube","v3",developerKey=api_key,http=httplib2.Http(timeout=_api_timeout()),cache_discovery=False)
     else:
         service=youtube_service()
     published_after=(datetime.now(timezone.utc)-timedelta(days=max(1,min(int(days),30)))).isoformat(timespec="seconds").replace("+00:00","Z")
