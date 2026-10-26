@@ -48,9 +48,10 @@ def _wrap(text: str, font, max_width: int) -> list[str]:
 def _draw_cover(image: Image.Image, game: str, title: str) -> Image.Image:
     image=ImageOps.fit(image.convert("RGB"),TARGET_SIZE,method=Image.Resampling.LANCZOS,centering=(0.5,0.5))
     overlay=Image.new("RGBA",TARGET_SIZE,(0,0,0,0))
-    px=overlay.load()
+    overlay_draw=ImageDraw.Draw(overlay)
     width,height=TARGET_SIZE
     # Gentle edge-to-edge gradients protect text contrast without covering the gameplay focal point.
+    # Draw scan lines rather than touching every pixel in Python; the result is identical per row and much faster.
     for y in range(height):
         if y < 1550:
             alpha=int(215*(1-y/1550))
@@ -59,8 +60,7 @@ def _draw_cover(image: Image.Image, game: str, title: str) -> Image.Image:
         else:
             alpha=0
         if alpha:
-            for x in range(width):
-                px[x,y]=(4,8,18,alpha)
+            overlay_draw.line((0,y,width,y),fill=(4,8,18,alpha))
     image=Image.alpha_composite(image.convert("RGBA"),overlay)
     draw=ImageDraw.Draw(image)
     margin=150
