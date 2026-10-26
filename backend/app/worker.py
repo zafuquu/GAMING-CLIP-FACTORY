@@ -1,10 +1,11 @@
-import json, re, subprocess, threading, hashlib, os
+import json, re, subprocess, threading, hashlib, os, sys, importlib.util
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event
 from .integrations.twitch import TwitchHelix
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, search_public_videos
+from .content_director import plan_candidate
 
 def expiry_passed(value):
     if not value:
@@ -32,8 +33,8 @@ def escape_filter_path(path):
     return value
 
 SCENE=re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
-def run(args,timeout):
-    try: p=subprocess.run(args,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout,shell=False)
+def run(args,timeout,cwd=None):
+    try: p=subprocess.run(args,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout,shell=False,cwd=str(cwd) if cwd else None)
     except subprocess.TimeoutExpired as e: raise RuntimeError(f"Command timed out after {timeout}s: {args[0]}") from e
     if p.returncode: raise RuntimeError(f"{Path(args[0]).name} exited {p.returncode}: {(p.stderr or p.stdout)[-1500:]}")
     return p
@@ -71,6 +72,8 @@ class Worker(threading.Thread):
                 self.analyze(job)
             elif job["job_type"] == "RENDER_CANDIDATE":
                 self.render_candidate(job)
+            elif job["job_type"] == "TRANSCRIBE_MEDIA":
+                self.transcribe_media(job)
             elif job["job_type"] == "DISCOVER_TWITCH_CLIPS":
                 self.discover_twitch(job)
             elif job["job_type"] == "DISCOVER_YOUTUBE_VIDEOS":
