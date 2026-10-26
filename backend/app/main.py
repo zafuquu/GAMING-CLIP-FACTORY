@@ -30,6 +30,8 @@ class RightsIn(BaseModel):
         if self.status not in {"UNKNOWN","DISCOVERED","EVIDENCE_REQUIRED","PENDING_REVIEW","AUTHORIZED","EXPIRED","REJECTED","REVOKED"}: raise ValueError("Invalid rights status")
         if self.status == "AUTHORIZED" and not (self.license_type.strip() and self.permission_evidence.strip() and self.editing_allowed and self.commercial_use_allowed and self.reviewed_by_owner):
             raise ValueError("AUTHORIZATION requires license type, permission evidence, editing/commercial permission, and owner review")
+        if self.status == "AUTHORIZED" and expiry_passed(self.expires_at):
+            raise ValueError("Cannot authorize a source with an expired or invalid expiration date")
         return self
 class MediaIn(BaseModel):
     source_id: str
@@ -41,6 +43,18 @@ class ModeIn(BaseModel):
     def check_mode(self):
         if self.mode not in {"development","supervised"}: raise ValueError("Only development/supervised are available; autonomous public publishing is disabled")
         return self
+
+def expiry_passed(value):
+    if not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed <= datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        # Corrupt or ambiguous expiry metadata fails closed.
+        return True
 
 def digest(path):
     h=hashlib.sha256()
@@ -80,7 +94,7 @@ def create_app(settings=None,start_worker=True):
     def dashboard():
         with connect(cfg.database_path) as c:
             def n(sql): return c.execute(sql).fetchone()[0]
-            counts={"sources_total":n("SELECT COUNT(*) FROM sources"),"sources_authorized":n("SELECT COUNT(*) FROM source_permissions WHERE status='AUTHORIZED'"),"sources_pending":n("SELECT COUNT(*) FROM source_permissions WHERE status IN ('UNKNOWN','DISCOVERED','EVIDENCE_REQUIRED','PENDING_REVIEW')"),"media_total":n("SELECT COUNT(*) FROM media_assets"),"candidates_needing_review":n("SELECT COUNT(*) FROM candidate_moments WHERE state='NEEDS_REVIEW'"),"jobs_queued":n("SELECT COUNT(*) FROM jobs WHERE status='QUEUED'"),"jobs_running":n("SELECT COUNT(*) FROM jobs WHERE status='RUNNING'"),"jobs_failed":n("SELECT COUNT(*) FROM jobs WHERE status='FAILED'"),"published_videos":n("SELECT COUNT(*) FROM published_videos WHERE youtube_video_id IS NOT NULL")}
+            counts={"sources_total":n("SELECT COUNT(*) FROM sources"),"sources_authorized":n("SELECT COUNT(*) FROM source_permissions WHERE status='AUTHORIZED' AND (expires_at IS NULL OR julianday(expires_at)>julianday('now'))"),"sources_pending":n("SELECT COUNT(*) FROM source_permissions WHERE status IN ('UNKNOWN','DISCOVERED','EVIDENCE_REQUIRED','PENDING_REVIEW')"),"media_total":n("SELECT COUNT(*) FROM media_assets"),"candidates_needing_review":n("SELECT COUNT(*) FROM candidate_moments WHERE state='NEEDS_REVIEW'"),"jobs_queued":n("SELECT COUNT(*) FROM jobs WHERE status='QUEUED'"),"jobs_running":n("SELECT COUNT(*) FROM jobs WHERE status='RUNNING'"),"jobs_failed":n("SELECT COUNT(*) FROM jobs WHERE status='FAILED'"),"published_videos":n("SELECT COUNT(*) FROM published_videos WHERE youtube_video_id IS NOT NULL")}
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             mode=c.execute("SELECT value FROM settings WHERE key='operating_mode'").fetchone()
             jobs=[dict(r) for r in c.execute("SELECT id,job_type,status,attempt_count,error,created_at,updated_at FROM jobs ORDER BY created_at DESC LIMIT 8")]
@@ -90,7 +104,11 @@ def create_app(settings=None,start_worker=True):
     def sources(status: str|None=None):
         with connect(cfg.database_path) as c:
             sql="SELECT s.*,p.status AS rights_status,p.license_type,p.permission_evidence,p.editing_allowed,p.commercial_use_allowed,p.reviewed_by_owner,p.attribution,p.expires_at,p.notes AS rights_notes FROM sources s JOIN source_permissions p ON p.source_id=s.id"
-            return [dict(r) for r in c.execute(sql+(" WHERE p.status=?" if status else "")+" ORDER BY s.created_at DESC",((status,) if status else ()))]
+            rows = [dict(r) for r in c.execute(sql+(" WHERE p.status=?" if status else "")+" ORDER BY s.created_at DESC",((status,) if status else ()))]
+            for row in rows:
+                if row["rights_status"] == "AUTHORIZED" and expiry_passed(row.get("expires_at")):
+                    row["rights_status"] = "EXPIRED"
+            return rows
     @app.post("/api/sources",status_code=201)
     def add_source(data: SourceIn):
         sid=str(uuid4()); t=now()
@@ -113,16 +131,18 @@ def create_app(settings=None,start_worker=True):
     def media():
         with connect(cfg.database_path) as c:
             result=[]
-            for r in c.execute("SELECT m.*,s.title AS source_title,p.status AS rights_status FROM media_assets m JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id ORDER BY m.created_at DESC"):
-                item=dict(r); item["probe"]=json.loads(item.pop("probe_json")) if item["probe_json"] else None; result.append(item)
+            for r in c.execute("SELECT m.*,s.title AS source_title,p.status AS rights_status,p.expires_at FROM media_assets m JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id ORDER BY m.created_at DESC"):
+                item=dict(r); item["probe"]=json.loads(item.pop("probe_json")) if item["probe_json"] else None
+                if item["rights_status"] == "AUTHORIZED" and expiry_passed(item.get("expires_at")): item["rights_status"] = "EXPIRED"
+                result.append(item)
             return result
     @app.post("/api/media/import",status_code=201)
     def import_media(data: MediaIn):
         p=safe_media(data.path,cfg.media_root)
         with connect(cfg.database_path) as c:
-            src=c.execute("SELECT s.id,p.status FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?",(data.source_id,)).fetchone()
+            src=c.execute("SELECT s.id,p.status,p.expires_at FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?",(data.source_id,)).fetchone()
             if not src: raise HTTPException(404,detail="Source not found")
-            if src["status"]!="AUTHORIZED": raise HTTPException(409,detail="Rights gate blocked import: source must be AUTHORIZED first.")
+            if src["status"]!="AUTHORIZED" or expiry_passed(src["expires_at"]): raise HTTPException(409,detail="Rights gate blocked import: source must have current AUTHORIZED permission.")
             sha=digest(p)
             if c.execute("SELECT id FROM media_assets WHERE source_id=? AND sha256=?",(data.source_id,sha)).fetchone(): raise HTTPException(409,detail="This exact file is already imported for this source.")
             mid=str(uuid4()); t=now()
@@ -134,9 +154,9 @@ def create_app(settings=None,start_worker=True):
         with session(cfg.database_path) as c:
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if pause and pause["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
-            r=c.execute("SELECT m.source_id,p.status FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(mid,)).fetchone()
+            r=c.execute("SELECT m.source_id,p.status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(mid,)).fetchone()
             if not r: raise HTTPException(404,detail="Media asset not found")
-            if r["status"]!="AUTHORIZED": raise HTTPException(409,detail="Rights gate blocked analysis.")
+            if r["status"]!="AUTHORIZED" or expiry_passed(r["expires_at"]): raise HTTPException(409,detail="Rights gate blocked analysis: current AUTHORIZED permission is required.")
             old=c.execute("SELECT id FROM jobs WHERE media_id=? AND job_type='ANALYZE_MEDIA' AND status IN ('QUEUED','RUNNING')",(mid,)).fetchone()
             if old: return {"id":old["id"],"status":"ALREADY_QUEUED"}
             jid=str(uuid4()); t=now()
