@@ -604,10 +604,10 @@ def create_app(settings=None,start_worker=True):
             if not row: raise HTTPException(404,detail="Publication record not found.")
             if not row["scheduled_publish_at"] or row["publishing_status"] not in {"UPLOAD_PENDING","PROCESSING","SCHEDULED"}:
                 raise HTTPException(409,detail="This publication has no cancellable scheduled-public release.")
-            running=c.execute("""SELECT id FROM jobs WHERE job_type IN ('UPLOAD_YOUTUBE','PUBLISH_YOUTUBE')
+            running=c.execute("""SELECT id,job_type FROM jobs WHERE job_type IN ('UPLOAD_YOUTUBE','CHECK_YOUTUBE_PROCESSING','PUBLISH_YOUTUBE')
                 AND status='RUNNING' AND payload_json LIKE ? LIMIT 1""",("%"+published_id+"%",)).fetchone()
             if running:
-                raise HTTPException(409,detail="An external YouTube operation is in progress; reconcile or retry cancellation after it finishes.")
+                raise HTTPException(409,detail="A YouTube upload, processing poll, or publication operation is in progress; retry cancellation after it finishes.")
             c.execute("UPDATE jobs SET status='CANCELLED',error='Scheduled public release cancelled by owner; video remains private.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
             # If upload has not started, clear the publication intent from its persisted payload as well.
             upload_jobs=c.execute("SELECT id,payload_json FROM jobs WHERE job_type='UPLOAD_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",("%"+published_id+"%",)).fetchall()
