@@ -700,6 +700,61 @@ class Worker(threading.Thread):
 
 
 
+    def sync_youtube_analytics(self, job):
+        """Fetch official Analytics rows and persist only the fields returned by YouTube."""
+        payload=json.loads(job["payload_json"] or "{}")
+        start_date=str(payload.get("start_date",""))[:10]
+        end_date=str(payload.get("end_date",""))[:10]
+        try:
+            datetime.strptime(start_date,"%Y-%m-%d")
+            datetime.strptime(end_date,"%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError("Analytics sync requires start_date and end_date in YYYY-MM-DD format.") from exc
+        if end_date<start_date:
+            raise ValueError("Analytics end_date cannot precede start_date.")
+        rows=fetch_video_analytics(start_date,end_date,max_results=200)
+        if not isinstance(rows,list):
+            raise RuntimeError("YouTube Analytics adapter returned an unexpected response shape.")
+        c=connect(self.db)
+        try:
+            inserted=0
+            unmatched=0
+            t=now()
+            for metrics in rows:
+                if not isinstance(metrics,dict):
+                    continue
+                video_id=str(metrics.get("video","")).strip()
+                if not video_id:
+                    continue
+                record=c.execute("SELECT id FROM published_videos WHERE youtube_video_id=?",(video_id,)).fetchone()
+                if not record:
+                    unmatched+=1
+                    continue
+                snapshot={
+                    "start_date":start_date,
+                    "end_date":end_date,
+                    "metrics":metrics,
+                    "retrieved_at":t,
+                }
+                c.execute(
+                    "INSERT INTO analytics_snapshots(id,published_video_id,captured_at,metrics_json,provider) VALUES(?,?,?,?,?)",
+                    (str(uuid4()),record["id"],t,json.dumps(snapshot,ensure_ascii=False),"youtube_analytics_api"),
+                )
+                inserted+=1
+            summary={
+                "start_date":start_date,
+                "end_date":end_date,
+                "rows_returned":len(rows),
+                "snapshots_saved":inserted,
+                "unmatched_video_rows":unmatched,
+            }
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                (json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","youtube.analytics_synced","Official YouTube Analytics data persisted without fabricating missing metrics.",{"job_id":job["id"],**summary})
+            c.commit()
+        finally:
+            c.close()
+
     def analyze_candidate_vision(self, job):
         payload=json.loads(job["payload_json"] or "{}")
         cid=payload.get("candidate_id")
