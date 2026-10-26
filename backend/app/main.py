@@ -758,8 +758,11 @@ def create_app(settings=None,start_worker=True):
     @app.get("/api/youtube/analytics/summary")
     def youtube_analytics_summary(start_date: str | None=None, end_date: str | None=None):
         yesterday=date.today()-timedelta(days=1)
-        report_end=date.fromisoformat(end_date) if end_date else yesterday
-        report_start=date.fromisoformat(start_date) if start_date else report_end-timedelta(days=6)
+        try:
+            report_end=date.fromisoformat(end_date) if end_date else yesterday
+            report_start=date.fromisoformat(start_date) if start_date else report_end-timedelta(days=6)
+        except ValueError as exc:
+            raise HTTPException(422,detail="start_date and end_date must use YYYY-MM-DD.") from exc
         if report_end>yesterday:
             raise HTTPException(422,detail="Analytics comparison only supports completed days; end_date must be yesterday or earlier.")
         if report_start>report_end:
