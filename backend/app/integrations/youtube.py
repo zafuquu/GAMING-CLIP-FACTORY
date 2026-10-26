@@ -23,6 +23,10 @@ SCOPES = [
 ]
 class YouTubeNotConfigured(RuntimeError): pass
 class UploadReconciliationRequired(RuntimeError): pass
+class ThumbnailUploadError(RuntimeError):
+    def __init__(self, message: str, retryable: bool=True):
+        super().__init__(message)
+        self.retryable=retryable
 
 def load_credentials():
     raw = keyring.get_password(SERVICE_NAME, CREDENTIALS_KEY)
@@ -184,3 +188,44 @@ def search_public_videos(query: str, days: int = 7, max_results: int = 50) -> li
             "permission_status":"UNKNOWN",
         })
     return output
+
+
+def set_custom_thumbnail(video_id: str, path: Path) -> dict:
+    """Set an explicitly generated local JPEG thumbnail on an owned YouTube video."""
+    import re
+    video_id=str(video_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{6,40}",video_id):
+        raise ValueError("YouTube video ID is not in the expected format.")
+    path=Path(path).expanduser().resolve()
+    if not path.is_file() or path.stat().st_size<=0:
+        raise FileNotFoundError("Custom thumbnail file is missing or empty.")
+    if path.suffix.lower() not in {".jpg",".jpeg"}:
+        raise ValueError("Custom thumbnail must be a JPEG image.")
+    if path.stat().st_size>50*1024*1024:
+        raise ValueError("Custom thumbnail exceeds the YouTube Data API 50 MB upload limit.")
+    with path.open("rb") as stream:
+        if stream.read(2)!=b"\xff\xd8":
+            raise ValueError("Custom thumbnail does not have a JPEG file signature.")
+    service=youtube_service()
+    media=MediaFileUpload(str(path),mimetype="image/jpeg",resumable=True,chunksize=1024*1024)
+    request=service.thumbnails().set(videoId=video_id,media_body=media)
+    try:
+        try: total_timeout=max(30,min(600,int(os.getenv("GCF_YOUTUBE_THUMBNAIL_TIMEOUT_SECONDS","180"))))
+        except (TypeError,ValueError): total_timeout=180
+        deadline=time.monotonic()+total_timeout
+        result=None
+        while result is None:
+            if time.monotonic()>=deadline:
+                raise TimeoutError(f"Thumbnail upload exceeded {total_timeout} seconds.")
+            _status,result=request.next_chunk()
+        return {"video_id":video_id,"items":result.get("items",[]) if isinstance(result,dict) else [],"uploaded":True}
+    except Exception as exc:
+        status=getattr(getattr(exc,"resp",None),"status",None)
+        retryable=status is None or status==429 or status>=500
+        if status in {400,401,403,404,413,422}:
+            retryable=False
+        raise ThumbnailUploadError(
+            f"YouTube custom thumbnail upload failed ({'HTTP '+str(status) if status else type(exc).__name__}). "
+            "Check channel eligibility, image format, and API permissions.",
+            retryable=retryable,
+        ) from exc
