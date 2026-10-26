@@ -205,3 +205,43 @@ def test_global_pause_prevents_scheduled_video_from_becoming_public(tmp_path,mon
     assert job[0]=="QUEUED" and job[1]
     assert "Global pause" in job[2]
     assert service.videos().update_calls==[]
+
+def test_opt_in_analytics_scheduler_queues_completed_date_window(tmp_path,monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    db_path=tmp_path/"analytics-scheduler.sqlite3"
+    initialize(db_path)
+    stamp=now()
+    with sqlite3.connect(db_path) as db:
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','false',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_enabled','true',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_interval_minutes','720',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_window_days','7',?)",(stamp,))
+    monkeypatch.setattr(worker_module,"youtube_oauth_available",lambda:True)
+    Worker(db_path,None,None,timeout=5).schedule_due_analytics()
+    with sqlite3.connect(db_path) as db:
+        jobs=db.execute("SELECT id,status,payload_json FROM jobs WHERE job_type='SYNC_YOUTUBE_ANALYTICS'").fetchall()
+        next_run=db.execute("SELECT value FROM settings WHERE key='youtube_analytics_schedule_next_at'").fetchone()[0]
+    assert len(jobs)==1 and jobs[0][1]=="QUEUED"
+    payload=json.loads(jobs[0][2])
+    yesterday=datetime.now(timezone.utc).date()-timedelta(days=1)
+    assert payload["end_date"]==yesterday.isoformat()
+    assert payload["start_date"]==(yesterday-timedelta(days=6)).isoformat()
+    assert payload["scheduled"] is True
+    assert datetime.fromisoformat(next_run.replace("Z","+00:00"))>datetime.now(timezone.utc)
+
+def test_analytics_scheduler_respects_global_pause_and_is_opt_in(tmp_path,monkeypatch):
+    db_path=tmp_path/"analytics-scheduler-paused.sqlite3"
+    initialize(db_path)
+    stamp=now()
+    with sqlite3.connect(db_path) as db:
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_enabled','true',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_interval_minutes','720',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_window_days','7',?)",(stamp,))
+    monkeypatch.setattr(worker_module,"youtube_oauth_available",lambda:True)
+    Worker(db_path,None,None,timeout=5).schedule_due_analytics()
+    with sqlite3.connect(db_path) as db:
+        count=db.execute("SELECT COUNT(*) FROM jobs WHERE job_type='SYNC_YOUTUBE_ANALYTICS'").fetchone()[0]
+        next_run=db.execute("SELECT value FROM settings WHERE key='youtube_analytics_schedule_next_at'").fetchone()
+    assert count==0
+    assert next_run is None
