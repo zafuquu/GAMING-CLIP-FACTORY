@@ -1,6 +1,6 @@
 """YouTube Data/Analytics API adapters. Credentials live in the OS keyring, not this repository."""
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import json
 from google.oauth2.credentials import Credentials
@@ -102,4 +102,52 @@ def fetch_video_analytics(start_date: str, end_date: str, max_results: int = 200
         item=dict(zip(headers,row))
         if item.get("video"):
             output.append(item)
+    return output
+
+def youtube_discovery_available() -> bool:
+    if os.getenv("GCF_YOUTUBE_API_KEY", "").strip():
+        return True
+    try:
+        return bool(keyring.get_password(SERVICE_NAME, CREDENTIALS_KEY))
+    except Exception:
+        return False
+
+def search_public_videos(query: str, days: int = 7, max_results: int = 50) -> list[dict]:
+    """Search public video metadata only; results always remain UNKNOWN for reuse rights."""
+    query=query.strip()
+    if not query:
+        return []
+    api_key=os.getenv("GCF_YOUTUBE_API_KEY","").strip()
+    if api_key:
+        service=build("youtube","v3",developerKey=api_key,cache_discovery=False)
+    else:
+        service=youtube_service()
+    published_after=(datetime.now(timezone.utc)-timedelta(days=max(1,min(int(days),30)))).isoformat(timespec="seconds").replace("+00:00","Z")
+    response=service.search().list(
+        part="snippet",
+        q=query,
+        type="video",
+        order="viewCount",
+        publishedAfter=published_after,
+        maxResults=min(50,max(1,int(max_results))),
+    ).execute()
+    output=[]
+    for item in response.get("items",[]) or []:
+        video_id=str((item.get("id") or {}).get("videoId",""))
+        snippet=item.get("snippet") or {}
+        if not video_id:
+            continue
+        output.append({
+            "url":"https://www.youtube.com/watch?v="+video_id,
+            "title":str(snippet.get("title",""))[:300],
+            "creator":str(snippet.get("channelTitle",""))[:200],
+            "creator_id":str(snippet.get("channelId","")),
+            "game":query[:120],
+            "provider_video_id":video_id,
+            "published_at":snippet.get("publishedAt"),
+            "description":str(snippet.get("description",""))[:1000],
+            "thumbnail_url":str(((snippet.get("thumbnails") or {}).get("medium") or {}).get("url","")),
+            "provider":"youtube_data_api",
+            "permission_status":"UNKNOWN",
+        })
     return output
