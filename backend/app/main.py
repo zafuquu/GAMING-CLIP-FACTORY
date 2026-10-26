@@ -735,64 +735,128 @@ def create_app(settings=None,start_worker=True):
 
     @app.post("/api/publishing/videos/{published_id}/reconcile")
     def reconcile_publication(published_id: str, data: ReconcileVideoIn):
-        status=connected_status()
-        if not status.get("connected"):
-            raise HTTPException(503,detail="YouTube channel is not connected: "+str(status.get("reason") or "connection check failed"))
+        channel=connected_status()
+        if not channel.get("connected"):
+            raise HTTPException(503,detail="YouTube channel is not connected: "+str(channel.get("reason") or "connection check failed"))
         service=youtube_service()
         channel_items=service.channels().list(part="id",mine=True,maxResults=1).execute().get("items",[])
         if not channel_items: raise HTTPException(503,detail="OAuth could not identify the connected channel.")
         channel_id=channel_items[0]["id"]
-        remote=service.videos().list(part="snippet,status",id=data.youtube_video_id).execute().get("items",[])
+        remote=service.videos().list(part="snippet,status,processingDetails",id=data.youtube_video_id).execute().get("items",[])
         if not remote: raise HTTPException(404,detail="That video ID is not visible to the connected channel.")
         video=remote[0]
         if video.get("snippet",{}).get("channelId")!=channel_id:
             raise HTTPException(403,detail="The supplied video does not belong to the connected YouTube channel.")
+        remote_privacy=str((video.get("status") or {}).get("privacyStatus","unknown")).lower()
+        remote_processing=str((video.get("processingDetails") or {}).get("processingStatus","unknown")).lower()
         t=now()
         with session(cfg.database_path) as c:
-            row=c.execute("""SELECT pv.*,p.status AS rights_status,p.expires_at
+            row=c.execute("""SELECT pv.*,p.status AS rights_status,p.expires_at,
+                ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size
                 FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id
-                JOIN source_permissions p ON p.source_id=m.source_id WHERE pv.id=?""",(published_id,)).fetchone()
+                JOIN source_permissions p ON p.source_id=m.source_id
+                LEFT JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id WHERE pv.id=?""",(published_id,)).fetchone()
             if not row: raise HTTPException(404,detail="Publication record not found.")
             if row["publishing_status"]!="RECONCILE_REQUIRED":
                 raise HTTPException(409,detail="This publication is not awaiting reconciliation.")
             existing=c.execute("SELECT id FROM published_videos WHERE youtube_video_id=? AND id<>?",(data.youtube_video_id,published_id)).fetchone()
             if existing: raise HTTPException(409,detail="That YouTube video ID is already assigned to another local publication.")
-            remote_privacy=video.get("status",{}).get("privacyStatus","private")
             rights_current=row["rights_status"]=="AUTHORIZED" and not expiry_passed(row["expires_at"])
             scheduled=row["scheduled_publish_at"]
-            if not rights_current and remote_privacy in {"public","unlisted"}:
-                # If the uncertain operation already made it visible, try to make it private before recording a safe state.
-                service.videos().update(part="status",body={"id":data.youtube_video_id,"status":{"privacyStatus":"private"}}).execute()
-                remote_privacy="private"
-                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_RIGHTS',youtube_video_id=?,updated_at=? WHERE id=?",(data.youtube_video_id,t,published_id))
-                c.execute("UPDATE jobs SET status='CANCELLED',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
-            elif not rights_current:
-                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_RIGHTS',youtube_video_id=?,updated_at=? WHERE id=?",(data.youtube_video_id,t,published_id))
-                c.execute("UPDATE jobs SET status='CANCELLED',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
-            elif remote_privacy=="public":
-                c.execute("UPDATE published_videos SET publishing_status='PUBLISHED',youtube_video_id=?,updated_at=? WHERE id=?",(data.youtube_video_id,t,published_id))
-            elif scheduled:
+            scheduled_dt=None
+            if scheduled:
                 try: scheduled_dt=datetime.fromisoformat(scheduled.replace("Z","+00:00"))
                 except ValueError: scheduled_dt=None
                 if scheduled_dt and scheduled_dt.tzinfo is None: scheduled_dt=scheduled_dt.replace(tzinfo=timezone.utc)
-                if scheduled_dt and scheduled_dt>datetime.now(timezone.utc) and os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true":
-                    c.execute("UPDATE published_videos SET publishing_status='SCHEDULED',youtube_video_id=?,updated_at=? WHERE id=?",(data.youtube_video_id,t,published_id))
-                    active=c.execute("SELECT id FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",("%"+published_id+"%",)).fetchone()
-                    if not active:
-                        c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at) VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)",(str(uuid4()),row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"publish_at":scheduled_dt.isoformat()}),t,t,scheduled_dt.astimezone(timezone.utc).isoformat(timespec="seconds")))
-                else:
-                    c.execute("UPDATE published_videos SET publishing_status='UPLOADED_PRIVATE',youtube_video_id=?,scheduled_publish_at=NULL,updated_at=? WHERE id=?",(data.youtube_video_id,t,published_id))
-            else:
-                c.execute("UPDATE published_videos SET publishing_status='UPLOADED_PRIVATE',youtube_video_id=?,updated_at=? WHERE id=?",(data.youtube_video_id,t,published_id))
-            for job in c.execute("SELECT id,payload_json FROM jobs WHERE status='RECONCILE_REQUIRED'").fetchall():
+            output_current=False
+            try:
+                output=Path(row["output_path"])
+                output_current=bool(row["render_qc"]=="PASS" and row["qc_status"]=="PASS" and
+                    row["render_size"] is not None and output.is_file() and output.stat().st_size==row["render_size"] and
+                    row["render_sha"] and digest(output)==row["render_sha"])
+            except (OSError,ValueError,TypeError):
+                output_current=False
+            try: expiry_dt=datetime.fromisoformat(row["expires_at"].replace("Z","+00:00")) if row["expires_at"] else None
+            except (ValueError,TypeError): expiry_dt=None
+            if expiry_dt and expiry_dt.tzinfo is None: expiry_dt=expiry_dt.replace(tzinfo=timezone.utc)
+            rights_cover_schedule=bool(rights_current and scheduled_dt and (expiry_dt is None or expiry_dt>scheduled_dt))
+            uploads_setting=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            uploads_enabled=bool(uploads_setting and uploads_setting["value"]=="true" and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true")
+            public_enabled=os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true"
+            schedule_valid=bool(scheduled_dt and rights_cover_schedule and output_current and uploads_enabled and public_enabled)
+            release_due=bool(schedule_valid and scheduled_dt<=datetime.now(timezone.utc))
+            remote_is_public=remote_privacy=="public"
+            remote_is_private=remote_privacy=="private"
+            # Treat unexpected visibility as unsafe. The only state we accept as PUBLISHED is a public video
+            # whose currently configured schedule, rights, output integrity and remote processing all agree.
+            allowed_public=bool(remote_is_public and release_due and remote_processing=="succeeded")
+            if not remote_is_private and not allowed_public:
                 try:
-                    if json.loads(job["payload_json"] or "{}").get("published_video_id")==published_id:
-                        c.execute("UPDATE jobs SET status='COMPLETED',error='Reconciled against the connected YouTube channel.',updated_at=?,finished_at=? WHERE id=?",(t,t,job["id"]))
+                    service.videos().update(part="status",body={"id":data.youtube_video_id,"status":{"privacyStatus":"private"}}).execute()
+                    remote_privacy="private"
+                except Exception as exc:
+                    raise HTTPException(502,detail=f"Could not force the reconciled video to private ({type(exc).__name__}); the publication remains RECONCILE_REQUIRED.") from exc
+            if not rights_current:
+                final_state="BLOCKED_RIGHTS"
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Rights are expired, revoked or not authorized.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,scheduled_publish_at=NULL,remote_processing_status=?,processing_checked_at=?,processing_failure_reason='Rights are expired, revoked or not authorized.',updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,remote_processing,t,t,published_id))
+            elif not output_current:
+                final_state="BLOCKED_QC"
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Rendered output no longer matches the QC-approved artifact.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,scheduled_publish_at=NULL,remote_processing_status=?,processing_checked_at=?,processing_failure_reason='Rendered output no longer matches the QC-approved artifact.',updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,remote_processing,t,t,published_id))
+            elif allowed_public:
+                final_state="PUBLISHED"
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,t,t,published_id))
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Remote publication is already complete; reconciled.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+            elif remote_processing in {"failed","terminated"}:
+                final_state="PROCESSING_FAILED" if remote_processing=="failed" else "PROCESSING_TERMINATED"
+                failure=(video.get("processingDetails") or {}).get("processingFailureReason") or remote_processing
+                c.execute("UPDATE jobs SET status='CANCELLED',error=?,updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",(str(failure),t,t,"%"+published_id+"%"))
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,remote_processing_status=?,processing_checked_at=?,processing_failure_reason=?,scheduled_publish_at=NULL,updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,remote_processing,t,str(failure),t,published_id))
+            elif remote_processing!="succeeded":
+                # Recovered private upload still processing: poll again, then schedule only after fresh checks.
+                final_state="PROCESSING"
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,remote_processing_status=?,processing_checked_at=?,processing_failure_reason='',updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,remote_processing,t,t,published_id))
+                active=c.execute("SELECT id FROM jobs WHERE job_type='CHECK_YOUTUBE_PROCESSING' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+                if not active:
+                    c.execute("INSERT INTO jobs(id,job_type,status,payload_json,created_at,updated_at) VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?,?)",
+                              (str(uuid4()),json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20}),t,t))
+            elif schedule_valid:
+                final_state="SCHEDULED"
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,t,t,published_id))
+                active=c.execute("SELECT id FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+                due=max(scheduled_dt,datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(timespec="seconds")
+                payload=json.dumps({"published_video_id":published_id,"publish_at":scheduled_dt.isoformat()})
+                if active:
+                    c.execute("UPDATE jobs SET payload_json=?,next_attempt_at=?,updated_at=?,error='' WHERE id=?",(payload,due,t,active["id"]))
+                else:
+                    c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at) VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)",
+                              (str(uuid4()),row["source_id"],row["media_id"],payload,t,t,due))
+            else:
+                # No currently authorized schedule or public policy: leave the video private and clear stale intent.
+                final_state="UPLOADED_PRIVATE"
+                c.execute("UPDATE jobs SET status='CANCELLED',error='No valid, enabled public-release policy remains.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,scheduled_publish_at=NULL,remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,t,t,published_id))
+            for pending_job in c.execute("SELECT id,payload_json FROM jobs WHERE status='RECONCILE_REQUIRED'").fetchall():
+                try:
+                    if json.loads(pending_job["payload_json"] or "{}").get("published_video_id")==published_id:
+                        c.execute("UPDATE jobs SET status='COMPLETED',error='Reconciled against the connected YouTube channel.',updated_at=?,finished_at=? WHERE id=?",(t,t,pending_job["id"]))
                 except (ValueError,TypeError):
                     continue
-            final=c.execute("SELECT publishing_status FROM published_videos WHERE id=?",(published_id,)).fetchone()["publishing_status"]
-            event(c,"WARNING","youtube.publication_reconciled","Uncertain YouTube operation reconciled against the connected channel.",{"published_video_id":published_id,"youtube_video_id":data.youtube_video_id,"privacy_status":remote_privacy,"local_status":final})
-        return {"published_video_id":published_id,"youtube_video_id":data.youtube_video_id,"remote_privacy_status":remote_privacy,"local_status":final,"reconciled":True}
+            event(c,"WARNING" if final_state not in {"PUBLISHED","SCHEDULED","UPLOADED_PRIVATE","PROCESSING"} else "INFO",
+                  "youtube.publication_reconciled","Uncertain YouTube operation reconciled against the connected channel.",
+                  {"published_video_id":published_id,"youtube_video_id":data.youtube_video_id,"remote_privacy_status":remote_privacy,
+                   "remote_processing_status":remote_processing,"local_status":final_state,"rights_current":rights_current,
+                   "output_current":output_current,"public_gate":public_enabled})
+        return {"published_video_id":published_id,"youtube_video_id":data.youtube_video_id,"remote_privacy_status":remote_privacy,
+                "remote_processing_status":remote_processing,"local_status":final_state,"reconciled":True}
 
     @app.get("/api/events")
     def events():
