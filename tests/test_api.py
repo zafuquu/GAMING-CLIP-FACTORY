@@ -78,7 +78,7 @@ def test_render_migration_is_applied(tmp_path):
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
-    assert {1,2,3,4,5}.issubset(versions)
+    assert {1,2,3,4,5,6}.issubset(versions)
     c.__exit__(None,None,None)
 
 def test_candidate_rejection_is_persisted(tmp_path):
@@ -198,4 +198,38 @@ def test_render_review_status_can_be_previewed_but_is_not_publishable(tmp_path):
     preview=c.get(f"/api/renders/{output_id}/file")
     assert preview.status_code==200
     assert preview.content==b"preview fixture bytes"
+    c.__exit__(None,None,None)
+
+def test_vision_disabled_by_default(tmp_path,monkeypatch):
+    monkeypatch.delenv("GCF_ENABLE_VISION_ANALYSIS",raising=False)
+    c,_=setup_client(tmp_path)
+    status=c.get("/api/vision/status").json()
+    assert status["enabled"] is False
+    assert status["automatic_approval"] is False
+    assert c.post("/api/candidates/unknown/analyze-vision").status_code==403
+    c.__exit__(None,None,None)
+
+def test_vision_queue_requires_rights_and_local_ffmpeg(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"vision_status",lambda:{"ready":True,"model":"test-vision","enabled":True,"automatic_approval":False})
+    root=tmp_path/"project"; data=root/"data"; media=data/"media"
+    cfg=Settings(root,data,media,data/"vision.sqlite3","/fake/ffmpeg",None,5)
+    from fastapi.testclient import TestClient
+    c=TestClient(create_app(settings=cfg,start_worker=False)); c.__enter__()
+    sid=add_source(c)
+    media.mkdir(parents=True,exist_ok=True); (media/"clip.mp4").write_bytes(b"synthetic bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
+    assert imported.status_code==409
+    authorize(c,sid)
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
+    assert imported.status_code==201
+    mid=imported.json()["id"]; cid="vision-queue-candidate"; stamp="2026-10-26T00:00:00+00:00"
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",(cid,mid,0.0,4.0,"test","fixture","NEEDS_REVIEW",stamp))
+    result=c.post(f"/api/candidates/{cid}/analyze-vision")
+    assert result.status_code==202,result.text
+    assert result.json()["automatic_approval"] is False
+    with sqlite3.connect(cfg.database_path) as db:
+        job=db.execute("SELECT job_type,status FROM jobs WHERE id=?",(result.json()["id"],)).fetchone()
+    assert tuple(job)==("ANALYZE_CANDIDATE_VISION","QUEUED")
     c.__exit__(None,None,None)
