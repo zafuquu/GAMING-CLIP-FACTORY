@@ -124,6 +124,8 @@ def vision_status() -> dict:
     loopback=host in {"127.0.0.1","localhost","::1"}
     valid=parsed.scheme=="http" and bool(parsed.hostname) and parsed.path.endswith("/api/chat")
     remote_allowed=os.getenv("GCF_VISION_ALLOW_REMOTE","").strip().lower()=="true"
+    try: max_candidates=max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","25") or "25")))
+    except (TypeError,ValueError): max_candidates=25
     return {
         "enabled":enabled,
         "model":os.getenv("GCF_VISION_MODEL","llama3.2-vision").strip() or "unknown",
@@ -131,7 +133,7 @@ def vision_status() -> dict:
         "endpoint_local":loopback,
         "remote_allowed":remote_allowed,
         "ready":bool(enabled and valid and (loopback or remote_allowed)),
-        "max_candidates_per_media":max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","25") or "25"))),
+        "max_candidates_per_media":max_candidates,
         "score_calibrated":False,
         "automatic_approval":False,
     }
