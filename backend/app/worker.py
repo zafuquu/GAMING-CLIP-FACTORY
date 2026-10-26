@@ -87,6 +87,8 @@ class Worker(threading.Thread):
                 self.discover_youtube(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
                 self.upload_youtube(job)
+            elif job["job_type"] == "GENERATE_YOUTUBE_THUMBNAIL":
+                self.generate_youtube_thumbnail(job)
             elif job["job_type"] == "SET_YOUTUBE_THUMBNAIL":
                 self.set_youtube_thumbnail(job)
             elif job["job_type"] == "CHECK_YOUTUBE_PROCESSING":
@@ -159,6 +161,14 @@ class Worker(threading.Thread):
                         published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
                         if published_id:
                             c.execute("UPDATE published_videos SET custom_thumbnail_status='FAILED',custom_thumbnail_error=?,updated_at=? WHERE id=? AND custom_thumbnail_status<>'SET_SUCCESS'",
+                                      (str(e)[:1200],t,published_id))
+                    except (ValueError,TypeError):
+                        pass
+                if status == "FAILED" and job["job_type"] == "GENERATE_YOUTUBE_THUMBNAIL":
+                    try:
+                        published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
+                        if published_id:
+                            c.execute("UPDATE published_videos SET custom_thumbnail_status='GENERATION_FAILED',custom_thumbnail_error=?,updated_at=? WHERE id=?",
                                       (str(e)[:1200],t,published_id))
                     except (ValueError,TypeError):
                         pass
@@ -702,6 +712,89 @@ class Worker(threading.Thread):
                 VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?, ?,?,?,?)""",
                 (next_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"poll_attempt":poll_attempt+1,"max_polls":max_polls}),t,t,due))
             event(c,"INFO","youtube.processing_pending","YouTube is still processing; next status check is scheduled with a bounded poll count.",{"job_id":job["id"],"next_job_id":next_id,"published_video_id":published_id,"processing_status":remote_status,"next_poll_at":due,"poll_attempt":poll_attempt+1})
+            c.commit()
+        finally:
+            c.close()
+
+    def generate_youtube_thumbnail(self, job):
+        payload=json.loads(job["payload_json"] or "{}")
+        published_id=payload.get("published_video_id")
+        if not published_id:
+            raise ValueError("Thumbnail generation job is missing published_video_id.")
+        c=connect(self.db)
+        try:
+            row=c.execute("""SELECT pv.*,ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size,
+                ro.thumbnail_path AS poster_path,m.source_id,s.game,p.status AS rights_status,p.expires_at
+                FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id
+                JOIN sources s ON s.id=m.source_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                LEFT JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
+                WHERE pv.id=?""",(published_id,)).fetchone()
+            if not row:
+                raise FileNotFoundError("Publication record not found for custom-thumbnail generation.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked custom-thumbnail generation.")
+            if row["qc_status"]!="PASS" or row["render_qc"]!="PASS":
+                raise PermissionError("Custom-thumbnail generation requires a QC-passed output.")
+            output=Path(row["output_path"])
+            if not output.is_file() or output.stat().st_size!=row["render_size"]:
+                raise PermissionError("Custom-thumbnail generation blocked: render is missing or its size changed.")
+            out_hash=hashlib.sha256()
+            with output.open("rb") as stream:
+                for block in iter(lambda:stream.read(1024*1024),b""): out_hash.update(block)
+            if out_hash.hexdigest()!=row["render_sha"]:
+                raise PermissionError("Custom-thumbnail generation blocked: render hash no longer matches QC.")
+            poster=Path(row["poster_path"]).resolve() if row["poster_path"] else None
+            if not poster or not poster.is_file():
+                raise FileNotFoundError("Source render poster frame was not generated. Render the clip again to produce a poster frame.")
+            try: poster.relative_to((self.db.parent/"outputs").resolve())
+            except ValueError: raise PermissionError("Poster path is outside the managed outputs directory.")
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                raise PermissionError("Global pause blocked custom-thumbnail generation.")
+            title=row["title"]
+            game=row["game"]
+            destination=self.db.parent/"outputs"/(published_id+"_youtube_cover.jpg")
+            old_thumb_hash=row["custom_thumbnail_sha256"]
+        finally:
+            c.close()
+        generated=generate_shorts_thumbnail(poster,title,game,destination)
+        c=connect(self.db)
+        try:
+            # Recheck rights and output identity after local image processing.
+            latest=c.execute("""SELECT pv.youtube_video_id,pv.remote_processing_status,pv.scheduled_publish_at,
+                pv.custom_thumbnail_sha256,p.status AS rights_status,p.expires_at,
+                ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size
+                FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                LEFT JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id WHERE pv.id=?""",(published_id,)).fetchone()
+            if not latest:
+                raise FileNotFoundError("Publication disappeared while custom-thumbnail generation was running.")
+            if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights expired during custom-thumbnail generation; cover was not registered.")
+            if latest["qc_status"]!="PASS" or latest["render_qc"]!="PASS" or latest["render_sha"]!=row["render_sha"] or latest["render_size"]!=row["render_size"]:
+                raise PermissionError("Render QC/hash changed during custom-thumbnail generation; cover was not registered.")
+            t=now()
+            c.execute("""UPDATE published_videos SET custom_thumbnail_path=?,custom_thumbnail_sha256=?,
+                custom_thumbnail_width=?,custom_thumbnail_height=?,custom_thumbnail_status='GENERATED',
+                custom_thumbnail_error='',updated_at=? WHERE id=?""",
+                (generated["path"],generated["sha256"],generated["width"],generated["height"],t,published_id))
+            thumb_job_id=None
+            enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            uploads_enabled=bool(enabled and enabled["value"]=="true" and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true")
+            if latest["youtube_video_id"] and latest["remote_processing_status"]=="succeeded" and uploads_enabled:
+                active=c.execute("SELECT id FROM jobs WHERE job_type='SET_YOUTUBE_THUMBNAIL' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+                if not active:
+                    thumb_job_id=str(uuid4())
+                    c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'SET_YOUTUBE_THUMBNAIL','QUEUED',?,?, ?,?,?)",
+                        (thumb_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"generated_automatically":True}),t,t))
+                    c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING' WHERE id=?",(published_id,))
+            summary={"published_video_id":published_id,"thumbnail_path":generated["path"],"sha256":generated["sha256"],
+                "width":generated["width"],"height":generated["height"],"file_size":generated["file_size"],
+                "design_version":generated["design_version"],"upload_job_id":thumb_job_id}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                (json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","youtube.thumbnail_regenerated","Custom Shorts cover generated from the QC-passed render poster.",{"job_id":job["id"],**summary})
             c.commit()
         finally:
             c.close()
