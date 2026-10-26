@@ -78,7 +78,7 @@ def upload_video(path: Path, title: str, description: str, tags: list[str], publ
         raise FileNotFoundError("Rendered output is missing or empty.")
     body = {
         "snippet":{"title":title[:100],"description":description[:5000],"tags":[x[:100] for x in tags[:30]],"categoryId":"20"},
-        "status":{"privacyStatus":"private","selfDeclaredMadeForKids":False},
+        "status":{"privacyStatus":"private"},
     }
     if publish_at is not None:
         body["status"]["publishAt"] = publish_at.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00","Z")
