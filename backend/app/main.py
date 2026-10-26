@@ -9,7 +9,7 @@ from pydantic import BaseModel, AnyHttpUrl, Field, model_validator
 from .config import Settings
 from .db import initialize, connect, session, now, event, recover_interrupted_jobs
 from .worker import Worker
-from .integrations.youtube import connected_status, youtube_service, youtube_discovery_available
+from .integrations.youtube import connected_status, youtube_service, youtube_discovery_available, youtube_oauth_available
 from .vision import vision_status
 
 class SourceIn(BaseModel):
@@ -115,6 +115,11 @@ class AnalyticsSyncIn(BaseModel):
         if end_d>date.today(): raise ValueError("end_date cannot be in the future.")
         self.start_date=start_d.isoformat(); self.end_date=end_d.isoformat()
         return self
+
+class AnalyticsScheduleIn(BaseModel):
+    enabled: bool
+    interval_minutes: int = Field(default=1440,ge=360,le=1440)
+    window_days: int = Field(default=7,ge=1,le=90)
 
 class PauseIn(BaseModel): paused: bool
 class ModeIn(BaseModel):
@@ -412,7 +417,7 @@ def create_app(settings=None,start_worker=True):
         except Exception:
             youtube_credentials_present=False
         with connect(cfg.database_path) as c:
-            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('youtube_uploads_enabled','twitch_discovery_enabled','twitch_discovery_queries','twitch_discovery_interval_minutes','twitch_discovery_next_at','youtube_discovery_enabled','youtube_discovery_queries','youtube_discovery_interval_minutes','youtube_discovery_next_at')")}
+            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('youtube_uploads_enabled','twitch_discovery_enabled','twitch_discovery_queries','twitch_discovery_interval_minutes','twitch_discovery_next_at','youtube_discovery_enabled','youtube_discovery_queries','youtube_discovery_interval_minutes','youtube_discovery_next_at','youtube_analytics_schedule_enabled','youtube_analytics_schedule_interval_minutes','youtube_analytics_schedule_window_days','youtube_analytics_schedule_next_at')")}
         try: twitch_queries=json.loads(values.get("twitch_discovery_queries","[]"))
         except (ValueError,TypeError): twitch_queries=[]
         try: youtube_queries=json.loads(values.get("youtube_discovery_queries","[]"))
@@ -421,7 +426,7 @@ def create_app(settings=None,start_worker=True):
             "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":twitch_queries,"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at")},
             "transcription":{"enabled":os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true","dependency_installed":importlib.util.find_spec("faster_whisper") is not None,"model_path_configured":bool(os.getenv("GCF_WHISPER_MODEL_PATH")),"model_download_allowed":os.getenv("GCF_WHISPER_ALLOW_MODEL_DOWNLOAD","").lower()=="true","device":os.getenv("GCF_WHISPER_DEVICE","cpu")},
             "vision":vision_status(),
-            "youtube":{"credentials_present":youtube_credentials_present,"public_discovery_configured":youtube_discovery_available(),"scheduled_discovery_enabled":values.get("youtube_discovery_enabled")=="true","discovery_queries":youtube_queries,"discovery_interval_minutes":int(values.get("youtube_discovery_interval_minutes","60")),"discovery_next_run":values.get("youtube_discovery_next_at"),"api_key_discovery_configured":bool(os.getenv("GCF_YOUTUBE_API_KEY","").strip()),"upload_gate_configured":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true","uploads_enabled":values.get("youtube_uploads_enabled")=="true","scheduled_public_gate_configured":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true","public_publishing_enabled":False},
+            "youtube":{"credentials_present":youtube_credentials_present,"oauth_ready":youtube_oauth_available(),"analytics_schedule_enabled":values.get("youtube_analytics_schedule_enabled")=="true","analytics_schedule_interval_minutes":int(values.get("youtube_analytics_schedule_interval_minutes","1440")),"analytics_schedule_window_days":int(values.get("youtube_analytics_schedule_window_days","7")),"analytics_schedule_next_at":values.get("youtube_analytics_schedule_next_at"),"public_discovery_configured":youtube_discovery_available(),"scheduled_discovery_enabled":values.get("youtube_discovery_enabled")=="true","discovery_queries":youtube_queries,"discovery_interval_minutes":int(values.get("youtube_discovery_interval_minutes","60")),"discovery_next_run":values.get("youtube_discovery_next_at"),"api_key_discovery_configured":bool(os.getenv("GCF_YOUTUBE_API_KEY","").strip()),"upload_gate_configured":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true","uploads_enabled":values.get("youtube_uploads_enabled")=="true","scheduled_public_gate_configured":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true","public_publishing_enabled":False},
         }
 
 
@@ -699,6 +704,40 @@ def create_app(settings=None,start_worker=True):
                 c.execute("UPDATE published_videos SET publishing_status='SCHEDULED' WHERE id=?",(published_id,))
             event(c,"INFO","youtube.scheduled_release_rescheduled","Scheduled public release time updated after rechecking rights and QC.",{"published_video_id":published_id,"publish_at":scheduled.isoformat(timespec="seconds")})
         return {"published_video_id":published_id,"scheduled_publish_at":scheduled.isoformat(timespec="seconds"),"rescheduled":True}
+
+    @app.get("/api/youtube/analytics/schedule")
+    def youtube_analytics_schedule_status():
+        with connect(cfg.database_path) as c:
+            values={r["key"]:r["value"] for r in c.execute(
+                "SELECT key,value FROM settings WHERE key LIKE 'youtube_analytics_schedule_%'")}
+        return {
+            "oauth_ready":youtube_oauth_available(),
+            "enabled":values.get("youtube_analytics_schedule_enabled")=="true",
+            "interval_minutes":int(values.get("youtube_analytics_schedule_interval_minutes","1440")),
+            "window_days":int(values.get("youtube_analytics_schedule_window_days","7")),
+            "next_run":values.get("youtube_analytics_schedule_next_at") or None,
+        }
+
+    @app.put("/api/youtube/analytics/schedule")
+    def set_youtube_analytics_schedule(data: AnalyticsScheduleIn):
+        if data.enabled:
+            status=connected_status()
+            if not status.get("connected"):
+                raise HTTPException(503,detail="Automatic Analytics requires a connected YouTube channel with current OAuth scopes: "+str(status.get("reason") or "channel not connected"))
+        t=now()
+        with session(cfg.database_path) as c:
+            values={
+                "youtube_analytics_schedule_enabled":"true" if data.enabled else "false",
+                "youtube_analytics_schedule_interval_minutes":str(data.interval_minutes),
+                "youtube_analytics_schedule_window_days":str(data.window_days),
+                "youtube_analytics_schedule_next_at":t if data.enabled else "",
+            }
+            for key,value in values.items():
+                c.execute("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,value,t))
+            event(c,"INFO","youtube.analytics_schedule_changed","YouTube Analytics scheduler configuration changed.",
+                  {"enabled":data.enabled,"interval_minutes":data.interval_minutes,"window_days":data.window_days})
+        return {"enabled":data.enabled,"interval_minutes":data.interval_minutes,"window_days":data.window_days,
+                "next_run":t if data.enabled else None}
 
     @app.post("/api/youtube/analytics/sync",status_code=202)
     def sync_youtube_analytics(data: AnalyticsSyncIn):
