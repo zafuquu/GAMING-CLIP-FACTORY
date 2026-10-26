@@ -122,7 +122,11 @@ class Worker(threading.Thread):
                 if status == "FAILED" and job["job_type"] == "UPLOAD_YOUTUBE":
                     try:
                         published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
-                        if published_id: c.execute("UPDATE published_videos SET publishing_status='FAILED',updated_at=? WHERE id=? AND publishing_status='UPLOADING'",(t,published_id))
+                        if published_id:
+                            current=c.execute("SELECT publishing_status FROM published_videos WHERE id=?",(published_id,)).fetchone()
+                            if current and current["publishing_status"] in {"UPLOAD_PENDING","UPLOADING"}:
+                                failure_state="BLOCKED_RIGHTS" if isinstance(e,PermissionError) and "rights" in str(e).lower() else "FAILED"
+                                c.execute("UPDATE published_videos SET publishing_status=?,updated_at=? WHERE id=? AND publishing_status IN ('UPLOAD_PENDING','UPLOADING')",(failure_state,t,published_id))
                     except (ValueError, TypeError):
                         pass
                 if status == "FAILED" and job["job_type"] == "ANALYZE_CANDIDATE_VISION":
@@ -148,7 +152,7 @@ class Worker(threading.Thread):
                     try:
                         published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
                         if published_id:
-                            c.execute("UPDATE published_videos SET publishing_status='PUBLICATION_FAILED',updated_at=? WHERE id=? AND publishing_status IN ('SCHEDULED','PROCESSING','READY_PRIVATE')")
+                            c.execute("UPDATE published_videos SET publishing_status='PUBLICATION_FAILED',updated_at=? WHERE id=? AND publishing_status IN ('SCHEDULED','PROCESSING')")
                     except (ValueError, TypeError):
                         pass
                 event(c,"ERROR","job.reconciliation_required" if status=="RECONCILE_REQUIRED" else "job.failed" if status=="FAILED" else "job.retry_queued",str(e),{"job_id":job["id"]}); c.commit()
