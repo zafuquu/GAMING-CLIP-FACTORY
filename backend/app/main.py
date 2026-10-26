@@ -79,6 +79,8 @@ class FolderWatchIn(BaseModel):
     @model_validator(mode="after")
     def normalize_relative_path(self):
         raw=self.relative_path.strip().replace(chr(92), "/")
+        if "\\x00" in raw or ":" in raw:
+            raise ValueError("relative_path cannot contain NUL characters or a drive prefix.")
         path=PurePosixPath(raw)
         if path.is_absolute() or not path.parts or any(part in {"",".",".."} for part in path.parts):
             raise ValueError("relative_path must be a safe, non-empty folder path under the configured media root.")
@@ -306,7 +308,7 @@ def create_app(settings=None,start_worker=True):
                 raise HTTPException(404,detail="Source not found.")
             if source["status"]!="AUTHORIZED" or expiry_passed(source["expires_at"]):
                 raise HTTPException(409,detail="Folder watches require a currently AUTHORIZED, unexpired source. Public metadata alone is not permission.")
-            existing=c.execute("SELECT id,relative_path,source_id FROM media_folder_watches WHERE enabled=1").fetchall()
+            existing=c.execute("SELECT id,relative_path,source_id FROM media_folder_watches").fetchall()
             new_parts=PurePosixPath(data.relative_path).parts
             for item in existing:
                 old_parts=PurePosixPath(item["relative_path"]).parts
@@ -341,6 +343,15 @@ def create_app(settings=None,start_worker=True):
             if updates.get("enabled") is True and (row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"])):
                 raise HTTPException(409,detail="Cannot enable a folder watch without current AUTHORIZED permission.")
             values={k:v for k,v in updates.items() if v is not None}
+            if not values:
+                raise HTTPException(400,detail="Provide a non-null folder-watch setting to update.")
+            if values.get("enabled") is True:
+                target_parts=PurePosixPath(row["relative_path"]).parts
+                siblings=c.execute("SELECT id,relative_path FROM media_folder_watches WHERE id<>?",(watch_id,)).fetchall()
+                for sibling in siblings:
+                    other_parts=PurePosixPath(sibling["relative_path"]).parts
+                    if target_parts[:len(other_parts)]==other_parts or other_parts[:len(target_parts)]==target_parts:
+                        raise HTTPException(409,detail="Cannot enable an overlapping folder watch. Remove or move the conflicting watch first.")
             columns={"enabled":"enabled","recursive":"recursive","auto_analyze":"auto_analyze","scan_interval_seconds":"scan_interval_seconds"}
             assignments=[columns[k]+"=?" for k in values]
             args=[int(v) if k in {"enabled","recursive","auto_analyze"} else int(v) for k,v in values.items()]
