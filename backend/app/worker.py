@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event
 from .integrations.twitch import TwitchHelix
-from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, search_public_videos
+from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .content_director import plan_candidate
 from .vision import assess_candidate_images, VisionNotConfigured
 
@@ -67,6 +67,7 @@ class Worker(threading.Thread):
         if not job:
             self.schedule_due_discovery()
             self.schedule_due_youtube_discovery()
+            self.schedule_due_analytics()
             return False
         try:
             if job["job_type"] == "ANALYZE_MEDIA":
@@ -944,6 +945,50 @@ class Worker(threading.Thread):
         finally:
             c.close()
 
+
+
+    def schedule_due_analytics(self):
+        """Queue one recent-window Analytics job on a persisted, opt-in schedule."""
+        if not youtube_oauth_available():
+            return
+        c=connect(self.db)
+        try:
+            values={r["key"]:r["value"] for r in c.execute(
+                "SELECT key,value FROM settings WHERE key IN ('global_paused','youtube_analytics_schedule_enabled','youtube_analytics_schedule_interval_minutes','youtube_analytics_schedule_window_days','youtube_analytics_schedule_next_at')")}
+            if values.get("global_paused")=="true" or values.get("youtube_analytics_schedule_enabled")!="true":
+                return
+            next_at=values.get("youtube_analytics_schedule_next_at")
+            if next_at:
+                try:
+                    due=datetime.fromisoformat(next_at.replace("Z","+00:00"))
+                    if due.tzinfo is None: due=due.replace(tzinfo=timezone.utc)
+                    if due>datetime.now(timezone.utc):
+                        return
+                except ValueError:
+                    pass
+            active=c.execute("SELECT id FROM jobs WHERE job_type='SYNC_YOUTUBE_ANALYTICS' AND status IN ('QUEUED','RUNNING') LIMIT 1").fetchone()
+            if active:
+                return
+            try: interval=max(360,min(1440,int(values.get("youtube_analytics_schedule_interval_minutes","1440"))))
+            except (TypeError,ValueError): interval=1440
+            try: window=max(1,min(90,int(values.get("youtube_analytics_schedule_window_days","7"))))
+            except (TypeError,ValueError): window=7
+            # YouTube metrics can lag. End yesterday (UTC), not the incomplete current day.
+            end_date=(datetime.now(timezone.utc).date()-__import__("datetime").timedelta(days=1))
+            start_date=end_date-__import__("datetime").timedelta(days=window-1)
+            t=now()
+            jid=str(uuid4())
+            payload={"start_date":start_date.isoformat(),"end_date":end_date.isoformat(),"scheduled":True,"window_days":window}
+            c.execute("INSERT INTO jobs(id,job_type,status,payload_json,created_at,updated_at) VALUES(?,'SYNC_YOUTUBE_ANALYTICS','QUEUED',?,?,?)",
+                      (jid,json.dumps(payload),t,t))
+            next_time=(datetime.now(timezone.utc)+__import__("datetime").timedelta(minutes=interval)).isoformat(timespec="seconds")
+            c.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_next_at',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                      (next_time,t))
+            event(c,"INFO","youtube.analytics_scheduled_job_queued","Scheduled YouTube Analytics sync queued for a completed reporting window.",
+                  {"job_id":jid,"start_date":payload["start_date"],"end_date":payload["end_date"],"next_run":next_time,"interval_minutes":interval})
+            c.commit()
+        finally:
+            c.close()
 
     def schedule_due_youtube_discovery(self):
         """Queue scheduled YouTube public-metadata search when configured and due."""
