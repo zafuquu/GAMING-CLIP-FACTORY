@@ -62,3 +62,32 @@ def test_content_plan_without_transcript_avoids_invented_event_claims():
     assert plan["hook_text"]==""
     assert "Gameplay Highlight" in plan["title"]
     assert plan["evidence"]["transcript_excerpt"]==""
+
+def test_youtube_public_search_returns_metadata_without_rights(monkeypatch):
+    from types import SimpleNamespace
+    import app.integrations.youtube as yt
+    monkeypatch.setenv("GCF_YOUTUBE_API_KEY","test-api-key")
+    expected={"items":[{"id":{"videoId":"video123"},"snippet":{"title":"A gameplay video","channelTitle":"Creator","channelId":"channel456","publishedAt":"2026-10-25T00:00:00Z","description":"Public metadata","thumbnails":{"medium":{"url":"https://example.invalid/thumb.jpg"}}}}]}
+    captured={}
+    class Request:
+        def execute(self): return expected
+    class Search:
+        def list(self,**kwargs):
+            captured.update(kwargs)
+            return Request()
+    class Service:
+        def search(self): return Search()
+    monkeypatch.setattr(yt,"build",lambda *a,**kw: Service())
+    found=yt.search_public_videos("Valorant",days=7,max_results=50)
+    assert len(found)==1
+    assert found[0]["url"]=="https://www.youtube.com/watch?v=video123"
+    assert found[0]["permission_status"]=="UNKNOWN"
+    assert found[0]["provider"]=="youtube_data_api"
+    assert captured["type"]=="video" and captured["q"]=="Valorant"
+    assert captured["maxResults"]==50
+
+def test_youtube_discovery_availability_never_needs_channel_oauth_for_api_key(monkeypatch):
+    import app.integrations.youtube as yt
+    monkeypatch.setenv("GCF_YOUTUBE_API_KEY","local-test-key")
+    monkeypatch.setattr(yt.keyring,"get_password",lambda *args: None)
+    assert yt.youtube_discovery_available() is True
