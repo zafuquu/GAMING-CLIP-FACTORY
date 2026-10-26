@@ -2,10 +2,12 @@
 import os
 from pathlib import Path
 import keyring
+from dotenv import load_dotenv
 from google_auth_oauthlib.flow import InstalledAppFlow
 from .integrations.youtube import SERVICE_NAME, CREDENTIALS_KEY, SCOPES
 
 def main():
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
     client_file = os.getenv("GCF_YOUTUBE_CLIENT_SECRETS", "").strip()
     if not client_file:
         raise SystemExit("Set GCF_YOUTUBE_CLIENT_SECRETS to the OAuth desktop client JSON downloaded from Google Cloud Console. Do not commit that file.")
