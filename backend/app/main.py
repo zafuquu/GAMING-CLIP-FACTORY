@@ -806,7 +806,93 @@ def create_app(settings=None,start_worker=True):
     @app.get("/api/publishing/videos")
     def publication_history():
         with connect(cfg.database_path) as c:
-            return [dict(r) for r in c.execute("SELECT id,output_path,title,description,qc_status,publishing_status,youtube_video_id,created_at,updated_at,scheduled_publish_at,remote_processing_status,processing_checked_at,processing_failure_reason FROM published_videos ORDER BY created_at DESC LIMIT 200")]
+            rows=[dict(r) for r in c.execute("""SELECT id,output_path,title,description,qc_status,publishing_status,youtube_video_id,
+                created_at,updated_at,scheduled_publish_at,remote_processing_status,processing_checked_at,processing_failure_reason,
+                custom_thumbnail_path,custom_thumbnail_sha256,custom_thumbnail_width,custom_thumbnail_height,
+                custom_thumbnail_status,custom_thumbnail_error,custom_thumbnail_uploaded_at
+                FROM published_videos ORDER BY created_at DESC LIMIT 200""")]
+            for row in rows:
+                row["custom_thumbnail_available"]=bool(row.get("custom_thumbnail_path") and Path(row["custom_thumbnail_path"]).is_file())
+            return rows
+
+    @app.get("/api/publishing/videos/{published_id}/thumbnail")
+    def publication_thumbnail(published_id: str):
+        with connect(cfg.database_path) as c:
+            row=c.execute("""SELECT custom_thumbnail_path,custom_thumbnail_sha256,custom_thumbnail_width,
+                custom_thumbnail_height,custom_thumbnail_status FROM published_videos WHERE id=?""",(published_id,)).fetchone()
+        if not row: raise HTTPException(404,detail="Publication record not found.")
+        if not row["custom_thumbnail_path"] or row["custom_thumbnail_status"] not in {"GENERATED","SET_PENDING","SET_SUCCESS","FAILED"}:
+            raise HTTPException(404,detail="No generated custom thumbnail is available for this publication.")
+        path=Path(row["custom_thumbnail_path"]).resolve()
+        if not path.is_file(): raise HTTPException(404,detail="Custom thumbnail file is missing.")
+        try: path.relative_to((cfg.database_path.parent/"outputs").resolve())
+        except ValueError: raise HTTPException(403,detail="Custom thumbnail is outside the managed outputs directory.")
+        if not row["custom_thumbnail_sha256"] or digest(path)!=row["custom_thumbnail_sha256"]:
+            raise HTTPException(409,detail="Custom thumbnail hash does not match its registered artifact.")
+        try:
+            from PIL import Image
+            with Image.open(path) as cover:
+                cover.verify()
+            with Image.open(path) as cover:
+                width,height=cover.size
+                if cover.format!="JPEG":
+                    raise HTTPException(409,detail="Custom thumbnail is not a JPEG image.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(409,detail=f"Custom thumbnail cannot be decoded ({type(exc).__name__}).") from exc
+        if width not in {1080,2160} or height not in {1920,3840} or height!=width*16//9:
+            raise HTTPException(409,detail="Custom thumbnail dimensions do not match a supported 9:16 profile.")
+        if row["custom_thumbnail_width"]!=width or row["custom_thumbnail_height"]!=height:
+            raise HTTPException(409,detail="Custom thumbnail dimensions differ from the stored artifact metadata.")
+        return FileResponse(path,media_type="image/jpeg",filename=path.name)
+
+    @app.post("/api/publishing/videos/{published_id}/retry-thumbnail",status_code=202)
+    def retry_custom_thumbnail(published_id: str):
+        channel=connected_status()
+        if not channel.get("connected"):
+            raise HTTPException(503,detail="YouTube channel is not connected: "+str(channel.get("reason") or "connection check failed"))
+        if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true":
+            raise HTTPException(403,detail="YouTube uploads are disabled by local environment policy.")
+        t=now(); job_id=str(uuid4())
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not enabled or enabled["value"]!="true":
+                raise HTTPException(403,detail="YouTube uploads are disabled in database settings.")
+            row=c.execute("""SELECT pv.*,p.status AS rights_status,p.expires_at,
+                ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size
+                FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                LEFT JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
+                WHERE pv.id=?""",(published_id,)).fetchone()
+            if not row: raise HTTPException(404,detail="Publication record not found.")
+            if not row["youtube_video_id"] or row["remote_processing_status"]!="succeeded":
+                raise HTTPException(409,detail="Thumbnail upload requires a recorded video ID and successful YouTube processing.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Thumbnail upload is blocked without current AUTHORIZED permission.")
+            if row["qc_status"]!="PASS" or row["render_qc"]!="PASS":
+                raise HTTPException(409,detail="Thumbnail upload requires a QC-passed render.")
+            if row["publishing_status"] in {"BLOCKED_RIGHTS","BLOCKED_QC","PROCESSING_FAILED","PROCESSING_TERMINATED"}:
+                raise HTTPException(409,detail="The publication is blocked and cannot receive a custom thumbnail.")
+            image_path=Path(row["custom_thumbnail_path"]).resolve() if row["custom_thumbnail_path"] else None
+            if not image_path or not image_path.is_file():
+                raise HTTPException(409,detail="No generated custom thumbnail exists to retry.")
+            try: image_path.relative_to((cfg.database_path.parent/"outputs").resolve())
+            except ValueError: raise HTTPException(403,detail="Custom thumbnail is outside the managed outputs directory.")
+            if not row["custom_thumbnail_sha256"] or digest(image_path)!=row["custom_thumbnail_sha256"]:
+                raise HTTPException(409,detail="Custom thumbnail hash does not match its registered artifact.")
+            active=c.execute("SELECT id FROM jobs WHERE job_type='SET_YOUTUBE_THUMBNAIL' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+            if active:
+                return {"id":active["id"],"status":"ALREADY_QUEUED"}
+            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'SET_YOUTUBE_THUMBNAIL','QUEUED',?,?, ?,?,?)",
+                (job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"owner_retry":True}),t,t))
+            c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING',custom_thumbnail_error='',updated_at=? WHERE id=?",(t,published_id))
+            event(c,"INFO","youtube.thumbnail_retry_queued","Owner queued a retry for the custom YouTube thumbnail.",{"job_id":job_id,"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"]})
+        return {"id":job_id,"status":"QUEUED","published_video_id":published_id}
 
 
     @app.post("/api/publishing/videos/{published_id}/recheck-processing",status_code=202)
