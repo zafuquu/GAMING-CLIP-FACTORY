@@ -6,6 +6,7 @@ from .db import connect, now, event
 from .integrations.twitch import TwitchHelix
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .content_director import plan_candidate
+from .render_profiles import build_video_filter, profile_warning
 from .vision import assess_candidate_images, VisionNotConfigured
 
 def expiry_passed(value):
@@ -266,7 +267,8 @@ class Worker(threading.Thread):
             caption_path=None
             captions_burned=False
             caption_filter_warning=False
-            vf="scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
+            render_profile=str(payload.get("render_profile","fit_pad"))
+            subtitle_filter=None
             if caption_rows:
                 caption_path=output.with_suffix(".srt")
                 blocks=[]
@@ -285,12 +287,17 @@ class Worker(threading.Thread):
                         filters=run([self.ffmpeg,"-hide_banner","-filters"],15)
                         if " subtitles " in filters.stdout or re.search(r"\bsubtitles\s+V->V",filters.stdout):
                             escaped=escape_filter_path(caption_path)
-                            vf+=",subtitles=filename='"+escaped+"':force_style='FontName=Arial,FontSize=24,Outline=2,Shadow=0,MarginV=110'"
+                            subtitle_filter="subtitles=filename='"+escaped+"':force_style='FontName=Arial,FontSize=24,Outline=2,Shadow=0,MarginV=180'"
                             captions_burned=True
                         else:
                             caption_filter_warning=True
-            # Preserve the complete gameplay frame in a fitted portrait canvas; no forced center crop.
-            args=[self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{start:.3f}","-i",str(source),"-t",f"{end-start:.3f}","-map","0:v:0","-map","0:a?","-vf",vf,"-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
+            # Both profiles keep the complete original game frame; blur_fill uses a darkened,
+            # blurred enlargement of that same frame to avoid black bars without cropping the foreground.
+            rendered_filter=build_video_filter(render_profile,subtitle_filter if captions_burned else None)
+            args=[self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{start:.3f}","-i",str(source),"-t",f"{end-start:.3f}"]
+            args += ["-map",rendered_filter["video_map"],"-map","0:a?"]
+            args += ["-vf" if rendered_filter["mode"]=="vf" else "-filter_complex",rendered_filter["filter"]]
+            args += ["-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
             run(args,self.timeout)
             if not output.is_file() or output.stat().st_size <= 0:
                 raise RuntimeError("FFmpeg reported success but produced no nonempty file.")
@@ -336,10 +343,10 @@ class Worker(threading.Thread):
                     h.update(block)
             warnings=list(review_flags)
             if not audio and not source_has_audio: warnings.append("Source had no audio stream.")
-            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events},"layout":"fit-and-pad-no-crop","caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events},"layout":render_profile,"render_profile":render_profile,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
-            c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t))
+            c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at,render_profile)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t,render_profile))
             candidate_state="RENDERED_QC_PASSED" if qc_status=="PASS" else "RENDERED_QC_REVIEW"
             c.execute("UPDATE candidate_moments SET state=? WHERE id=?",(candidate_state,cid))
             summary={"rendered_output_id":out_id,"output_path":str(output),"file_size":output.stat().st_size,"sha256":h.hexdigest(),"qc_status":qc_status,"qc_report":report}
