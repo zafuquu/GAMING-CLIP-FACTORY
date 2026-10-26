@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, Clapperboard, Database, FileVideo2, GitBranch,
 
 type Source = { id:string; source_url:string; platform:string; title:string; creator:string; game:string; rights_status:string }
 type Job = { id:string; job_type:string; status:string; attempt_count:number; error:string; created_at:string }
+type Candidate = { id:string; media_id:string; file_name:string; source_title:string; start_seconds:number; end_seconds:number; detector:string; explanation:string; state:string; rights_status:string }
 type Data = { counts:Record<string,number>; global_paused:boolean; operating_mode:string; recent_jobs:Job[]; recent_events:{id:string;level:string;message:string;created_at:string}[] }
 async function api<T>(url:string, init?:RequestInit):Promise<T> { const r=await fetch(url,{...init,headers:{'Content-Type':'application/json',...(init?.headers||{})}}); const b=await r.json(); if(!r.ok) throw new Error(b.detail||'API request failed'); return b }
 function Badge({value}:{value:string}) { const good=['AUTHORIZED','COMPLETED','ENFORCED','READY'].includes(value); const bad=['FAILED','REJECTED','REVOKED','DISABLED'].includes(value); return <span className={'badge '+(good?'good':bad?'bad':'')}>{value.replaceAll('_',' ')}</span> }
@@ -12,7 +13,7 @@ export default function App() {
  const [source,setSource]=useState({source_url:'',platform:'manual',title:'',creator:'',game:''})
  const [rights,setRights]=useState({license_type:'',permission_evidence:'',editing_allowed:false,commercial_use_allowed:false,reviewed_by_owner:false,attribution:'',notes:''})
  const [mediaForm,setMediaForm]=useState({source_id:'',path:''})
- const refresh=useCallback(async()=>{try{const [d,s,m,j,c,st]=await Promise.all([api<Data>('/api/dashboard'),api<Source[]>('/api/sources'),api<any[]>('/api/media'),api<Job[]>('/api/jobs'),api<any>('/api/config'),api<any>('/api/settings')]);setData(d);setSources(s);setMedia(m);setJobs(j);setConfig(c);setSettings(st);setError('');setSelected(v=>s.some(x=>x.id===v)?v:s[0]?.id||'');setMediaForm(v=>({...v,source_id:v.source_id||s.find(x=>x.rights_status==='AUTHORIZED')?.id||''}))}catch(e){setError(e instanceof Error?e.message:'API unavailable')}},[])
+ const refresh=useCallback(async()=>{try{const [d,s,m,j,cs,c,st]=await Promise.all([api<Data>('/api/dashboard'),api<Source[]>('/api/sources'),api<any[]>('/api/media'),api<Job[]>('/api/jobs'),api<Candidate[]>('/api/candidates'),api<any>('/api/config'),api<any>('/api/settings')]);setData(d);setSources(s);setMedia(m);setJobs(j);setCandidates(cs);setConfig(c);setSettings(st);setError('');setSelected(v=>s.some(x=>x.id===v)?v:s[0]?.id||'');setMediaForm(v=>({...v,source_id:v.source_id||s.find(x=>x.rights_status==='AUTHORIZED')?.id||''}))}catch(e){setError(e instanceof Error?e.message:'API unavailable')}},[])
  useEffect(()=>{void refresh();const id=window.setInterval(()=>void refresh(),6000);return()=>window.clearInterval(id)},[refresh])
  const chosen=sources.find(s=>s.id===selected)
  async function act(fn:()=>Promise<unknown>,ok:string){setBusy(true);setMessage('');try{await fn();setMessage(ok);await refresh()}catch(e){setMessage(e instanceof Error?e.message:'Operation failed')}finally{setBusy(false)}}
