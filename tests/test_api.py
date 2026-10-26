@@ -233,3 +233,70 @@ def test_vision_queue_requires_rights_and_local_ffmpeg(tmp_path,monkeypatch):
         job=db.execute("SELECT job_type,status FROM jobs WHERE id=?",(result.json()["id"],)).fetchone()
     assert tuple(job)==("ANALYZE_CANDIDATE_VISION","QUEUED")
     c.__exit__(None,None,None)
+
+def _add_scheduled_public_fixture(c,media,db_name="scheduled.mp4"):
+    sid=add_source(c); assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    source_file=media/"authorized.mp4"; source_file.write_bytes(b"authorized fake media")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"authorized.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    cfg=c.app.state.settings; data_dir=cfg.database_path.parent
+    output_dir=data_dir/"outputs"; output_dir.mkdir(parents=True,exist_ok=True)
+    output=output_dir/db_name; output.write_bytes(b"synthetic qc fixture")
+    import hashlib
+    sha=hashlib.sha256(output.read_bytes()).hexdigest()
+    cid="schedule-candidate-"+db_name.replace(".mp4","")
+    rid="schedule-render-"+db_name.replace(".mp4","")
+    pubid="schedule-pub-"+db_name.replace(".mp4","")
+    stamp=datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(cfg.database_path) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",(cid,mid,0.0,5.0,"test","scheduled fixture","RENDERED_QC_PASSED",stamp))
+        raw.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(rid,cid,mid,str(output),output.stat().st_size,sha,5.0,1080,1920,"h264","aac","PASS",'{"passed":true}',stamp))
+        future=(datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
+        raw.execute("""INSERT INTO published_videos(id,source_id,media_id,candidate_id,output_path,title,description,template_id,qc_status,publishing_status,youtube_video_id,created_at,updated_at,rendered_output_id,scheduled_publish_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)""",(pubid,sid,mid,cid,str(output),"Test scheduled publication","", "test","PASS","UPLOAD_PENDING",stamp,stamp,rid,future))
+    return pubid,rid,future
+
+def test_cancel_scheduled_public_release_clears_queued_upload_intent(tmp_path):
+    c,media=setup_client(tmp_path)
+    pubid,_,future=_add_scheduled_public_fixture(c,media)
+    jobid="queued-scheduled-upload"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) SELECT ?, 'UPLOAD_YOUTUBE','QUEUED',source_id,media_id,?,created_at,updated_at FROM published_videos WHERE id=?",
+                    (jobid,json.dumps({"published_video_id":pubid,"publish_at":future,"publication_mode":"scheduled_public","tags":[]}),pubid))
+        raw.execute("INSERT INTO jobs(id,job_type,status,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    ("queued-public-release","PUBLISH_YOUTUBE","QUEUED",json.dumps({"published_video_id":pubid,"publish_at":future}),datetime.now(timezone.utc).isoformat(),datetime.now(timezone.utc).isoformat()))
+    response=c.post(f"/api/publishing/videos/{pubid}/cancel-public-release")
+    assert response.status_code==200,response.text
+    assert response.json()["public_release_cancelled"] is True
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        schedule=raw.execute("SELECT scheduled_publish_at,publishing_status FROM published_videos WHERE id=?",(pubid,)).fetchone()
+        upload=json.loads(raw.execute("SELECT payload_json FROM jobs WHERE id=?",(jobid,)).fetchone()[0])
+        pub_job=raw.execute("SELECT status FROM jobs WHERE id='queued-public-release'").fetchone()[0]
+    assert schedule==(None,"UPLOAD_PENDING")
+    assert upload["publish_at"] is None
+    assert upload["publication_mode"]=="private"
+    assert pub_job=="CANCELLED"
+    c.__exit__(None,None,None)
+
+def test_reschedule_public_release_updates_upload_payload_and_checks_rights(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    c,media=setup_client(tmp_path)
+    pubid,rid,previous=_add_scheduled_public_fixture(c,media,"reschedule.mp4")
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_uploads_enabled','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(datetime.now(timezone.utc).isoformat(),))
+        raw.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) SELECT ?, 'UPLOAD_YOUTUBE','QUEUED',source_id,media_id,?,?,? FROM published_videos WHERE id=?",
+                    ("reschedule-upload",json.dumps({"published_video_id":pubid,"publish_at":previous,"publication_mode":"scheduled_public","tags":[]}),datetime.now(timezone.utc).isoformat(),datetime.now(timezone.utc).isoformat(),pubid))
+    next_time=(datetime.now(timezone.utc)+timedelta(days=2)).isoformat()
+    response=c.post(f"/api/publishing/videos/{pubid}/reschedule",json={"publish_at":next_time})
+    assert response.status_code==200,response.text
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        db_schedule=raw.execute("SELECT scheduled_publish_at FROM published_videos WHERE id=?",(pubid,)).fetchone()[0]
+        upload=json.loads(raw.execute("SELECT payload_json FROM jobs WHERE id='reschedule-upload'").fetchone()[0])
+    assert datetime.fromisoformat(db_schedule.replace("Z","+00:00"))>datetime.now(timezone.utc)
+    assert upload["publication_mode"]=="scheduled_public"
+    assert upload["publish_at"] is not None
+    c.__exit__(None,None,None)
