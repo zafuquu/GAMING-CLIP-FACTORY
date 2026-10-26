@@ -11,10 +11,11 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - Analysis: FFprobe metadata and FFmpeg scene-change candidate windows. These are heuristics, not a semantic gameplay-event detector.
 - Optional local speech recognition: Faster-Whisper can generate transcripts and timed phrase segments. A deterministic transcript-grounded content director drafts format/title/description/tags and caption timing; it does not invent narration.
 - Optional local vision assessment: Ollama-compatible vision model samples three frames per candidate and returns structured event/evidence estimates. Scores are uncalibrated and never auto-approve candidates. It is disabled by default and blocks remote endpoints unless explicitly overridden.
-- Candidate review: dashboard approval/rejection flow with optional transcript/vision evidence.
+- Candidate review: dashboard approval/rejection flow with transcript/vision evidence and a caption editor for relative timing/text corrections before rendering.
 - Local rendering: approved cuts render as 1080x1920 H.264/AAC MP4 in fit-and-pad layout to preserve the full gameplay frame. Timed caption sidecars are saved and may be burned in if the FFmpeg subtitle filter exists.
 - Automated QC: probe/decode, dimensions, duration, codecs/audio and black/frozen-frame heuristics. Issues become REVIEW, not PASS. Only PASS outputs are publishable.
 - YouTube service: OAuth Desktop flow uses the OS keyring, with a scope-version marker requiring reconnect if scopes change. Private resumable upload, processing-status polling/recheck, upload history, uncertain-outcome reconciliation and Analytics API snapshots exist behind local configuration.
+- Analytics feedback: same-window comparisons group observed results by game and content format. A group is highlighted only with at least three comparable videos; smaller samples are labeled insufficient and no metrics are fabricated.
 - Scheduled release controls: public release is separately gated, stages video as private, rechecks rights/output hash/size/QC and live processing state before changing it to public; owners can cancel or reschedule release. Global pause defers outbound YouTube operations.
 - Idempotency: key SQLite transitions use immediate write locks, and a partial unique index allows only one publication record per rendered output.
 
@@ -22,7 +23,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 - Public metadata search does not supply legal permission to republish footage. Owner must provide/prove rights or provide authorized local files; current providers do not download source media.
 - Scene-change and sparse-frame vision estimates do not reliably detect gameplay events across games. Vision scores are subjective and uncalibrated; game-specific accuracy needs labeled, rights-cleared validation clips.
-- Caption correction UI, high-quality narration, thumbnail generation, richer template/composition system, safe-area checks and advanced repair/quarantine remain incomplete.
+- Transcript correction/review, high-quality narration, thumbnail generation, richer template/composition system, safe-area checks and advanced repair/quarantine remain incomplete.
 - Remotion is not integrated; compatibility and licensing need review.
 - No real provider credentials, creator permission evidence or YouTube channel has been validated end-to-end in this repository.
 - The user's own Windows installation/FFmpeg build still needs a local acceptance run; CI on hosted runners is not a substitute.
@@ -73,6 +74,7 @@ Enable YouTube Data API v3 in Google Cloud and set GCF_YOUTUBE_API_KEY for publi
 3. Set GCF_YOUTUBE_CLIENT_SECRETS to its path.
 4. From backend with the project venv active, run python -m app.youtube_auth and authorize the intended channel in the browser.
 5. Tokens are held in the OS keyring. If the required scopes changed, reconnect by running the OAuth command again.
+6. Use Automatic measurement to opt in to recurring Analytics sync (minimum interval 6 hours) and select a completed-day reporting window. The game/format report compares only exact matching date windows and requires at least three videos before highlighting a cohort.
 6. Test private upload, processing polls and reconciliation before setting GCF_ENABLE_YOUTUBE_UPLOADS=true and explicitly enabling uploads in the dashboard.
 7. Keep GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING=false until supervised acceptance passes. This gate is independent of uploads.
 
@@ -106,7 +108,7 @@ Frontend:
     npm install
     npm run build
 
-Latest observed CI success: commit 4d484d65 passed Windows/Linux backend matrix (Python 3.11/3.12) and frontend build. Windows/Python 3.11 reported 51 passed, 2 skipped. This does not prove live provider credentials or the local machine.
+Latest full code CI success: commit f6682f3 passed all five jobs in [GitHub Actions run 40356307571](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40356307571). Ubuntu/Python 3.12 reported 62 passed, including synthetic FFmpeg rendering/QC; Windows/Linux Python 3.11/3.12 and the frontend build passed. This does not prove live provider credentials, source rights or the target machine.
 
 ## Important limitations
 
