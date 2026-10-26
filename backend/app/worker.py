@@ -835,6 +835,19 @@ class Worker(threading.Thread):
                 raise PermissionError("Custom thumbnail hash does not match its stored artifact.")
             if row["custom_thumbnail_width"] not in {1080,2160} or row["custom_thumbnail_height"] not in {1920,3840}:
                 raise PermissionError("Custom thumbnail dimensions are not a supported vertical profile.")
+            try:
+                from PIL import Image
+                with Image.open(image_path) as cover:
+                    cover.verify()
+                with Image.open(image_path) as cover:
+                    actual_size=cover.size
+                    actual_format=cover.format
+            except Exception as exc:
+                raise PermissionError(f"Custom thumbnail failed image-integrity verification ({type(exc).__name__}).") from exc
+            if actual_format!="JPEG" or actual_size!=(row["custom_thumbnail_width"],row["custom_thumbnail_height"]):
+                raise PermissionError("Custom thumbnail file format/dimensions disagree with its registered metadata.")
+            if actual_size[1] != actual_size[0]*16//9:
+                raise PermissionError("Custom thumbnail must use a 9:16 vertical aspect ratio.")
             # Recheck mutable gates immediately before the external upload.
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if pause and pause["value"]=="true":
