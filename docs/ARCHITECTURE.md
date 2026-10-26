@@ -4,36 +4,37 @@
 
 - React/TypeScript/Vite dashboard reads API data; SQLite is authoritative.
 - FastAPI binds to 127.0.0.1:8765 by default.
-- SQLite stores source rights, media assets, candidate moments, jobs, transcripts, content plans, caption segments, rendered outputs, publishing records, analytics snapshots, schedules/settings, discovery runs and system events.
-- Numbered SQL migrations are applied incrementally.
-- A single background worker consumes persistent jobs. FFmpeg/FFprobe subprocesses use argument lists, shell=False, captured output and finite timeouts.
-- Restart recovery requeues interrupted local processing, but uncertain YouTube upload/publication is marked RECONCILE_REQUIRED instead of blindly retried.
+- SQLite stores source rights, media assets, candidates, jobs, transcripts, content plans, captions, rendered outputs, publishing records, Analytics snapshots, settings, schedules, discovery runs and system events.
+- Incremental numbered migrations 001–007 include a partial unique index so a render cannot have multiple publication records.
+- A single worker consumes persistent jobs. Critical queue-admission/publication transitions use immediate SQLite write locks; FFmpeg subprocesses use argument arrays, shell=False and finite timeouts.
+- Restart recovery requeues local processing but marks uncertain external YouTube operations RECONCILE_REQUIRED instead of blindly retrying.
 
 ## Source lifecycle
 
-Provider discovery returns public metadata only. Twitch Helix and YouTube Data API integrations do not download videos or grant reuse rights. Source permission defaults to UNKNOWN. A source enters the production path only after license/permission evidence, editing and commercial-use flags, owner review and expiration checks pass. These checks repeat during import, analysis, review, render, upload and scheduled public release.
+Twitch Helix and YouTube Data API return public metadata only; they do not download videos or grant reuse rights. New source permissions default to UNKNOWN. Source media enters production only after license/grant evidence, editing and commercial-use flags, owner review and expiration checks pass. These checks repeat during intake, analysis, candidate decision, render, upload and public release.
 
 ## Media lifecycle
 
-1. Register authorized local media within the managed media root; record SHA-256.
+1. Register authorized local media under the managed media root and record SHA-256.
 2. FFprobe extracts technical metadata.
-3. FFmpeg scene-change analysis creates candidate intervals marked NEEDS_REVIEW. Scene changes are heuristics rather than evidence of gameplay meaning.
-4. Optional local Faster-Whisper produces speech transcript, timestamps and confidence when explicitly enabled.
-5. Deterministic content planning uses source metadata and transcript evidence to propose a format/title/description/tags. It does not invent narration or assert unsupported events.
-6. Owner approves or rejects a candidate.
-7. Worker cuts the approved interval and places the full frame on a 1080×1920 fit-and-pad canvas. Caption timing can be saved to SRT and burned in if the FFmpeg subtitle filter is available.
-8. FFprobe and an FFmpeg decode/defect scan create a QC report. Warnings produce REVIEW; only PASS is eligible for publishing.
-9. Outputs are hashed, stored under the managed outputs directory and visible for browser preview.
+3. FFmpeg scene-change analysis creates candidate intervals marked NEEDS_REVIEW. Scene changes are heuristics, not evidence of gameplay meaning.
+4. Optional Faster-Whisper creates local speech transcripts and timestamps.
+5. Deterministic content planning uses source metadata/transcript evidence; it does not invent narration or assert unsupported gameplay events.
+6. Optional local vision analysis samples three frames and stores structured visible-event/evidence estimates and an uncalibrated score. It never auto-approves.
+7. Owner approves/rejects candidate.
+8. Worker creates fit-and-pad 1080x1920 render, optionally burns timed captions and persists SRT when available.
+9. FFprobe/FFmpeg defect scans create QC: warnings produce REVIEW, only PASS qualifies for publishing.
+10. Outputs are hashed, stored and previewable in the dashboard.
 
 ## Provider and YouTube lifecycle
 
-- Scheduled Twitch and YouTube discovery jobs upsert metadata, record discovery history and keep all source rights UNKNOWN.
-- Optional YouTube public metadata search uses GCF_YOUTUBE_API_KEY; uploads require a separate OAuth Desktop flow and a connected channel.
-- OAuth tokens are stored in the operating-system keyring.
-- Uploads start private. An upload job requires a QC-passed output, matching hash/size and currently authorized permission. Uncertain upload outcome requires reconciliation.
-- If public scheduling is separately enabled, the upload worker stages the video as private and queues a future worker job. At the scheduled time, the worker rechecks rights, QC, file hash and configuration before making the remote video public.
-- Analytics is fetched via the official YouTube Analytics API and stored as timestamped snapshots; unavailable values are not fabricated.
+- Scheduled Twitch/YouTube metadata discovery deduplicates results and keeps rights UNKNOWN.
+- YouTube OAuth Desktop flow stores tokens in OS keyring. A scope-version marker requires the owner to reconnect if configured scopes change.
+- Uploads start private and require QC PASS, current rights and matching output hash/size. YouTube processing status is polled before the result is treated as ready; timeouts can be explicitly rechecked.
+- If public scheduling is separately enabled, the worker rechecks source rights, expiration relative to schedule, output QC/hash, release time, configuration and live remote processing/privacy before changing remote state.
+- Public release can be canceled/rescheduled; unexpected public state on reconciliation is forced private unless current policy/rights/output state support it.
+- Analytics comes from the official API and is stored as timestamped snapshots; missing values are not fabricated.
 
 ## Not yet provided
 
-Semantic visual event recognition, a learned highlight ranker, narration, thumbnail generation, Remotion compositions, extensive repair workflows, automatic source media acquisition, multi-worker scheduling and live credential/channel acceptance. No publisher treats a public URL as permission to reuse footage.
+Calibrated semantic gameplay-event recognition, verified game-specific ranking, AI narration, thumbnails, Remotion compositions, robust template diversity, automatic media acquisition, multi-worker scheduling and live credential/channel acceptance remain future work. Public URLs never imply permission to reuse footage.
