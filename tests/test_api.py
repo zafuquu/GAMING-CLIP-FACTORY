@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import sqlite3
 import json
+import pytest
 import sys
 from fastapi.testclient import TestClient
 ROOT=Path(__file__).resolve().parents[1]
@@ -79,7 +80,7 @@ def test_render_migration_is_applied(tmp_path):
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
-    assert {1,2,3,4,5,6}.issubset(versions)
+    assert {1,2,3,4,5,6,7}.issubset(versions)
     c.__exit__(None,None,None)
 
 def test_candidate_rejection_is_persisted(tmp_path):
@@ -340,4 +341,14 @@ def test_reconcile_public_video_is_forced_private_when_public_gate_is_disabled(t
     with sqlite3.connect(c.app.state.settings.database_path) as raw:
         row=raw.execute("SELECT publishing_status,youtube_video_id,scheduled_publish_at FROM published_videos WHERE id=?",(pubid,)).fetchone()
     assert row==("UPLOADED_PRIVATE","yt-id-public",None)
+    c.__exit__(None,None,None)
+
+def test_rendered_output_can_have_only_one_publication_record(tmp_path):
+    c,media=setup_client(tmp_path)
+    pubid,rid,future=_add_scheduled_public_fixture(c,media,"unique-output.mp4")
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        with pytest.raises(sqlite3.IntegrityError):
+            raw.execute("""INSERT INTO published_videos(id,source_id,media_id,candidate_id,output_path,title,description,template_id,qc_status,publishing_status,created_at,updated_at,rendered_output_id)
+                SELECT 'duplicate-output-pub',source_id,media_id,candidate_id,output_path,'Duplicate','','test','PASS','UPLOAD_PENDING',created_at,updated_at,rendered_output_id
+                FROM published_videos WHERE id=?""",(pubid,))
     c.__exit__(None,None,None)
