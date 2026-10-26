@@ -12,10 +12,13 @@ This roadmap states the actual capability boundaries and remaining work for Gami
 - Twitch Helix metadata discovery with scheduled searches; YouTube Data API public metadata search with a local API key or connected OAuth. Results always remain UNKNOWN for reuse rights and no source media is downloaded.
 - FFprobe metadata and FFmpeg scene-change candidate windows, marked for human review.
 - Optional local Faster-Whisper transcript/phrase timestamps; deterministic transcript-grounded draft plans and timed caption segments.
+- Optional local Ollama-compatible vision assessment: samples up to three frames, returns structured visible-event/evidence estimates and adds a documented, uncalibrated vision score. Local-only by default; candidates still require human review.
 - Candidate approve/reject UI, FFmpeg portrait cut/layout, optional caption burn-in/SRT sidecar, output registry and hashes.
 - QC checks for probe/decode, dimensions, duration, codecs/audio, black-frame/frozen-frame heuristics. REVIEW results are visible for preview but not publishable; only PASS is eligible for upload.
 - Private YouTube resumable upload adapter, OAuth stored in OS keyring, upload history and uncertain-outcome reconciliation; Analytics API snapshots are supported.
-- A separately gated public-release worker stages uploads as private then checks rights, output hash and QC immediately before making a video public at its scheduled time.
+- YouTube processing-status polling before a video is treated as ready; processing failures/timeouts are persisted and no public release is scheduled on failed processing.
+- A separately gated public-release worker stages uploads as private then rechecks current rights, output hash/size, QC, live remote processing state and schedule immediately before making a video public.
+- Owner controls to cancel/reschedule queued public releases; cancellation clears queued public intent, and rescheduling checks rights expiry and output integrity.
 - Global pause, bounded subprocess timeouts, retry/backoff, interrupted-job recovery and a dashboard for status/control.
 - CI covering Windows/Linux Python 3.11/3.12, FFmpeg render integration on Linux and frontend build.
 
@@ -26,6 +29,7 @@ This roadmap states the actual capability boundaries and remaining work for Gami
 - YouTube channel upload/analytics: create OAuth Desktop Client in Google Cloud Console, set GCF_YOUTUBE_CLIENT_SECRETS to a file path outside repo, run python -m app.youtube_auth from backend, then test the real channel. Uploads require GCF_ENABLE_YOUTUBE_UPLOADS=true and an explicit dashboard toggle.
 - Public scheduled release is a separate high-risk gate: GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING=true, only after private upload tests and end-to-end rights/QC acceptance.
 - Optional transcription: install scripts/setup-ml-windows.bat; set GCF_ENABLE_TRANSCRIPTION=true; provide a local model path or explicitly allow model download.
+- Optional vision: install Ollama and an appropriate locally supported vision model, set GCF_ENABLE_VISION_ANALYSIS=true, and verify available VRAM/RAM. Model estimates are not calibrated and do not confirm gameplay events.
 - Every source: provide/document actual rights that allow editing and commercial use; provider metadata does not grant those rights.
 - Windows: verify the user's exact FFmpeg/FFprobe build and local end-to-end rendering (the previous manual validator failed while processing stderr).
 
@@ -33,7 +37,7 @@ This roadmap states the actual capability boundaries and remaining work for Gami
 
 Exit criteria:
 - Latest CI run green on all Windows/Linux backend jobs, frontend build and integration tests.
-- Add integration tests for upload reconciliation, schedule rights expiry, QC review/preview, transcription persistence and public-release cancellation.
+- Add integration tests for upload reconciliation, schedule rights expiry, QC review/preview, transcription persistence, vision frame sampling/ranking, scheduled-release cancellation/reschedule and public processing-state transitions.
 - Verify all database connection/transaction paths, job state transitions and startup-recovery cases.
 - Correct quota-aware retry policy and record API failure categories without logging credentials.
 - Run the real Windows FFmpeg acceptance suite using authorized synthetic media, including subtitle rendering and QC review paths.
@@ -53,11 +57,12 @@ Build:
 
 ## Phase 3 — Genuine game-aware highlight analysis
 
-Scene-change detection alone is not enough. Implement providers through explicit model adapters:
-- sample frames around candidate intervals
+Scene-change detection alone is not enough. A local structured vision adapter is now present, but it is only a sparse-frame model estimate; it is not calibrated, does not validate motion, and can misunderstand HUDs or game-specific cues. Implement providers through explicit model adapters:
+- sample frames around candidate intervals (currently three samples for the local adapter)
 - optional audio/speech signals
 - game-specific visual indicators where supported
 - candidate evidence and confidence
+- validate against labeled rights-cleared clips per game, score precision/recall and confidence calibration before using model scores for production ranking
 - ranking component traceability
 - duplicate / near-duplicate clip detection
 - minimum context and dead-time controls
