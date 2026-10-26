@@ -755,6 +755,93 @@ def create_app(settings=None,start_worker=True):
             event(c,"INFO","youtube.analytics_queued","YouTube Analytics sync queued.",{"job_id":jid,"start_date":data.start_date,"end_date":data.end_date})
         return {"id":jid,"status":"QUEUED","start_date":data.start_date,"end_date":data.end_date}
 
+    @app.get("/api/youtube/analytics/summary")
+    def youtube_analytics_summary(start_date: str | None=None, end_date: str | None=None):
+        yesterday=date.today()-timedelta(days=1)
+        report_end=date.fromisoformat(end_date) if end_date else yesterday
+        report_start=date.fromisoformat(start_date) if start_date else report_end-timedelta(days=6)
+        if report_end>yesterday:
+            raise HTTPException(422,detail="Analytics comparison only supports completed days; end_date must be yesterday or earlier.")
+        if report_start>report_end:
+            raise HTTPException(422,detail="start_date cannot be after end_date.")
+        with connect(cfg.database_path) as c:
+            rows=[dict(r) for r in c.execute("""SELECT a.id,a.published_video_id,a.captured_at,a.metrics_json,
+                p.title,p.youtube_video_id,COALESCE(s.game,'Unknown game') AS game,
+                COALESCE(cp.chosen_format,'unknown') AS content_format
+                FROM analytics_snapshots a
+                JOIN published_videos p ON p.id=a.published_video_id
+                LEFT JOIN sources s ON s.id=p.source_id
+                LEFT JOIN content_plans cp ON cp.candidate_id=p.candidate_id
+                ORDER BY a.captured_at DESC""")]
+        latest_by_video={}
+        for row in rows:
+            pid=row["published_video_id"]
+            if pid in latest_by_video:
+                continue
+            try: snapshot=json.loads(row["metrics_json"] or "{}")
+            except (ValueError,TypeError): continue
+            if snapshot.get("start_date")!=report_start.isoformat() or snapshot.get("end_date")!=report_end.isoformat():
+                continue
+            metrics=snapshot.get("metrics")
+            if not isinstance(metrics,dict):
+                continue
+            row["metrics"]=metrics
+            latest_by_video[pid]=row
+        metric_sums=("views","likes","comments","shares","subscribersGained","subscribersLost","estimatedMinutesWatched")
+        metric_averages=("averageViewDuration","averageViewPercentage")
+        grouped={}
+        video_rows=[]
+        def numeric(value):
+            if isinstance(value,bool) or value is None: return None
+            try: n=float(value)
+            except (TypeError,ValueError): return None
+            return n if n>=0 else None
+        for row in latest_by_video.values():
+            metrics=row["metrics"]
+            game=str(row.get("game") or "Unknown game")
+            content_format=str(row.get("content_format") or "unknown")
+            item={"published_video_id":row["published_video_id"],"youtube_video_id":row["youtube_video_id"],
+                  "title":row["title"],"game":game,"format":content_format,"captured_at":row["captured_at"]}
+            for key in (*metric_sums,*metric_averages):
+                if key in metrics:
+                    item[key]=numeric(metrics.get(key))
+            video_rows.append(item)
+            group=grouped.setdefault((game,content_format),{"game":game,"format":content_format,"sample_size":0,"_sum":{},"_avg":{}})
+            group["sample_size"]+=1
+            for key in metric_sums:
+                n=numeric(metrics.get(key))
+                if n is not None: group["_sum"].setdefault(key,[]).append(n)
+            for key in metric_averages:
+                n=numeric(metrics.get(key))
+                if n is not None: group["_avg"].setdefault(key,[]).append(n)
+        groups=[]
+        for group in grouped.values():
+            result={"game":group["game"],"format":group["format"],"sample_size":group["sample_size"]}
+            for key,values in group["_sum"].items():
+                total=sum(values)
+                result[key+"_total"]=int(total) if key not in {"estimatedMinutesWatched"} else round(total,2)
+                result[key+"_reported_videos"]=len(values)
+            for key,values in group["_avg"].items():
+                result[key+"_mean"]=round(sum(values)/len(values),2) if values else None
+                result[key+"_reported_videos"]=len(values)
+            result["minimum_sample_met"]=group["sample_size"]>=3
+            groups.append(result)
+        groups.sort(key=lambda g:(-(g.get("averageViewPercentage_mean") if g.get("averageViewPercentage_mean") is not None and g["minimum_sample_met"] else -1),-g["sample_size"],g["game"],g["format"]))
+        supported=[g for g in groups if g["minimum_sample_met"] and g.get("averageViewPercentage_mean") is not None]
+        best=supported[0] if supported else None
+        return {
+            "window":{"start_date":report_start.isoformat(),"end_date":report_end.isoformat(),"days":(report_end-report_start).days+1},
+            "matched_video_count":len(video_rows),
+            "groups":groups,
+            "best_supported_group":best,
+            "recommendation_status":"COMPARABLE_SAMPLE" if best else "INSUFFICIENT_SAMPLE",
+            "recommendation_note":(
+                "Highest mean average-view percentage among same-window groups with at least three videos. This is descriptive, not proof of causality."
+                if best else "No game/format group has at least three comparable videos with average-view percentage data in this exact reporting window."
+            ),
+            "videos":video_rows[:100],
+        }
+
     @app.get("/api/youtube/analytics")
     def youtube_analytics():
         with connect(cfg.database_path) as c:
