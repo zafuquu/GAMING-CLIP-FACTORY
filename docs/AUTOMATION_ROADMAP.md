@@ -1,142 +1,49 @@
 # Automation Roadmap
 
-This roadmap states the actual capability boundaries and remaining work for Gaming Clip Factory AI. Fully automated operation means the pipeline can run with owner-approved sources, valid provider credentials and a connected channel. It never means bypassing copyright, provider terms, API quotas, authentication, or review of ambiguous permissions.
+This roadmap separates implemented code from owner configuration and live acceptance. Fully automated operation requires verified source rights, provider credentials and a connected YouTube channel. It must never bypass platform controls or permission requirements.
 
-## Current release: local production and integration alpha
+## Current alpha: implemented in code
 
-### Implemented in code
+- FastAPI and React dashboard, SQLite migrations 001–007, persistent worker jobs and restart recovery.
+- Rights registry and repeat expiry/revocation checks; discovered sources remain UNKNOWN.
+- Scheduled Twitch Helix and YouTube Data API metadata-only discovery; providers do not download footage.
+- FFmpeg scene-change candidates, optional Faster-Whisper transcripts, timed captions and transcript-grounded draft metadata.
+- Optional local Ollama vision assessment using up to three sampled frames; structured evidence and uncalibrated scores, with mandatory human review.
+- Candidate review/approval, vertical rendering, SRT caption sidecar/burn-in, output registry and QC (PASS vs REVIEW).
+- YouTube Desktop OAuth stored in keyring with scope-version validation, private upload, processing polling/recheck, reconciliation, Analytics API snapshots and a separate public-release environment gate.
+- Public release starts from a private upload, rechecks current rights, output hash/size/QC and live remote processing state; owners can cancel or reschedule.
+- Global pause checked at queue admission and immediately before outbound YouTube mutations. Queue transitions use immediate SQLite write locks, and one output can have only one publication record by database uniqueness.
+- Current CI passed on commit 4d484d65 across Windows/Linux Python 3.11/3.12 and frontend build.
 
-- Local FastAPI API, SQLite persistence, numbered migrations and background job queue.
-- Rights registry with evidence, editing/commercial-use flags, owner review and expiry checks.
-- Safe local media registration with hashing and duplicate prevention.
-- Twitch Helix metadata discovery with scheduled searches; YouTube Data API public metadata search with a local API key or connected OAuth. Results always remain UNKNOWN for reuse rights and no source media is downloaded.
-- FFprobe metadata and FFmpeg scene-change candidate windows, marked for human review.
-- Optional local Faster-Whisper transcript/phrase timestamps; deterministic transcript-grounded draft plans and timed caption segments.
-- Optional local Ollama-compatible vision assessment: samples up to three frames, returns structured visible-event/evidence estimates and adds a documented, uncalibrated vision score. Local-only by default; candidates still require human review.
-- Candidate approve/reject UI, FFmpeg portrait cut/layout, optional caption burn-in/SRT sidecar, output registry and hashes.
-- QC checks for probe/decode, dimensions, duration, codecs/audio, black-frame/frozen-frame heuristics. REVIEW results are visible for preview but not publishable; only PASS is eligible for upload.
-- Private YouTube resumable upload adapter, OAuth stored in OS keyring, upload history and uncertain-outcome reconciliation; Analytics API snapshots are supported.
-- YouTube processing-status polling before a video is treated as ready; processing failures/timeouts are persisted and no public release is scheduled on failed processing.
-- A separately gated public-release worker stages uploads as private then rechecks current rights, output hash/size, QC, live remote processing state and schedule immediately before making a video public.
-- Owner controls to cancel/reschedule queued public releases; cancellation clears queued public intent, and rescheduling checks rights expiry and output integrity.
-- Global pause, bounded subprocess timeouts, retry/backoff, interrupted-job recovery and a dashboard for status/control.
-- CI covering Windows/Linux Python 3.11/3.12, FFmpeg render integration on Linux and frontend build.
+## Configuration required
 
-### Configuration required
+- Twitch developer app credentials for Twitch metadata search.
+- YouTube Data API v3 key for public metadata search and Google OAuth Desktop client for upload/processing/Analytics.
+- Channel owner must authenticate. Scope-version mismatches require reconnecting with the local OAuth command.
+- Valid, documented permission for each source, including intended editing and commercial reuse.
+- Optional local Faster-Whisper model and optional Ollama vision model; no model downloads or inference happen unless configured.
+- Target Windows FFmpeg/FFprobe acceptance and actual private-upload/reconciliation test using the intended YouTube channel.
 
-- Twitch: create an app in the Twitch developer console; set GCF_TWITCH_CLIENT_ID and GCF_TWITCH_CLIENT_SECRET in local .env.
-- YouTube metadata search: set GCF_YOUTUBE_API_KEY in local .env or connect OAuth.
-- YouTube channel upload/analytics: create OAuth Desktop Client in Google Cloud Console, set GCF_YOUTUBE_CLIENT_SECRETS to a file path outside repo, run python -m app.youtube_auth from backend, then test the real channel. Uploads require GCF_ENABLE_YOUTUBE_UPLOADS=true and an explicit dashboard toggle.
-- Public scheduled release is a separate high-risk gate: GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING=true, only after private upload tests and end-to-end rights/QC acceptance.
-- Optional transcription: install scripts/setup-ml-windows.bat; set GCF_ENABLE_TRANSCRIPTION=true; provide a local model path or explicitly allow model download.
-- Optional vision: install Ollama and an appropriate locally supported vision model, set GCF_ENABLE_VISION_ANALYSIS=true, and verify available VRAM/RAM. Model estimates are not calibrated and do not confirm gameplay events.
-- Every source: provide/document actual rights that allow editing and commercial use; provider metadata does not grant those rights.
-- Windows: verify the user's exact FFmpeg/FFprobe build and local end-to-end rendering (the previous manual validator failed while processing stderr).
+## Remaining development phases
 
-## Phase 1 — Reliability and regression hardening
+1. Reliability: keep current-head CI green, verify job recovery states, run target-Windows synthetic test including subtitles and stress-test pause behavior/in-flight operations.
+2. Local production quality: caption editing/correction UI, better composition templates, safe areas, audio loudness/clipping checks, bounded repairs and quarantine.
+3. Game-aware ranking: label rights-cleared examples per game; measure precision/recall and calibrate scores before relying on vision ranks. Three-frame VLM estimates can miss motion/context.
+4. Content direction: optional evidence-grounded narration, thumbnails, template variety and owner-editable plans.
+5. Publishing acceptance: real private upload, processing poll, uncertain outcome reconciliation, public scheduling/cancel/reschedule, permission expiry, output hash/QC mismatch and Analytics tests on the actual channel.
+6. Supervised autonomy: quota budgets, alerting, disk-space pause, daily/storage limits, failure caps and restart testing before unattended operations.
 
-Exit criteria:
-- Latest CI run green on all Windows/Linux backend jobs, frontend build and integration tests.
-- Add integration tests for upload reconciliation, schedule rights expiry, QC review/preview, transcription persistence, vision frame sampling/ranking, scheduled-release cancellation/reschedule and public processing-state transitions.
-- Verify all database connection/transaction paths, job state transitions and startup-recovery cases.
-- Correct quota-aware retry policy and record API failure categories without logging credentials.
-- Run the real Windows FFmpeg acceptance suite using authorized synthetic media, including subtitle rendering and QC review paths.
-- Confirm global pause prevents new work; document behavior for already-running FFmpeg and in-flight HTTP calls.
+## Public release gate
 
-No unattended public publishing in this phase.
-
-## Phase 2 — Stronger local production
-
-Build:
-- Testable render profiles and output/template versioning.
-- Better vertical composition: optional blurred-background fill, crop/region-of-interest options and visual safe areas.
-- Candidate/caption editing UI, transcript correction, preview and render retry controls.
-- More robust QC: missing streams, aspect ratio, loudness/clipping, long black intervals, frame freeze, decode errors, caption timing/overlap/safe areas, output size and duration.
-- Quarantine, bounded repair attempts and render cancellation/restart recovery.
-- Automated tests for a matrix of landscape/portrait input, audio/no audio, short/long video, corrupt input and subtitle filter missing.
-
-## Phase 3 — Genuine game-aware highlight analysis
-
-Scene-change detection alone is not enough. A local structured vision adapter is now present, but it is only a sparse-frame model estimate; it is not calibrated, does not validate motion, and can misunderstand HUDs or game-specific cues. Implement providers through explicit model adapters:
-- sample frames around candidate intervals (currently three samples for the local adapter)
-- optional audio/speech signals
-- game-specific visual indicators where supported
-- candidate evidence and confidence
-- validate against labeled rights-cleared clips per game, score precision/recall and confidence calibration before using model scores for production ranking
-- ranking component traceability
-- duplicate / near-duplicate clip detection
-- minimum context and dead-time controls
-
-First verify the intended vision model's Windows/GPU compatibility, license, memory needs and evaluation quality. Do not invent events. Maintain deterministic fallback and human-review status for low confidence. Train/rank learned models only after collecting labeled authorized examples.
-
-## Phase 4 — Better content direction and presentation
-
-Build:
-- Transcript/caption correction and confidence display.
-- Evidence-grounded hook, title, description and tags with review/edit fields.
-- Optional narration only from verified facts or owner-provided script.
-- Templates for clutch, funny moment, action, explanation and general gameplay.
-- Thumbnail generation using available frames/approved assets.
-- Template/style variety and strategy versions.
-- Remotion integration only after version, Windows compatibility and licensing review.
-- Render profiles and test assets with rights-cleared fonts/music/sound effects.
-
-## Phase 5 — Source acquisition and rights-aware intake
-
-The existing Twitch and YouTube integrations discover metadata, not files. Do not add generic scraping/downloaders that bypass platform access or terms.
-- Add providers only if official API/license/owner grant permits intended operations.
-- Where download/media access is not supported, require owner-supplied authorized files or a documented creator grant.
-- Explore a separate permission/grant registry for creator contracts, licenses, attribution and revocation.
-- If a valid rights document can be mechanically verified, build a provider-specific verifier; it must fail closed for ambiguity.
-- Use scheduled queries, deduplication, backoff, quota accounting and source-provider health.
-- Keep all new sources UNKNOWN until rights are verified.
-
-## Phase 6 — YouTube publishing acceptance
-
-Before any public release:
-- Configure Google Cloud and OAuth, authenticate intended channel, confirm necessary scopes and current API quota/account restrictions.
-- Validate real private upload and processing status on a test video.
-- Validate duplicate prevention and manual reconciliation after forced network interruption.
-- Test scheduled job restart, permission expiry/revocation before release, file hash mismatch, QC downgrade, global pause and API errors.
-- Confirm YouTube API processing status and upload-history persistence.
-- Build a cancel/reschedule control for locally scheduled public-release jobs.
-- Keep public release disabled until the supervised suite is green and owner explicitly enables the environment policy.
-
-## Phase 7 — Analytics and optimization
-
-- Schedule analytics collection with quotas/rate limits.
-- Store snapshots and source API retrieval timestamps.
-- Add comparable-age views (24h, 72h, 7d) and performance by game, format, duration, hook and publication time.
-- Report missing/delayed fields as missing, not zero.
-- Introduce controlled experiments with minimum sample sizes and confidence signals.
-- Keep strategy changes versioned and bounded. The optimizer can never modify rights rules, QC gates, secrets, global pause or upload/publication limits.
-
-## Phase 8 — Supervised then autonomous operation
-
-Supervised exit criteria:
-- Authorized input flows through metadata/analysis, candidate review, render/QC, private upload, reconciliation and analytics without duplicate operations.
-- Startup recovery and in-flight external operations have demonstrated tests.
-- Repeated failures, quota/auth errors, low disk, expired rights or QC regressions trigger a pause/alert.
-- All source permissions are current and auditable.
-- Owner can stop queueing immediately and inspect every produced output.
-
-Autonomous mode should be separately enabled by owner after supervised acceptance:
-- begin with low daily and storage limits
-- private/unlisted publication until explicitly cleared
-- always recheck current rights, QC and output hash
-- use idempotency and reconcile non-idempotent outcomes
-- automatically pause on critical failures and never auto-bypass rights, API or security gates
-- keep public publishing behind the separate environment gate
+Public release is separately opt-in. Videos upload private first. Before making one public, the worker checks current authorization/expiry, policy gate, schedule, QC/hash/size and live YouTube processing/privacy status. Uncertain external outcomes require reconciliation rather than blind retries. If current policy no longer permits public visibility, reconciliation attempts to return the video to private.
 
 ## External prerequisites
 
-- Legal permission evidence for every source.
-- Provider credentials and quotas for chosen metadata sources.
-- Google Cloud OAuth client and user authentication for YouTube.
-- Model weights and license review if local transcription/vision is enabled.
-- Real, rights-cleared sample footage for quality evaluation.
-- Target Windows PC validation.
+- Authentic rights evidence for every source.
+- Provider credentials/quotas and Google OAuth channel setup.
+- Model and dependency license review for optional transcription/vision.
+- Rights-cleared labeled clips and target-Windows acceptance.
 
 ## Reporting rule
 
-Every feature is labeled IMPLEMENTED, TESTED, NEEDS CONFIGURATION, NOT IMPLEMENTED or BLOCKED. Code presence or a passing unit test does not prove the end-to-end service works. Do not claim full automation until the whole pipeline passes on the target Windows environment with a real authenticated test channel and rights-cleared footage.
+IMPLEMENTED means code exists; TESTED means the current reproducible suite passed; NEEDS CONFIGURATION means owner setup/secrets are needed; NOT IMPLEMENTED or BLOCKED means a capability is absent or cannot be validated. Do not call the full factory production-verified until source discovery through authorized media, render/QC, private upload, processing/reconciliation and analytics pass end-to-end on the target environment.
