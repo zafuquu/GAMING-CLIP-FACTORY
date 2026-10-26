@@ -79,7 +79,7 @@ class FolderWatchIn(BaseModel):
     @model_validator(mode="after")
     def normalize_relative_path(self):
         raw=self.relative_path.strip().replace(chr(92), "/")
-        if "\\x00" in raw or ":" in raw:
+        if chr(0) in raw or ":" in raw:
             raise ValueError("relative_path cannot contain NUL characters or a drive prefix.")
         path=PurePosixPath(raw)
         if path.is_absolute() or not path.parts or any(part in {"",".",".."} for part in path.parts):
