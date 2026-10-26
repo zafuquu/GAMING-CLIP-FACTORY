@@ -42,13 +42,13 @@ def initialize(path):
             script=migration.read_text(encoding="utf-8")
             stamp=now().replace("'","''")
             c.executescript(
-                "BEGIN IMMEDIATE;\\n"
+                "BEGIN IMMEDIATE;\n"
                 + script
-                + "\\nINSERT INTO schema_migrations(version,applied_at) VALUES("
+                + "\nINSERT INTO schema_migrations(version,applied_at) VALUES("
                 + str(version)
                 + ",'"
                 + stamp
-                + "');\\nCOMMIT;"
+                + "');\nCOMMIT;"
             )
         c.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('global_paused','false',?)",(now(),))
         c.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('operating_mode','supervised',?)",(now(),))
