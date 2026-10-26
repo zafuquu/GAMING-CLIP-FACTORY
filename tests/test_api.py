@@ -36,17 +36,17 @@ def test_authorization_requires_explicit_evidence(tmp_path):
     assert c.put(f"/api/sources/{sid}/rights",json={"status":"AUTHORIZED"}).status_code==422
     c.__exit__(None,None,None)
 def test_media_import_blocked_without_authorization(tmp_path):
-    c,media=setup_client(tmp_path); sid=add_source(c); media.mkdir(parents=True); (media/"clip.mp4").write_bytes(b"test")
+    c,media=setup_client(tmp_path); sid=add_source(c); media.mkdir(parents=True,exist_ok=True); (media/"clip.mp4").write_bytes(b"test")
     r=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
     assert r.status_code==409
     c.__exit__(None,None,None)
 def test_media_import_path_escape_blocked(tmp_path):
-    c,media=setup_client(tmp_path); sid=add_source(c); authorize(c,sid); media.mkdir(parents=True)
+    c,media=setup_client(tmp_path); sid=add_source(c); authorize(c,sid); media.mkdir(parents=True,exist_ok=True)
     outside=media.parent/"escape.mp4"; outside.write_bytes(b"test")
     assert c.post("/api/media/import",json={"source_id":sid,"path":str(outside)}).status_code==400
     c.__exit__(None,None,None)
 def test_pause_blocks_analysis_queue(tmp_path):
-    c,media=setup_client(tmp_path); sid=add_source(c); authorize(c,sid); media.mkdir(parents=True); (media/"clip.mp4").write_bytes(b"test")
+    c,media=setup_client(tmp_path); sid=add_source(c); authorize(c,sid); media.mkdir(parents=True,exist_ok=True); (media/"clip.mp4").write_bytes(b"test")
     imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"}); assert imported.status_code==201
     c.post("/api/system/pause",json={"paused":True})
     assert c.post("/api/media/"+imported.json()["id"]+"/analyze").status_code==423
