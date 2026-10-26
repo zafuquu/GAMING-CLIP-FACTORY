@@ -36,6 +36,14 @@ class RightsIn(BaseModel):
 class MediaIn(BaseModel):
     source_id: str
     path: str
+class CandidateDecisionIn(BaseModel):
+    decision: str
+    notes: str = ""
+    @model_validator(mode="after")
+    def check_decision(self):
+        if self.decision not in {"approve","reject"}:
+            raise ValueError("decision must be approve or reject")
+        return self
 class PauseIn(BaseModel): paused: bool
 class ModeIn(BaseModel):
     mode: str
@@ -164,8 +172,49 @@ def create_app(settings=None,start_worker=True):
             event(c,"INFO","job.queued","Media analysis queued.",{"job_id":jid,"media_id":mid})
         return {"id":jid,"status":"QUEUED","job_type":"ANALYZE_MEDIA"}
     @app.get("/api/candidates")
-    def candidates():
-        with connect(cfg.database_path) as c: return [dict(r) for r in c.execute("SELECT c.*,m.file_name,s.title AS source_title,p.status AS rights_status FROM candidate_moments c JOIN media_assets m ON m.id=c.media_id JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id ORDER BY c.created_at DESC")]
+    def candidates(state: str | None = None):
+        with connect(cfg.database_path) as c:
+            sql = "SELECT c.*,m.file_name,s.title AS source_title,p.status AS rights_status,p.expires_at FROM candidate_moments c JOIN media_assets m ON m.id=c.media_id JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id"
+            rows=[dict(r) for r in c.execute(sql+(" WHERE c.state=?" if state else "")+" ORDER BY c.created_at DESC",((state,) if state else ()))]
+            for row in rows:
+                if row["rights_status"] == "AUTHORIZED" and expiry_passed(row.get("expires_at")):
+                    row["rights_status"] = "EXPIRED"
+            return rows
+    @app.post("/api/candidates/{cid}/decision", status_code=202)
+    def candidate_decision(cid: str, data: CandidateDecisionIn):
+        if data.decision == "approve" and (not cfg.ffmpeg_path or not cfg.ffprobe_path):
+            raise HTTPException(503, detail="Rendering is unavailable: configure FFmpeg and FFprobe first.")
+        t=now()
+        with session(cfg.database_path) as c:
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                raise HTTPException(423, detail="Global pause is enabled.")
+            row=c.execute("""SELECT cm.id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Candidate not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Rights gate blocked this decision: current AUTHORIZED permission is required.")
+            if row["state"]!="NEEDS_REVIEW":
+                raise HTTPException(409,detail=f"Candidate cannot be reviewed from state {row['state']}.")
+            if data.decision=="reject":
+                c.execute("UPDATE candidate_moments SET state='REJECTED' WHERE id=?",(cid,))
+                event(c,"INFO","candidate.rejected","Candidate rejected by owner.",{"candidate_id":cid,"notes":data.notes})
+                return {"candidate_id":cid,"state":"REJECTED"}
+            jid=str(uuid4())
+            c.execute("UPDATE candidate_moments SET state='APPROVED' WHERE id=?",(cid,))
+            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)",
+                (jid,row["source_id"],row["media_id"],json.dumps({"candidate_id":cid,"owner_notes":data.notes}),t,t))
+            event(c,"INFO","candidate.approved","Candidate approved; render/QC job queued.",{"candidate_id":cid,"job_id":jid})
+        return {"candidate_id":cid,"state":"APPROVED","job_id":jid,"job_status":"QUEUED"}
+    @app.get("/api/renders")
+    def renders():
+        with connect(cfg.database_path) as c:
+            rows=[]
+            for r in c.execute("SELECT ro.*,m.file_name,s.title AS source_title FROM rendered_outputs ro JOIN media_assets m ON m.id=ro.media_id JOIN sources s ON s.id=m.source_id ORDER BY ro.created_at DESC"):
+                item=dict(r); item["qc_report"]=json.loads(item.pop("qc_report_json")); rows.append(item)
+            return rows
     @app.get("/api/jobs")
     def jobs():
         with connect(cfg.database_path) as c: return [dict(r) for r in c.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 100")]
