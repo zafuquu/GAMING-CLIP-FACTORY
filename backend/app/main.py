@@ -188,15 +188,6 @@ def create_app(settings=None,start_worker=True):
             for row in rows:
                 if row["rights_status"] == "AUTHORIZED" and expiry_passed(row.get("expires_at")):
                     row["rights_status"] = "EXPIRED"
-                plan=c.execute("SELECT * FROM content_plans WHERE candidate_id=?",(row["id"],)).fetchone()
-                if plan:
-                    plan_data=dict(plan)
-                    plan_data["tags"]=json.loads(plan_data.pop("tags_json") or "[]")
-                    plan_data["evidence"]=json.loads(plan_data.pop("evidence_json") or "{}")
-                    row["content_plan"]=plan_data
-                else:
-                    row["content_plan"]=None
-                row["caption_segment_count"]=c.execute("SELECT COUNT(*) FROM caption_segments WHERE candidate_id=?",(row["id"],)).fetchone()[0]
             return rows
     @app.post("/api/sources",status_code=201)
     def add_source(data: SourceIn):
