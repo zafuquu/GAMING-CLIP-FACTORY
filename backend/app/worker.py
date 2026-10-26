@@ -1187,9 +1187,10 @@ class Worker(threading.Thread):
                 stat=path.stat()
                 rel=path.relative_to(root).as_posix()
                 prior=c.execute("SELECT * FROM watched_media_files WHERE watch_id=? AND relative_path=?",(watch["id"],rel)).fetchone()
-                if prior and prior["status"] in {"IMPORTED","DUPLICATE"}:
+                unchanged=bool(prior and int(prior["observed_size"])==stat.st_size and int(prior["observed_mtime_ns"])==stat.st_mtime_ns)
+                if unchanged and prior["status"] in {"IMPORTED","DUPLICATE"}:
                     continue
-                if prior and int(prior["observed_size"])==stat.st_size and int(prior["observed_mtime_ns"])==stat.st_mtime_ns:
+                if unchanged:
                     try:
                         stable_since=datetime.fromisoformat(str(prior["stable_since"]).replace("Z","+00:00"))
                         if stable_since.tzinfo is None: stable_since=stable_since.replace(tzinfo=timezone.utc)
@@ -1203,7 +1204,7 @@ class Worker(threading.Thread):
                 else:
                     stable_since=t
                     if prior:
-                        c.execute("UPDATE watched_media_files SET observed_size=?,observed_mtime_ns=?,stable_since=?,last_seen_at=?,status='PENDING_STABILITY',error='' WHERE id=?",
+                        c.execute("UPDATE watched_media_files SET observed_size=?,observed_mtime_ns=?,stable_since=?,last_seen_at=?,status='PENDING_STABILITY',media_id=NULL,error='' WHERE id=?",
                                   (stat.st_size,stat.st_mtime_ns,t,t,prior["id"]))
                     else:
                         c.execute("""INSERT INTO watched_media_files(id,watch_id,relative_path,observed_size,observed_mtime_ns,stable_since,first_seen_at,last_seen_at,status)
@@ -1211,8 +1212,9 @@ class Worker(threading.Thread):
                                   (str(uuid4()),watch["id"],rel,stat.st_size,stat.st_mtime_ns,t,t,t))
                     pending+=1
                     continue
-                # The file is stable. Re-check rights immediately before importing and queueing analysis.
-                if source["status"]!="AUTHORIZED" or expiry_passed(source["expires_at"]):
+                # The file is stable. Query permission again immediately before any import.
+                latest_rights=c.execute("SELECT status,expires_at FROM source_permissions WHERE source_id=?",(watch["source_id"],)).fetchone()
+                if not latest_rights or latest_rights["status"]!="AUTHORIZED" or expiry_passed(latest_rights["expires_at"]):
                     blocked+=1
                     c.execute("""UPDATE watched_media_files SET status='SKIPPED_RIGHTS',error='Source is not currently authorized or its permission has expired.',last_seen_at=? WHERE watch_id=? AND relative_path=?""",(t,watch["id"],rel))
                     continue
