@@ -120,3 +120,13 @@ def test_youtube_oauth_scopes_include_private_upload_and_video_update_permission
     assert "https://www.googleapis.com/auth/youtube.upload" in SCOPES
     assert "https://www.googleapis.com/auth/youtube.force-ssl" in SCOPES
     assert "https://www.googleapis.com/auth/yt-analytics.readonly" in SCOPES
+
+def test_legacy_youtube_oauth_requires_reconnect_after_scope_change(monkeypatch):
+    import app.integrations.youtube as yt
+    def fake_get(service,key):
+        if key==yt.CREDENTIALS_KEY: return '{"token":"legacy-token"}'
+        if key==yt.CREDENTIALS_SCOPE_VERSION_KEY: return None
+        return None
+    monkeypatch.setattr(yt.keyring,"get_password",fake_get)
+    with pytest.raises(yt.YouTubeNotConfigured,match="predates the current"):
+        yt.load_credentials()
