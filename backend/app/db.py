@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from uuid import uuid4
 import json
 
-MIGRATION = Path(__file__).parent / "migrations" / "001_initial.sql"
+MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 def now(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
 def connect(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,8 +26,14 @@ def session(path):
 def initialize(path):
     with session(path) as c:
         c.execute("PRAGMA journal_mode=WAL")
-        c.executescript(MIGRATION.read_text(encoding="utf-8"))
-        c.execute("INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(1,?)",(now(),))
+        c.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)")
+        for migration in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):
+            version = int(migration.name.split("_", 1)[0])
+            applied = c.execute("SELECT 1 FROM schema_migrations WHERE version=?", (version,)).fetchone()
+            if applied:
+                continue
+            c.executescript(migration.read_text(encoding="utf-8"))
+            c.execute("INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)", (version, now()))
         c.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('global_paused','false',?)",(now(),))
         c.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('operating_mode','supervised',?)",(now(),))
 def event(c, level, kind, message, details=None):
