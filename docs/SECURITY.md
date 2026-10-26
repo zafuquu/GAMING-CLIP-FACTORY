@@ -1,13 +1,14 @@
 # Security notes
 
 - Bind API to loopback. Do not expose it to a LAN or internet without authentication, CSRF/origin controls and a security review.
-- Do not commit secrets. .env.example contains blank settings; keep .env, OAuth Desktop client JSON, SQLite/media/output files and model cache out of Git.
-- Twitch credentials and YouTube API keys belong in local .env. YouTube OAuth tokens are stored through the OS keyring and are not logged or printed.
-- A public URL, API search result or thumbnail is not reuse permission. Provider discovery returns metadata only and leaves rights UNKNOWN.
-- Only currently authorized and unexpired sources can enter import/analysis/render/upload. QC must be PASS before an output can be queued for upload.
-- Media paths must resolve inside the configured media root. Worker subprocesses use argument arrays, shell=False and finite timeouts.
-- A global pause prevents new work from being queued/claimed. It does not abruptly terminate an active process; media commands have bounded timeouts.
-- Upload starts private. Scheduled public release has a separate explicit environment gate, is queued as a local job, and rechecks permission, output hash/size and QC immediately before public state change.
-- A timeout or restart during an uncertain remote upload/public action results in RECONCILE_REQUIRED; never automatically blindly retry a non-idempotent upload.
-- Optional Faster-Whisper runs locally. Model download is off by default. Model files/license and resource use must be reviewed.
-- Back up SQLite, media and outputs separately. No public publishing is enabled by default.
+- Do not commit secrets. Keep .env, OAuth Desktop client JSON, databases, media/output assets, model files and cache out of Git.
+- Twitch credentials and YouTube API keys belong in local .env. YouTube OAuth tokens are stored in the OS keyring and are not logged or printed.
+- Provider search returns metadata only. A public URL, API result or thumbnail is not reuse permission; discovered sources are UNKNOWN until verified rights evidence is reviewed.
+- Only current, unexpired AUTHORIZED sources can enter the analysis/render/upload/public-release path. Only QC PASS outputs may be uploaded.
+- Media paths must resolve inside the configured media root. Subprocesses use argument arrays, shell=False and finite timeouts.
+- Vision inference is off by default. It samples limited frames and sends them to GCF_VISION_BASE_URL. Remote hosts are blocked unless GCF_VISION_ALLOW_REMOTE=true is explicitly set; only enable this after deciding that the selected endpoint may receive potentially private gameplay images. Model scores are uncalibrated and never auto-approve a candidate.
+- Optional Faster-Whisper runs locally; model downloads are off by default.
+- Uploads start private. Scheduled public release is a separate environment gate and repeats rights, hash, QC and remote processing checks immediately before publishing.
+- Uncertain YouTube upload/privacy outcomes are marked RECONCILE_REQUIRED rather than blindly retried.
+- Global pause prevents new work being claimed/queued but does not immediately kill an active subprocess.
+- Back up SQLite, media and outputs independently. Public uploads/public scheduling are disabled by default.
