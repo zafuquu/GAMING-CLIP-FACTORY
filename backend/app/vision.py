@@ -115,3 +115,23 @@ def assess_candidate_images(images: list[bytes], game: str, source_title: str, t
     result["assessment_method"]="local-vision-model-estimate"
     result["score_calibrated"]=False
     return result
+
+def vision_status() -> dict:
+    enabled=os.getenv("GCF_ENABLE_VISION_ANALYSIS","").strip().lower()=="true"
+    endpoint=os.getenv("GCF_VISION_BASE_URL","http://127.0.0.1:11434/api/chat").strip()
+    parsed=urlparse(endpoint)
+    host=(parsed.hostname or "").lower()
+    loopback=host in {"127.0.0.1","localhost","::1"}
+    valid=parsed.scheme=="http" and bool(parsed.hostname) and parsed.path.endswith("/api/chat")
+    remote_allowed=os.getenv("GCF_VISION_ALLOW_REMOTE","").strip().lower()=="true"
+    return {
+        "enabled":enabled,
+        "model":os.getenv("GCF_VISION_MODEL","llama3.2-vision").strip() or "unknown",
+        "endpoint_valid":valid,
+        "endpoint_local":loopback,
+        "remote_allowed":remote_allowed,
+        "ready":bool(enabled and valid and (loopback or remote_allowed)),
+        "max_candidates_per_media":max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","25") or "25"))),
+        "score_calibrated":False,
+        "automatic_approval":False,
+    }
