@@ -609,6 +609,14 @@ def create_app(settings=None,start_worker=True):
             if running:
                 raise HTTPException(409,detail="An external YouTube operation is in progress; reconcile or retry cancellation after it finishes.")
             c.execute("UPDATE jobs SET status='CANCELLED',error='Scheduled public release cancelled by owner; video remains private.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+            # If upload has not started, clear the publication intent from its persisted payload as well.
+            upload_jobs=c.execute("SELECT id,payload_json FROM jobs WHERE job_type='UPLOAD_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",("%"+published_id+"%",)).fetchall()
+            for job in upload_jobs:
+                try: upload_payload=json.loads(job["payload_json"] or "{}")
+                except ValueError: upload_payload={}
+                upload_payload["publish_at"]=None
+                upload_payload["publication_mode"]="private"
+                c.execute("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=?",(json.dumps(upload_payload),t,job["id"]))
             final_state="READY_PRIVATE" if row["remote_processing_status"]=="succeeded" else ("UPLOAD_PENDING" if row["publishing_status"]=="UPLOAD_PENDING" else "PROCESSING")
             c.execute("UPDATE published_videos SET scheduled_publish_at=NULL,publishing_status=?,updated_at=? WHERE id=?",(final_state,t,published_id))
             event(c,"WARNING","youtube.scheduled_release_cancelled","Scheduled public release cancelled; the remote video remains private.",{"published_video_id":published_id,"state":final_state})
