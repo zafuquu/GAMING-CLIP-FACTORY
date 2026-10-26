@@ -17,6 +17,20 @@ def expiry_passed(value):
     except (ValueError, TypeError):
         return True
 
+def srt_time(seconds):
+    milliseconds=max(0,int(round(float(seconds)*1000)))
+    hours,milliseconds=divmod(milliseconds,3600000)
+    minutes,milliseconds=divmod(milliseconds,60000)
+    seconds_part,milliseconds=divmod(milliseconds,1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds_part:02d},{milliseconds:03d}"
+
+def escape_filter_path(path):
+    value=Path(path).resolve().as_posix()
+    value=value.replace(":", "\\:")
+    for char in ("'", ",", "[", "]", ";"):
+        value=value.replace(char, "\\"+char)
+    return value
+
 SCENE=re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 def run(args,timeout):
     try: p=subprocess.run(args,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout,shell=False)
@@ -186,8 +200,35 @@ class Worker(threading.Thread):
             output=output_dir/(cid+"_"+uuid4().hex[:12]+".mp4")
             if output.exists():
                 raise FileExistsError("Unique output path unexpectedly already exists.")
-            # Preserve the complete gameplay frame in a fitted portrait canvas; no forced center crop.
+            # Build a per-candidate SRT sidecar from timestamped speech segments, if available.
+            caption_rows=c.execute("SELECT start_seconds,end_seconds,text,confidence FROM caption_segments WHERE candidate_id=? ORDER BY start_seconds",(cid,)).fetchall()
+            caption_path=None
+            captions_burned=False
+            caption_filter_warning=False
             vf="scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black"
+            if caption_rows:
+                caption_path=output.with_suffix(".srt")
+                blocks=[]
+                cap_index=0
+                for cap in caption_rows:
+                    cap_start=max(start,float(cap["start_seconds"]))-start
+                    cap_end=min(end,float(cap["end_seconds"]))-start
+                    text_line=str(cap["text"]).replace("-->","→").replace("\\r"," ").replace("\\n"," ").strip()
+                    if not text_line or cap_end<=cap_start: continue
+                    cap_index+=1
+                    blocks.append(f"{cap_index}\\n{srt_time(cap_start)} --> {srt_time(cap_end)}\\n{text_line}\\n")
+                if blocks:
+                    with caption_path.open("x",encoding="utf-8",newline="\\n") as sidecar:
+                        sidecar.write("\\n".join(blocks))
+                    if os.getenv("GCF_BURN_CAPTIONS","true").lower()=="true":
+                        filters=run([self.ffmpeg,"-hide_banner","-filters"],15)
+                        if " subtitles " in filters.stdout or re.search(r"\\bsubtitles\\s+V->V",filters.stdout):
+                            escaped=escape_filter_path(caption_path)
+                            vf+=",subtitles=filename='"+escaped+"':force_style='FontName=Arial,FontSize=24,Outline=2,Shadow=0,MarginV=110'"
+                            captions_burned=True
+                        else:
+                            caption_filter_warning=True
+            # Preserve the complete gameplay frame in a fitted portrait canvas; no forced center crop.
             args=[self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{start:.3f}","-i",str(source),"-t",f"{end-start:.3f}","-map","0:v:0","-map","0:a?","-vf",vf,"-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
             run(args,self.timeout)
             if not output.is_file() or output.stat().st_size <= 0:
@@ -226,6 +267,7 @@ class Worker(threading.Thread):
             review_flags=[]
             if black_events: review_flags.append("black_interval_detected")
             if freeze_events: review_flags.append("potential_frozen_frame_detected")
+            if caption_filter_warning: review_flags.append("subtitle_filter_unavailable_caption_sidecar_only")
             qc_status="REVIEW" if review_flags else "PASS"
             h=hashlib.sha256()
             with output.open("rb") as handle:
@@ -233,7 +275,7 @@ class Worker(threading.Thread):
                     h.update(block)
             warnings=list(review_flags)
             if not audio and not source_has_audio: warnings.append("Source had no audio stream.")
-            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events},"layout":"fit-and-pad-no-crop","warnings":warnings}
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events},"layout":"fit-and-pad-no-crop","caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
             c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t))
