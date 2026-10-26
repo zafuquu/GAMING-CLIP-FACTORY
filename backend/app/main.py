@@ -273,7 +273,7 @@ def create_app(settings=None,start_worker=True):
     def candidates(state: str | None = None):
         with connect(cfg.database_path) as c:
             sql = "SELECT c.*,m.file_name,s.title AS source_title,p.status AS rights_status,p.expires_at FROM candidate_moments c JOIN media_assets m ON m.id=c.media_id JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id"
-            rows=[dict(r) for r in c.execute(sql+(" WHERE c.state=?" if state else "")+" ORDER BY c.created_at DESC",((state,) if state else ()))]
+            rows=[dict(r) for r in c.execute(sql+(" WHERE c.state=?" if state else "")+" ORDER BY COALESCE(c.ranking_score,0) DESC,c.created_at DESC",((state,) if state else ()))]
             for row in rows:
                 if row["rights_status"] == "AUTHORIZED" and expiry_passed(row.get("expires_at")):
                     row["rights_status"] = "EXPIRED"
