@@ -155,3 +155,47 @@ def test_integrations_status_does_not_expose_credentials(tmp_path,monkeypatch):
     assert body["twitch"]["configured"] is True
     assert "transcription" in body
     c.__exit__(None,None,None)
+
+def test_youtube_metadata_discovery_requires_configuration(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"youtube_discovery_available",lambda:False)
+    c,_=setup_client(tmp_path)
+    assert c.post("/api/discovery/youtube",json={"game_queries":["Valorant"]}).status_code==503
+    assert c.put("/api/discovery/youtube/schedule",json={"enabled":True,"game_queries":["Valorant"],"interval_minutes":60}).status_code==503
+    c.__exit__(None,None,None)
+
+def test_youtube_metadata_discovery_queues_without_claiming_reuse_rights(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"youtube_discovery_available",lambda:True)
+    c,_=setup_client(tmp_path)
+    response=c.post("/api/discovery/youtube",json={"game_queries":["Valorant","Apex Legends"],"days":7,"max_results":50})
+    assert response.status_code==202,response.text
+    payload=response.json()
+    assert payload["status"]=="QUEUED"
+    assert payload["rights_status"]=="UNKNOWN"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        job=raw.execute("SELECT job_type,status FROM jobs WHERE id=?",(payload["id"],)).fetchone()
+    assert tuple(job)==("DISCOVER_YOUTUBE_VIDEOS","QUEUED")
+    c.__exit__(None,None,None)
+
+def test_render_review_status_can_be_previewed_but_is_not_publishable(tmp_path):
+    c,media=setup_client(tmp_path); sid=add_source(c); authorize(c,sid); media.mkdir(parents=True,exist_ok=True)
+    (media/"clip.mp4").write_bytes(b"authorized test media registry bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    cid="candidate-review-preview"
+    output_id="render-review-preview"
+    db=c.app.state.settings.database_path
+    outdir=db.parent/"outputs"; outdir.mkdir(parents=True,exist_ok=True)
+    outfile=outdir/"review-preview.mp4"; outfile.write_bytes(b"preview fixture bytes")
+    with sqlite3.connect(db) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (cid,mid,0.0,5.0,"test","QC review candidate","RENDERED_QC_REVIEW","2026-01-01T00:00:00+00:00"))
+        raw.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (output_id,cid,mid,str(outfile),outfile.stat().st_size,"hash-fixture",5.0,1080,1920,"h264","aac","REVIEW",'{"warnings":["black_interval_detected"]}',"2026-01-01T00:00:00+00:00"))
+    preview=c.get(f"/api/renders/{output_id}/file")
+    assert preview.status_code==200
+    assert preview.content==b"preview fixture bytes"
+    c.__exit__(None,None,None)
