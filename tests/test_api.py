@@ -377,3 +377,75 @@ def test_youtube_analytics_schedule_persists_configuration(tmp_path,monkeypatch)
     assert status["window_days"]==14
     assert status["next_run"] is not None
     c.__exit__(None,None,None)
+
+def test_analytics_summary_compares_same_window_and_requires_three_videos(tmp_path):
+    c,_=setup_client(tmp_path)
+    db_path=c.app.state.settings.database_path
+    stamp="2026-10-20T12:00:00+00:00"
+    fixtures=[
+        ("analytics-source-1","analytics-media-1","analytics-candidate-1","analytics-pub-1","yt-analytics-1","reaction_moment",100,80),
+        ("analytics-source-2","analytics-media-2","analytics-candidate-2","analytics-pub-2","yt-analytics-2","reaction_moment",200,70),
+        ("analytics-source-3","analytics-media-3","analytics-candidate-3","analytics-pub-3","yt-analytics-3","reaction_moment",300,60),
+        ("analytics-source-4","analytics-media-4","analytics-candidate-4","analytics-pub-4","yt-analytics-4","clutch_candidate",999,99),
+    ]
+    with sqlite3.connect(db_path) as raw:
+        for sid,mid,cid,pid,vid,fmt,views,avg_pct in fixtures:
+            raw.execute("INSERT INTO sources(id,source_url,platform,title,creator,game,discovered_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (sid,f"https://example.com/{sid}","manual","Fixture title","Owner","Valorant",stamp,stamp))
+            raw.execute("INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (mid,sid,f"/{mid}.mp4",f"{mid}.mp4",10,mid,"IMPORTED",stamp))
+            raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (cid,mid,0,5,"test","fixture","RENDERED_QC_PASSED",stamp))
+            raw.execute("""INSERT INTO content_plans(id,candidate_id,chosen_format,title,strategy_version,status,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?)""",(f"plan-{cid}",cid,fmt,"Draft title","test-v1","DRAFT",stamp,stamp))
+            raw.execute("""INSERT INTO published_videos(id,source_id,media_id,candidate_id,output_path,title,description,template_id,qc_status,publishing_status,youtube_video_id,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(pid,sid,mid,cid,f"/{pid}.mp4","Fixture video","", "test","PASS","UPLOADED_PRIVATE",vid,stamp,stamp))
+            window={"start_date":"2026-10-12","end_date":"2026-10-18","metrics":{"video":vid,"views":views,"likes":2,"comments":1,"averageViewPercentage":avg_pct}}
+            if sid=="analytics-source-4":
+                window={"start_date":"2026-10-11","end_date":"2026-10-17","metrics":{"video":vid,"views":views,"likes":2,"comments":1,"averageViewPercentage":avg_pct}}
+            raw.execute("INSERT INTO analytics_snapshots(id,published_video_id,captured_at,metrics_json,provider) VALUES(?,?,?,?,?)",
+                (f"snapshot-{pid}",pid,stamp,json.dumps(window),"youtube_analytics_api"))
+    response=c.get("/api/youtube/analytics/summary?start_date=2026-10-12&end_date=2026-10-18")
+    assert response.status_code==200,response.text
+    report=response.json()
+    assert report["matched_video_count"]==3
+    assert report["recommendation_status"]=="COMPARABLE_SAMPLE"
+    assert report["best_supported_group"]["game"]=="Valorant"
+    assert report["best_supported_group"]["format"]=="reaction_moment"
+    assert report["best_supported_group"]["sample_size"]==3
+    assert report["best_supported_group"]["views_total"]==600
+    assert report["best_supported_group"]["averageViewPercentage_mean"]==70
+    assert "causality" in report["recommendation_note"]
+    c.__exit__(None,None,None)
+
+def test_analytics_summary_does_not_recommend_with_insufficient_sample(tmp_path):
+    c,_=setup_client(tmp_path)
+    db_path=c.app.state.settings.database_path
+    stamp="2026-10-20T12:00:00+00:00"
+    sid="small-sample-source"; mid="small-sample-media"; cid="small-sample-candidate"; pid="small-sample-pub"; vid="small-sample-youtube"
+    with sqlite3.connect(db_path) as raw:
+        raw.execute("INSERT INTO sources(id,source_url,platform,title,creator,game,discovered_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (sid,"https://example.com/small-sample","manual","Fixture","Owner","Valorant",stamp,stamp))
+        raw.execute("INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (mid,sid,"/small.mp4","small.mp4",10,"small-hash","IMPORTED",stamp))
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (cid,mid,0,5,"test","fixture","RENDERED_QC_PASSED",stamp))
+        raw.execute("""INSERT INTO content_plans(id,candidate_id,chosen_format,title,strategy_version,status,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)""",("small-plan",cid,"educational_breakdown","Draft","test-v1","DRAFT",stamp,stamp))
+        raw.execute("""INSERT INTO published_videos(id,source_id,media_id,candidate_id,output_path,title,description,template_id,qc_status,publishing_status,youtube_video_id,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(pid,sid,mid,cid,"/small-pub.mp4","Fixture","", "test","PASS","UPLOADED_PRIVATE",vid,stamp,stamp))
+        raw.execute("INSERT INTO analytics_snapshots(id,published_video_id,captured_at,metrics_json,provider) VALUES(?,?,?,?,?)",
+            ("small-snapshot",pid,stamp,json.dumps({"start_date":"2026-10-12","end_date":"2026-10-18","metrics":{"video":vid,"views":12,"averageViewPercentage":91}}),"youtube_analytics_api"))
+    report=c.get("/api/youtube/analytics/summary?start_date=2026-10-12&end_date=2026-10-18").json()
+    assert report["matched_video_count"]==1
+    assert report["recommendation_status"]=="INSUFFICIENT_SAMPLE"
+    assert report["best_supported_group"] is None
+    assert report["groups"][0]["minimum_sample_met"] is False
+    c.__exit__(None,None,None)
+
+def test_analytics_summary_rejects_malformed_or_incomplete_date_windows(tmp_path):
+    c,_=setup_client(tmp_path)
+    assert c.get("/api/youtube/analytics/summary?start_date=not-a-date").status_code==422
+    assert c.get("/api/youtube/analytics/summary?start_date=2026-10-20&end_date=2026-10-19").status_code==422
+    assert c.get("/api/youtube/analytics/summary?end_date=2026-10-26").status_code==422
+    c.__exit__(None,None,None)
