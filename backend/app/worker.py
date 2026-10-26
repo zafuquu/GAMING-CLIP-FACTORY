@@ -512,7 +512,9 @@ class Worker(threading.Thread):
         t=now()
         c=connect(self.db)
         try:
-            row=c.execute("SELECT pv.*,m.source_id,m.id AS media_id FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id WHERE pv.id=?",(published_id,)).fetchone()
+            row=c.execute("""SELECT pv.*,m.source_id,m.id AS media_id,p.status AS rights_status,p.expires_at
+                FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE pv.id=?""",(published_id,)).fetchone()
             if not row: raise FileNotFoundError("Published record disappeared during processing poll.")
             if remote_status in {"failed","terminated"}:
                 final_state="PROCESSING_FAILED" if remote_status=="failed" else "PROCESSING_TERMINATED"
@@ -528,11 +530,25 @@ class Worker(threading.Thread):
                 return
             if remote_status=="succeeded":
                 scheduled_at=row["scheduled_publish_at"]
-                final_state="SCHEDULED" if scheduled_at else "READY_PRIVATE"
+                rights_current=row["rights_status"]=="AUTHORIZED" and not expiry_passed(row["expires_at"])
+                upload_enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+                upload_gate=bool(upload_enabled and upload_enabled["value"]=="true" and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true")
+                public_gate=os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true"
+                scheduled_job_id=None
+                if scheduled_at and not rights_current:
+                    final_state="BLOCKED_RIGHTS"
+                    c.execute("UPDATE jobs SET status='CANCELLED',error='Rights were expired or revoked before scheduled release.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+                elif scheduled_at and upload_gate and public_gate:
+                    final_state="SCHEDULED"
+                else:
+                    final_state="READY_PRIVATE"
+                    if scheduled_at:
+                        # A missing owner/environment gate cancels release; keep the uploaded video private.
+                        c.execute("UPDATE published_videos SET scheduled_publish_at=NULL WHERE id=?",(published_id,))
+                        c.execute("UPDATE jobs SET status='CANCELLED',error='Public release gate was disabled; video remains private.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
                 c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',publishing_status=?,updated_at=? WHERE id=?",
                           (t,final_state,t,published_id))
-                scheduled_job_id=None
-                if scheduled_at and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true" and os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true":
+                if final_state=="SCHEDULED":
                     existing=c.execute("SELECT id FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING','COMPLETED','RECONCILE_REQUIRED') AND payload_json LIKE ? ORDER BY created_at DESC LIMIT 1",("%"+published_id+"%",)).fetchone()
                     if not existing:
                         parsed=datetime.fromisoformat(scheduled_at.replace("Z","+00:00"))
@@ -543,8 +559,10 @@ class Worker(threading.Thread):
                             VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)""",
                             (scheduled_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"publish_at":parsed.isoformat()}),t,t,due))
                 c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
-                          (json.dumps({"published_video_id":published_id,"processing_status":"succeeded","publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id}),t,t,job["id"]))
-                event(c,"INFO","youtube.processing_succeeded","YouTube processing succeeded; video is ready for private viewing or separately gated publication.",{"job_id":job["id"],"published_video_id":published_id,"youtube_video_id":video_id,"publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id})
+                          (json.dumps({"published_video_id":published_id,"processing_status":"succeeded","publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id,"rights_current":rights_current}),t,t,job["id"]))
+                event_level="WARNING" if final_state=="BLOCKED_RIGHTS" else "INFO"
+                event_kind="youtube.scheduled_release_blocked" if final_state=="BLOCKED_RIGHTS" else "youtube.processing_succeeded"
+                event(c,event_level,event_kind,"YouTube processing succeeded; public-release conditions were re-evaluated.",{"job_id":job["id"],"published_video_id":published_id,"youtube_video_id":video_id,"publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id,"rights_current":rights_current,"upload_gate":upload_gate,"public_gate":public_gate})
                 c.commit()
                 return
             poll_attempt=int(payload.get("poll_attempt",0))
@@ -590,6 +608,19 @@ class Worker(threading.Thread):
                 raise FileNotFoundError("Scheduled publication record not found.")
             if not row["youtube_video_id"]:
                 raise PermissionError("Publication has no reconciled YouTube video ID.")
+            if row["publishing_status"] not in {"SCHEDULED","PROCESSING"} or not row["scheduled_publish_at"]:
+                raise PermissionError("Scheduled public release was cancelled or is no longer eligible.")
+            try:
+                scheduled_time=datetime.fromisoformat(row["scheduled_publish_at"].replace("Z","+00:00"))
+            except ValueError as exc:
+                raise PermissionError("Scheduled public release timestamp is invalid.") from exc
+            if scheduled_time.tzinfo is None:
+                scheduled_time=scheduled_time.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc)<scheduled_time:
+                due=scheduled_time.astimezone(timezone.utc).isoformat(timespec="seconds")
+                c.execute("UPDATE jobs SET status='QUEUED',error='Release time has not arrived; requeued for scheduled time.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(now(),due,job["id"]))
+                c.commit()
+                return
             if row["qc_status"]!="PASS" or row["render_qc"]!="PASS":
                 raise PermissionError("Scheduled publication blocked: output no longer has QC PASS.")
             if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
