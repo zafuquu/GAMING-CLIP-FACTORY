@@ -236,16 +236,16 @@ class Worker(threading.Thread):
                 for cap in caption_rows:
                     cap_start=max(start,float(cap["start_seconds"]))-start
                     cap_end=min(end,float(cap["end_seconds"]))-start
-                    text_line=str(cap["text"]).replace("-->","→").replace("\\r"," ").replace("\\n"," ").strip()
+                    text_line=str(cap["text"]).replace("-->","→").replace("\r"," ").replace("\n"," ").strip()
                     if not text_line or cap_end<=cap_start: continue
                     cap_index+=1
-                    blocks.append(f"{cap_index}\\n{srt_time(cap_start)} --> {srt_time(cap_end)}\\n{text_line}\\n")
+                    blocks.append(f"{cap_index}\n{srt_time(cap_start)} --> {srt_time(cap_end)}\n{text_line}\n")
                 if blocks:
-                    with caption_path.open("x",encoding="utf-8",newline="\\n") as sidecar:
-                        sidecar.write("\\n".join(blocks))
+                    with caption_path.open("x",encoding="utf-8",newline="\n") as sidecar:
+                        sidecar.write("\n".join(blocks))
                     if os.getenv("GCF_BURN_CAPTIONS","true").lower()=="true":
                         filters=run([self.ffmpeg,"-hide_banner","-filters"],15)
-                        if " subtitles " in filters.stdout or re.search(r"\\bsubtitles\\s+V->V",filters.stdout):
+                        if " subtitles " in filters.stdout or re.search(r"\bsubtitles\s+V->V",filters.stdout):
                             escaped=escape_filter_path(caption_path)
                             vf+=",subtitles=filename='"+escaped+"':force_style='FontName=Arial,FontSize=24,Outline=2,Shadow=0,MarginV=110'"
                             captions_burned=True
