@@ -1,44 +1,45 @@
 # Implementation status
 
-Release baseline: 0.3 development alpha. The repository now contains a substantial local pipeline and optional provider integrations, but it is **not fully hands-off end-to-end on a new machine**.
+Release baseline: 0.3 development alpha. The repository contains a substantial local-first production pipeline, but is not fully hands-off end-to-end on a fresh machine.
 
 ## Implemented in code
 
-- FastAPI local API, SQLite persistence, numbered migrations 001–006, persistent jobs and worker startup recovery.
-- Source registry with license/permission evidence, editing/commercial-use flags, owner review and expiration checks.
-- Local media registration restricted to the configured media root, with supported-extension checks, SHA-256 and duplicate prevention.
-- Twitch Helix metadata discovery and YouTube Data API public metadata search, including persisted schedules and discovery history. Results are metadata only and always start with rights UNKNOWN.
-- FFprobe metadata and FFmpeg scene-change candidate generation. This is heuristic candidate discovery, not semantic gameplay recognition.
-- Optional local Faster-Whisper transcript and timed phrase segments, with deterministic transcript-grounded content plan drafts and caption timing.
-- Optional local Ollama-compatible vision adapter: samples three frames per candidate, asks for structured event/evidence estimates, records score/model/confidence and adjusts explainable candidate ranking. Default off; local loopback preferred; remote endpoint blocked unless explicitly enabled. Scores are explicitly uncalibrated, and candidates remain human-review-only.
-- Candidate approval/rejection, H.264/AAC portrait fit-and-pad rendering, optional SRT sidecars/subtitle burn-in, output registry and SHA-256.
-- Deterministic QC covers probe/decode, dimensions, duration, codecs/audio, black-frame and frozen-frame heuristics. Warning cases become REVIEW and are not uploadable; only PASS output is eligible for publishing.
-- Preview support for PASS and REVIEW outputs, stored transcript/content plan/vision evidence in API and dashboard.
-- YouTube Desktop OAuth stored in OS keyring; private resumable uploads, upload history, uncertain outcome reconciliation, processing-status polling, Analytics API snapshots, and separately gated scheduled-public release worker. Before public release, the worker rechecks current rights, output hash/size, QC and live remote processing/privacy status.
-- Global pause, bounded subprocess timeouts, retry/backoff, startup recovery and non-blind-retry handling for uncertain external operations.
-- CI workflow: backend tests on Windows/Linux and Python 3.11/3.12, synthetic FFmpeg render/QC on Linux, and frontend typecheck/build.
+- FastAPI local API, React dashboard, SQLite persistence, incremental migrations 001–007, persistent job queue and startup recovery.
+- Source rights registry with permission evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
+- Local media registration restricted to configured media root with supported-file checks, SHA-256 and duplicate prevention.
+- Twitch Helix and YouTube Data API metadata-only discovery with schedules and history. No source media is downloaded and public metadata never grants reuse rights.
+- FFprobe metadata and FFmpeg scene-change candidates; still a heuristic detector rather than semantic game-event understanding.
+- Optional Faster-Whisper transcription, timed phrase segments, deterministic transcript-grounded content drafts and caption timing.
+- Optional local Ollama-compatible vision assessment sampling three frames, saving structured evidence and an uncalibrated score. Local inference is preferred; the feature is off by default and never auto-approves.
+- Candidate review/approval, H.264/AAC 1080x1920 fit-and-pad rendering, SRT sidecar/optional subtitle burn-in, output registry and hashes.
+- QC checks for probe/decode, dimensions, duration, codecs/audio, black-frame and frozen-frame heuristics. Warnings become REVIEW; only PASS is eligible for YouTube.
+- Browser preview for PASS and REVIEW outputs, with transcript/content-plan/vision evidence exposed in the API and dashboard.
+- YouTube Desktop OAuth stored in OS keyring with scope-version checking; private resumable upload; processing-status polling/manual recheck; Analytics API snapshots; upload reconciliation; separately gated scheduled-public-release worker.
+- Public-state reconciliation validates channel ownership, current rights, output QC/hash, schedule and remote processing state, and attempts to force unexpected public videos private when policy no longer permits publication.
+- Owner cancel/reschedule controls, global-pause checks before outbound YouTube operations, transactional queue transitions and a partial unique index allowing one publication record per render.
+- Bounded subprocess timeouts/retries, job recovery and current CI on commit 4d484d65.
+
+## Latest verification evidence
+
+The GitHub Actions run at https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40352431479 completed successfully on commit 4d484d652ca56cb2a1bc5bc3419135bd8b76702d. All five jobs passed: Windows/Linux with Python 3.11/3.12 and frontend build. Windows/Python 3.11 reported 51 passed, 2 skipped. Linux jobs installed FFmpeg and ran the render integration test.
+
+Hosted CI does not verify the user's local Windows FFmpeg build, real provider credentials, creator permission evidence or live YouTube upload and analytics.
 
 ## Configuration and acceptance still required
 
-- Twitch developer app credentials; YouTube Data API key or OAuth connection.
-- Google Cloud OAuth Desktop client, channel-owner authentication and the required scopes for uploads, video privacy updates and Analytics.
-- Any source: authentic permission evidence granting contemplated editing/commercial reuse. Discovery results do not grant reuse permission.
-- Optional speech model package and model files; model downloads are off unless explicitly enabled.
-- Optional local Ollama server and compatible vision model; vision is disabled by default and does not equal a validated game-event detector.
-- Real private YouTube upload, processing-status polling, OAuth scope verification, Analytics sync and uncertain-outcome reconciliation on the user's actual channel.
-- Windows end-to-end acceptance against the user's exact FFmpeg/FFprobe installation. Hosted CI success is not a substitute.
+- Twitch developer-app credentials and/or YouTube Data API key.
+- Google Cloud OAuth Desktop client and owner authentication for the intended channel. If scopes change, reconnect through the local OAuth command; old scope versions are rejected.
+- Legal permission evidence for each source allowing intended editing and commercial reuse.
+- Optional speech model package/model files and optional local Ollama vision model; each feature is explicitly opt-in.
+- Real private upload, YouTube processing poll, reconciliation and Analytics verification with the intended channel.
+- End-to-end Windows acceptance on the target machine using authorized or synthetic footage.
 
-## What remains incomplete
+## Not complete
 
-- Broadly reliable game-aware visual event recognition across multiple titles. The optional vision model sees three sparse frames and may miss motion, context, HUD meaning or events; its scores are subjective and uncalibrated. It needs labeled, licensed footage and game-specific evaluation before use as a production ranker.
-- Caption correction/review UI, high-quality narration, thumbnail generation, richer template/composition system, safe-area checking and sophisticated automatic repair/quarantine.
-- Automatic acquisition of source media. Current providers search metadata only; legally authorized local media or documented grants are still required.
-- Production deployment hardening (authentication beyond loopback, high concurrency, robust provider quota budgeting, notifications, disk-space guard, cancellation and extensive Windows stress tests).
-- Live third-party credentials and the complete real-channel/rights-cleared-footage end-to-end acceptance workflow.
-- Unattended autonomous publishing is not enabled by default and must not be described as operational before supervised acceptance passes.
+- Reliably calibrated game-aware highlight classification across games; sparse frames can miss motion/context and scores are not calibrated.
+- Caption correction UI, narration, thumbnails, richer composition/template system, safe-area validation and sophisticated repair/quarantine.
+- Automatic source-media acquisition; providers currently search metadata only.
+- Production hardening for multiple workers, quota budgeting, authentication beyond loopback, notifications, low-disk pause and Windows stress tests.
+- Unattended autonomous publishing. Public release is disabled by default and must not be described as production-verified before supervised acceptance passes.
 
-## Current verification standard
-
-The last previously observed all-green Actions run was on commit 92c03c19, before the newest vision adapter and its integration tests. Later changes have their own Actions runs; check the latest main-head run before claiming all current tests are green. Tests use local fakes for provider calls and synthetic media; they do not prove real API credentials or legal permissions.
-
-Status vocabulary: IMPLEMENTED (code exists), TESTED (reproducible test passed), NEEDS CONFIGURATION (owner credentials/config required), NOT IMPLEMENTED or BLOCKED. Code presence alone does not prove the integration works end-to-end.
+Code presence does not prove live integration works. Continue to label capabilities IMPLEMENTED, TESTED, NEEDS CONFIGURATION, NOT IMPLEMENTED or BLOCKED.
