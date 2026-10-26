@@ -13,15 +13,15 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 - Optional local Ollama-compatible vision assessment sampling three frames, saving structured evidence and an uncalibrated score. Local inference is preferred; the feature is off by default and never auto-approves.
 - Candidate review/approval, H.264/AAC 1080x1920 fit-and-pad rendering, SRT sidecar/optional subtitle burn-in, output registry and hashes.
 - QC checks for probe/decode, dimensions, duration, codecs/audio, black-frame and frozen-frame heuristics. Warnings become REVIEW; only PASS is eligible for YouTube.
-- Browser preview for PASS and REVIEW outputs, with transcript/content-plan/vision evidence exposed in the API and dashboard.
-- YouTube Desktop OAuth stored in OS keyring with scope-version checking; private resumable upload; processing-status polling/manual recheck; Analytics API snapshots; upload reconciliation; separately gated scheduled-public-release worker.
+- Browser preview for PASS and REVIEW outputs, with transcript/content-plan/vision evidence exposed in the API and dashboard. Candidate-relative caption editing is available before approval and persists to the render pipeline.
+- YouTube Desktop OAuth stored in OS keyring with scope-version checking; private resumable upload; processing-status polling/manual recheck; Analytics API snapshots; opt-in recurring Analytics schedule; same-date-window game/format report with a three-video minimum sample; upload reconciliation; separately gated scheduled-public-release worker.
 - Public-state reconciliation validates channel ownership, current rights, output QC/hash, schedule and remote processing state, and attempts to force unexpected public videos private when policy no longer permits publication.
 - Owner cancel/reschedule controls, global-pause checks before outbound YouTube operations, transactional queue transitions and a partial unique index allowing one publication record per render.
 - Bounded subprocess timeouts/retries, job recovery and current CI on commit 4d484d65.
 
 ## Latest verification evidence
 
-The GitHub Actions run at https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40352431479 completed successfully on commit 4d484d652ca56cb2a1bc5bc3419135bd8b76702d. All five jobs passed: Windows/Linux with Python 3.11/3.12 and frontend build. Windows/Python 3.11 reported 51 passed, 2 skipped. Linux jobs installed FFmpeg and ran the render integration test.
+The GitHub Actions run at https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40356307571 completed successfully on code commit f6682f3bed752d4c1e4d357a08ae33a97ed71d2f. All five jobs passed: Windows/Linux with Python 3.11/3.12 and frontend build. Ubuntu/Python 3.12 reported 62 passed; Linux jobs installed FFmpeg and ran the render integration test. This run included caption-edit API, recurring Analytics scheduling, same-window report and dashboard-build coverage.
 
 Hosted CI does not verify the user's local Windows FFmpeg build, real provider credentials, creator permission evidence or live YouTube upload and analytics.
 
@@ -37,7 +37,7 @@ Hosted CI does not verify the user's local Windows FFmpeg build, real provider c
 ## Not complete
 
 - Reliably calibrated game-aware highlight classification across games; sparse frames can miss motion/context and scores are not calibrated.
-- Caption correction UI, narration, thumbnails, richer composition/template system, safe-area validation and sophisticated repair/quarantine.
+- Transcript correction/review beyond candidate caption edits, high-quality narration, thumbnail generation, richer composition/template system, safe-area validation and sophisticated repair/quarantine.
 - Automatic source-media acquisition; providers currently search metadata only.
 - Production hardening for multiple workers, quota budgeting, authentication beyond loopback, notifications, low-disk pause and Windows stress tests.
 - Unattended autonomous publishing. Public release is disabled by default and must not be described as production-verified before supervised acceptance passes.
