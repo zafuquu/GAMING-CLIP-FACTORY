@@ -1,0 +1,91 @@
+from pathlib import Path
+from datetime import datetime, timezone
+import json
+import sqlite3
+import sys
+from fastapi.testclient import TestClient
+
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/"backend"))
+from app.config import Settings
+from app.main import create_app
+from app.worker import Worker
+import app.worker as worker_module
+
+def _fixture(tmp_path):
+    root=tmp_path/"project"; data=root/"data"; media=data/"media"
+    cfg=Settings(root,data,media,data/"factory.sqlite3",None,None,5)
+    client=TestClient(create_app(settings=cfg,start_worker=False))
+    client.__enter__()
+    source=client.post("/api/sources",json={"source_url":"https://example.com/processing-test","platform":"test","title":"Authorized test"})
+    sid=source.json()["id"]
+    rights=client.put(f"/api/sources/{sid}/rights",json={"status":"AUTHORIZED","license_type":"Synthetic test permission","permission_evidence":"Synthetic fixture only","editing_allowed":True,"commercial_use_allowed":True,"reviewed_by_owner":True})
+    assert rights.status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"synthetic.mp4").write_bytes(b"synthetic registry fixture")
+    imported=client.post("/api/media/import",json={"source_id":sid,"path":"synthetic.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    pub_id="pub-processing-test"
+    stamp=datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("""INSERT INTO published_videos(id,source_id,media_id,output_path,title,description,template_id,qc_status,publishing_status,youtube_video_id,created_at,updated_at,remote_processing_status)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(pub_id,sid,mid,str(data/"outputs"/"test.mp4"),"Synthetic test","", "test","PASS","PROCESSING","youtube-id-123",stamp,stamp,"unknown"))
+        db.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)""",("processing-job","CHECK_YOUTUBE_PROCESSING","RUNNING",sid,mid,json.dumps({"published_video_id":pub_id,"poll_attempt":0,"max_polls":2}),stamp,stamp))
+    return client,cfg,pub_id,sid,mid
+
+class _Request:
+    def __init__(self,payload): self.payload=payload
+    def execute(self): return self.payload
+class _Videos:
+    def __init__(self,payload): self.payload=payload
+    def list(self,**kwargs):
+        assert kwargs["part"]=="processingDetails,status"
+        return _Request(self.payload)
+class _YouTubeService:
+    def __init__(self,payload): self.payload=payload
+    def videos(self): return _Videos(self.payload)
+
+def test_youtube_processing_success_marks_private_video_ready(tmp_path,monkeypatch):
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    payload={"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]}
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:_YouTubeService(payload))
+    worker=Worker(cfg.database_path,None,None,5)
+    worker.check_youtube_processing({"id":"processing-job","payload_json":json.dumps({"published_video_id":pub_id,"poll_attempt":0,"max_polls":2})})
+    with sqlite3.connect(cfg.database_path) as db:
+        state=db.execute("SELECT publishing_status,remote_processing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()
+        job=db.execute("SELECT status FROM jobs WHERE id='processing-job'").fetchone()
+    assert tuple(state)==("READY_PRIVATE","succeeded")
+    assert job[0]=="COMPLETED"
+    client.__exit__(None,None,None)
+
+def test_youtube_processing_failure_never_schedules_public_release(tmp_path,monkeypatch):
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    payload={"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"failed","processingFailureReason":"conversionFailed"},"status":{"privacyStatus":"private"}}]}
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:_YouTubeService(payload))
+    worker=Worker(cfg.database_path,None,None,5)
+    worker.check_youtube_processing({"id":"processing-job","payload_json":json.dumps({"published_video_id":pub_id,"poll_attempt":0,"max_polls":2})})
+    with sqlite3.connect(cfg.database_path) as db:
+        state=db.execute("SELECT publishing_status,remote_processing_status,processing_failure_reason FROM published_videos WHERE id=?",(pub_id,)).fetchone()
+        jobs=db.execute("SELECT COUNT(*) FROM jobs WHERE job_type='PUBLISH_YOUTUBE'").fetchone()[0]
+    assert state[0]=="PROCESSING_FAILED"
+    assert state[1]=="failed"
+    assert "conversionFailed" in state[2]
+    assert jobs==0
+    client.__exit__(None,None,None)
+
+def test_youtube_processing_pending_queues_bounded_poll(tmp_path,monkeypatch):
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    payload={"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"processing"},"status":{"privacyStatus":"private"}}]}
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:_YouTubeService(payload))
+    worker=Worker(cfg.database_path,None,None,5)
+    worker.check_youtube_processing({"id":"processing-job","payload_json":json.dumps({"published_video_id":pub_id,"poll_attempt":0,"max_polls":2})})
+    with sqlite3.connect(cfg.database_path) as db:
+        state=db.execute("SELECT publishing_status,remote_processing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()
+        polls=db.execute("SELECT COUNT(*) FROM jobs WHERE job_type='CHECK_YOUTUBE_PROCESSING' AND status='QUEUED'").fetchone()[0]
+        job_status=db.execute("SELECT status FROM jobs WHERE id='processing-job'").fetchone()[0]
+    assert tuple(state)==("PROCESSING","processing")
+    assert polls==1
+    assert job_status=="COMPLETED"
+    client.__exit__(None,None,None)
