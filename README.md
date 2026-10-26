@@ -1,95 +1,116 @@
 # Gaming Clip Factory AI
 
-A local-first, rights-gated gaming video production application for Windows. The current foundation includes FastAPI, SQLite persistence, a React/TypeScript dashboard, rights review, local media registration, persistent jobs, FFmpeg scene-change candidate detection, candidate review, vertical rendering, deterministic QC, and a global pause switch.
+Local-first, rights-gated Windows software for producing gaming clips. This repository has grown from a blank repo into a tested development alpha with a local API, dashboard, persistent jobs, metadata discovery providers, FFmpeg rendering/QC, optional local transcription and a credential-gated YouTube service. It is **not yet hands-off end-to-end on a fresh machine**: provider credentials, permission evidence, optional model weights and a YouTube channel connection must be configured, and semantic game-event recognition remains limited.
 
-> **Current release: local production foundation.** This is not yet the fully autonomous content factory. Source discovery is manual, scene changes are not semantic highlight recognition, AI content planning/transcription/captions are not integrated, Remotion is not integrated, and YouTube OAuth/upload/scheduling/analytics are not configured. The UI reflects unavailable integrations honestly and does not fabricate performance data.
+## What is implemented now
 
-## Current capabilities
+- **Local application:** FastAPI, SQLite with numbered migrations, React/TypeScript/Vite dashboard; API binds to 127.0.0.1.
+- **Source discovery:** Twitch Helix game clip metadata and YouTube Data API public video metadata searches. These store URLs/metadata only; they do not download footage. Discovery records always start with rights UNKNOWN.
+- **Rights registry:** explicit permission evidence, license/type, editing and commercial-use flags, owner review, expiration; expired/revoked rights block analysis/render/upload/public release.
+- **Local media intake:** files must be under the configured media root; file extension, SHA-256 and duplicate checks are enforced.
+- **Analysis:** FFprobe metadata and FFmpeg scene-change intervals. Scene changes are heuristics, not a semantic highlight detector.
+- **Optional local speech recognition:** Faster-Whisper can produce transcript and timed word/phrase segments after explicit opt-in. A deterministic transcript-grounded content director suggests a format/title/description/tags and writes caption timing. It does not invent narration or assert that an event happened.
+- **Candidate review:** owner can approve/reject candidate windows in the dashboard.
+- **Local rendering:** approved intervals render as H.264/AAC 1080×1920 MP4 fit-and-pad output, preserving the full gameplay frame rather than forcing a center crop. When transcript caption timings exist and the FFmpeg subtitle filter is present, captions may be burned in; an SRT sidecar is also saved.
+- **Automated QC:** verifies file size, probe/decode success, dimensions, duration, codecs, source audio preservation and scans for long fully-black frames/potential frozen frames. Warnings are REVIEW, not PASS. Only PASS outputs may be queued for YouTube.
+- **YouTube service:** OAuth Desktop flow stores tokens in the OS keyring. Private resumable upload, upload history, uncertainty reconciliation, YouTube Analytics sync and a separately gated scheduled public-release worker are implemented behind local configuration. Upload starts private; public release is a separate explicit opt-in and rechecks permission, output hash and QC immediately before release.
+- **Safety:** global pause, persistent jobs, bounded subprocess timeout/retries, restart recovery, uncertain upload reconciliation, no dummy analytics and no credentials in repository.
 
-- SQLite schema with numbered incremental migrations.
-- Manual source registration with duplicate URL protection.
-- Rights registry. AUTHORIZED requires license description, permission evidence, editing/commercial-use permission, and owner review. Expired rights fail closed at source display, media import, queueing, and worker execution.
-- Local media registration only inside the configured media root, with supported extension checks, SHA-256 identity and duplicate protection.
-- Persistent SQLite job queue and bounded FFmpeg/FFprobe subprocess timeouts.
-- FFprobe metadata extraction and FFmpeg scene-change windows. Scene changes are heuristics only; candidates require human review.
-- Candidate review page to approve/reject candidates. Approval queues a render job only when current rights and FFmpeg tools are available.
-- Basic portrait MP4 rendering at 1080x1920 using fit-and-pad layout (no forced center crop), H.264/AAC where source audio is present, unique outputs, SHA-256 and deterministic QC checks for dimensions, duration, streams and file size.
-- Rendered outputs and QC metadata are stored in SQLite and shown in the dashboard.
-- Dashboard reads actual database state; no seeded fake analytics.
-- Local-only API binding by default (127.0.0.1).
+## Still not complete
+
+- No platform currently provides automatic legal permission to republish the footage found in its public search results. Owner must supply/prove rights or provide authorized files; no source media is downloaded by this alpha.
+- Scene-change + transcript heuristics do not reliably identify gameplay events (clutches, kills, strategy, funny moments) across games. A verified game-aware vision model/event classifier and score calibration still need implementation and labelled validation footage.
+- AI narration, high-quality caption correction, thumbnails, diverse advanced compositions, safe-area validation and full template system remain incomplete.
+- Remotion is not integrated; first review license/version fit for the intended use.
+- No real credentials/channel has been set up or tested from this repository. YouTube integrations are credential-gated.
+- Windows end-to-end validation using your exact local FFmpeg build is still required; CI uses hosted runners.
 
 ## Requirements
 
-- Python 3.11+ recommended.
-- Node.js 20.19+ or 22.12+ and npm.
-- FFmpeg and FFprobe for analysis/render jobs. The app checks tools/ffmpeg/ and ffmpeg-9.0.2-essentials_build/bin/, or accepts GCF_FFMPEG_PATH and GCF_FFPROBE_PATH overrides.
-- Windows 10/11 is the primary target.
+- Windows 10/11.
+- Python 3.11+ (recommended).
+- Node.js 22 LTS or compatible current supported Node 20+ and npm.
+- FFmpeg/FFprobe. The app auto-detects the tools/ffmpeg folder and ffmpeg-9.0.2-essentials_build/bin folder, or use the explicit paths below.
+- API credentials only for providers you enable.
 
-Review the actual FFmpeg build license and notices before redistribution. Gyan identifies its static builds as GPLv3-licensed. No FFmpeg binaries are committed here.
+No FFmpeg binaries or API credentials are committed. Review FFmpeg build license/notice files; Gyan identifies its static builds as GPLv3-licensed. Do not redistribute binaries without checking applicable obligations.
 
-## Quick start — Windows
+## Windows quick start
 
-1. Run scripts\setup-windows.bat to create a virtual environment and install backend/frontend dependencies.
-2. Start the backend with scripts\run-backend.bat.
-3. In another terminal, start the dashboard with scripts\run-dashboard.bat.
-4. Open the Vite URL printed by npm (normally http://127.0.0.1:5173). API: http://127.0.0.1:8765; API docs: http://127.0.0.1:8765/docs.
+1. Copy .env.example to .env. Leave provider/model/upload gates disabled until you configure them.
+2. Run scripts\setup-windows.bat.
+3. Start backend with scripts\run-backend.bat.
+4. In a second terminal run scripts\run-dashboard.bat.
+5. Open http://127.0.0.1:5173 (if Vite prints a different local port use that URL). API: http://127.0.0.1:8765; interactive API docs: http://127.0.0.1:8765/docs.
 
-Manual setup:
+The local data store defaults to data\gaming_clip_factory.sqlite3, media intake to data\media, and render outputs to data\outputs. Keep local media, SQLite database, .env, OAuth JSON and model cache out of Git.
 
-    py -3 -m venv .venv
-    .\.venv\Scripts\Activate.ps1
-    python -m pip install -r backend\requirements.txt
-    cd backend
-    python -m app
+### FFmpeg paths
 
-In another terminal:
+The app looks for tools\ffmpeg\ffmpeg.exe and tools\ffmpeg\ffprobe.exe, then the manually extracted ffmpeg-9.0.2-essentials_build\bin path. If your extracted directory uses another name, set GCF_FFMPEG_PATH and GCF_FFPROBE_PATH in your local .env.
 
-    cd frontend
-    npm install
-    npm run dev
+## Source and rights workflow
 
-## Local production workflow
+1. **Discovery**: use Automation Setup to search Twitch and/or YouTube metadata after configuring a provider. Results enter Sources & Rights with status UNKNOWN.
+2. **Permission review**: document a license/grant/contract or actual creator permission that allows the contemplated editing and commercial use. Public availability, a high view count or a public API response is not proof.
+3. **Authorize only verified sources**: include evidence, license description, editing/commercial flags, owner-review confirmation and expiration where relevant. The API rejects incomplete authorization; expired permission fails closed.
+4. **Intake**: put the authorized file in the media root and register its relative path.
+5. **Analysis**: generate scene-change windows and optionally local transcript/timed captions.
+6. **Candidate Review**: review the window and evidence; approve or reject it.
+7. **Render/QC**: approve queues FFmpeg rendering. PASS can proceed; REVIEW outputs should be inspected before any further use.
+8. **YouTube**: connect your channel and enable uploads only after setup. The default result is private. Public scheduling requires a separate environment gate and just-in-time rights/QC checks. A network uncertainty requires manual reconciliation instead of an automatic duplicate retry.
 
-1. Register a source in Sources & Rights. It starts UNKNOWN.
-2. Review permission evidence. A public URL is not permission to reuse.
-3. Mark the source AUTHORIZED only when the documented terms allow editing and commercial use and the owner has reviewed them. You can record an expiration time and later revoke/reject permission.
-4. Put authorized footage in the configured media root (default data/media) and register its relative path in Media Library.
-5. Queue analysis. FFmpeg generates scene-change candidate windows; this is not a semantic highlight classifier.
-6. In Candidate Review, approve or reject each interval. Approval starts an FFmpeg portrait render and QC job. Expired/revoked permissions or global pause block it.
-7. Inspect file path, render dimensions/duration, hash and QC status under Candidate Review. The current output is a technical cut/layout, not an AI-authored edit.
+## Provider setup
 
-## Tests
+### Twitch Helix metadata discovery
 
-From the repository root:
+Create an application in the Twitch Developer Console. Put GCF_TWITCH_CLIENT_ID and GCF_TWITCH_CLIENT_SECRET in .env, restart the backend, and use **Automation Setup → Twitch Helix**. It searches categories and clips metadata. It never downloads source media and never changes the rights status from UNKNOWN.
+
+### YouTube public metadata discovery
+
+Create a Google Cloud project and enable YouTube Data API v3. You can set GCF_YOUTUBE_API_KEY in .env for **public metadata search only**. An API key is not a channel login and cannot upload videos. Search results are still UNKNOWN rights.
+
+### YouTube OAuth/upload/analytics
+
+1. In Google Cloud Console, create an OAuth client with Desktop app type and meet applicable consent/testing requirements.
+2. Save its client JSON outside the repository, e.g. in your private user documents folder.
+3. Set GCF_YOUTUBE_CLIENT_SECRETS to that file path in local .env.
+4. From the backend directory with the project virtual environment active, run python -m app.youtube_auth. Authorize the intended channel in the browser. Tokens are stored with Windows OS keyring, not printed or committed.
+5. Use **Automation Setup → Check channel connection**. Private upload remains off by default.
+6. After you've tested private uploads and reconciliation, set GCF_ENABLE_YOUTUBE_UPLOADS=true in local .env, restart backend and explicitly enable uploads in the dashboard.
+7. Keep GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING=false until supervised, private uploads and current-rights tests pass. Public publication is deliberately a second independent gate.
+
+API quotas, YouTube account/channel restrictions, credential verification, public publishing rules and whether a source can legally be reused still apply. Do not put any key, OAuth JSON or token in a GitHub issue, commit or chat.
+
+## Optional local transcription
+
+1. Run scripts\setup-ml-windows.bat.
+2. Set GCF_ENABLE_TRANSCRIPTION=true.
+3. Prefer GCF_WHISPER_MODEL_PATH to an already downloaded local model directory. Alternatively set GCF_WHISPER_ALLOW_MODEL_DOWNLOAD=true to explicitly allow the optional model download. Check model/dependency licensing and use CPU int8 first unless you have verified compatible GPU support.
+4. Restart the backend. Media analysis will queue local transcription after scene analysis, persist timed segments and produce a draft content plan. Human review is still required.
+
+## Test and CI
+
+From project root:
 
     python -m pip install -r backend\requirements.txt
     python -m pytest -q
 
-Frontend checks:
+Frontend:
 
     cd frontend
     npm install
     npm run build
 
-GitHub Actions tests the backend on Windows/Linux with Python 3.11/3.12, runs an FFmpeg render/QC integration test on Linux, and typechecks/builds the dashboard.
+The GitHub Actions workflow runs backend tests on Windows/Linux with Python 3.11/3.12, a Linux FFmpeg render integration test and a frontend typecheck/production build. CI passing is not a substitute for testing your exact local Windows FFmpeg package and real provider credentials.
 
-## Not implemented yet
+## Important limitations
 
-- Automated source/creator/game discovery providers.
-- Semantic/game-specific event understanding and explainable highlight ranking beyond scene-change heuristics.
-- Transcript-grounded content director, narration, speech recognition, captions and thumbnail generation.
-- Advanced QC: black/frozen-frame detection, caption timing/readability, safe areas, automated repair, quarantine policy and preview player.
-- Remotion integration and its licensing review.
-- Official YouTube OAuth, uploads, upload reconciliation, scheduled publication, quota handling and analytics.
-- Autonomous publishing. There is no publishing endpoint in this release.
-
-## Safety boundaries
-
-- No source downloading or external discovery provider is wired in.
-- No YouTube OAuth or upload calls exist; autonomous public publishing is disabled.
-- The global pause prevents new jobs from being queued/claimed. It does not forcibly terminate an already running subprocess.
-- Media registration doesn't copy the input; it registers a file already under the media root.
-- API binds to loopback. Do not expose it without authentication and a security review.
+- No public discovery endpoint is treated as an authorization or download grant.
+- Public publishing is not enabled by default.
+- The worker does not terminate an active subprocess immediately when the dashboard pause is pressed; FFmpeg commands have finite timeouts, and pause prevents new queued work from starting.
+- Do not expose the dashboard/API to your LAN or the internet; no general user authentication has been implemented. Keep it on loopback.
+- A single local worker is used initially. Multi-machine deployment, high concurrency and PostgreSQL remain future work.
 
 ## Documentation
 
