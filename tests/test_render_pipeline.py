@@ -61,3 +61,21 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         assert "1\n00:00:00,500 --> 00:00:01,500\nNice shot!\n" in subtitle
         candidates=client.get("/api/candidates").json()
         assert next(x for x in candidates if x["id"]==cid)["state"]=="RENDERED_QC_PASSED"
+
+        blur_cid="ci-candidate-blur-fill"
+        blur_jid="ci-render-job-blur-fill"
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                       (blur_cid,mid,2.0,6.0,"test_fixture","Blurred-backdrop CI candidate","APPROVED",stamp))
+            db.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                       (blur_jid,"RENDER_CANDIDATE","QUEUED",sid,mid,json.dumps({"candidate_id":blur_cid,"render_profile":"blur_fill"}),stamp,stamp))
+        assert worker.one() is True
+        blur_job=next(x for x in client.get("/api/jobs").json() if x["id"]==blur_jid)
+        assert blur_job["status"]=="COMPLETED",blur_job.get("error")
+        blur_render=next(x for x in client.get("/api/renders").json() if x["candidate_id"]==blur_cid)
+        assert blur_render["qc_status"]=="PASS",blur_render["qc_report"]
+        assert blur_render["render_profile"]=="blur_fill"
+        assert blur_render["width"]==1080 and blur_render["height"]==1920
+        assert Path(blur_render["output_path"]).is_file()
+        assert blur_render["qc_report"]["layout"]=="blur_fill"
+        assert "full source frame preserved" in blur_render["qc_report"]["profile_notes"][0]
