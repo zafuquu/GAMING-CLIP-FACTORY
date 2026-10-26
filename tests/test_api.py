@@ -70,3 +70,28 @@ def test_expired_permission_blocks_media_import(tmp_path):
     response=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
     assert response.status_code==409
     c.__exit__(None,None,None)
+
+def test_render_migration_is_applied(tmp_path):
+    c,_=setup_client(tmp_path)
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        tables={row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
+    assert "rendered_outputs" in tables
+    assert 1 in versions and 2 in versions
+    c.__exit__(None,None,None)
+
+def test_candidate_rejection_is_persisted(tmp_path):
+    c,media=setup_client(tmp_path); sid=add_source(c); authorize(c,sid); media.mkdir(parents=True,exist_ok=True)
+    (media/"clip.mp4").write_bytes(b"synthetic placeholder bytes for registry-only test")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    cid="candidate-test-id"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (cid,mid,0.0,5.0,"test","Test candidate only","NEEDS_REVIEW","2026-01-01T00:00:00+00:00"))
+    response=c.post(f"/api/candidates/{cid}/decision",json={"decision":"reject","notes":"Not a usable highlight"})
+    assert response.status_code==202,response.text
+    assert response.json()["state"]=="REJECTED"
+    assert next(x for x in c.get("/api/candidates").json() if x["id"]==cid)["state"]=="REJECTED"
+    c.__exit__(None,None,None)
