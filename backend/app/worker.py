@@ -343,10 +343,41 @@ class Worker(threading.Thread):
                     h.update(block)
             warnings=list(review_flags)
             if not audio and not source_has_audio: warnings.append("Source had no audio stream.")
-            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events},"layout":render_profile,"render_profile":render_profile,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
+            # Create a local portrait poster from the completed render for dashboard/review use.
+            # This image is a local preview asset, not a YouTube custom-thumbnail upload.
+            thumbnail=output.with_suffix(".thumbnail.jpg")
+            thumbnail_path=None
+            thumbnail_hash=None
+            thumbnail_width=None
+            thumbnail_height=None
+            thumbnail_error=None
+            try:
+                sample_time=max(0.0,min(max(0.0,duration-0.05),duration/2.0))
+                thumb_filter="scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black"
+                run([self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{sample_time:.3f}","-i",str(output),"-frames:v","1","-map","0:v:0","-vf",thumb_filter,"-q:v","2",str(thumbnail)],min(self.timeout,60))
+                if not thumbnail.is_file() or thumbnail.stat().st_size<=0:
+                    raise RuntimeError("FFmpeg did not produce a nonempty poster image.")
+                thumb_probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams",str(thumbnail)],min(30,self.timeout))
+                thumb_data=json.loads(thumb_probe.stdout)
+                thumb_video=next((x for x in thumb_data.get("streams",[]) if x.get("codec_type")=="video"),None)
+                if not thumb_video or thumb_video.get("width")!=720 or thumb_video.get("height")!=1280:
+                    raise RuntimeError("Poster image failed the expected 720x1280 dimension check.")
+                th=hashlib.sha256()
+                with thumbnail.open("rb") as image_file:
+                    for block in iter(lambda:image_file.read(1024*1024),b""): th.update(block)
+                thumbnail_path=str(thumbnail)
+                thumbnail_hash=th.hexdigest()
+                thumbnail_width=int(thumb_video["width"])
+                thumbnail_height=int(thumb_video["height"])
+            except Exception as exc:
+                thumbnail_error=f"{type(exc).__name__}: {str(exc)[:400]}"
+                try: thumbnail.unlink(missing_ok=True)
+                except OSError: pass
+                warnings.append("local_thumbnail_generation_failed")
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
-            c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at,render_profile)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t,render_profile))
+            c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at,render_profile,thumbnail_path,thumbnail_sha256,thumbnail_width,thumbnail_height)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t,render_profile,thumbnail_path,thumbnail_hash,thumbnail_width,thumbnail_height))
             candidate_state="RENDERED_QC_PASSED" if qc_status=="PASS" else "RENDERED_QC_REVIEW"
             c.execute("UPDATE candidate_moments SET state=? WHERE id=?",(candidate_state,cid))
             summary={"rendered_output_id":out_id,"output_path":str(output),"file_size":output.stat().st_size,"sha256":h.hexdigest(),"qc_status":qc_status,"qc_report":report}
