@@ -913,6 +913,22 @@ def create_app(settings=None,start_worker=True):
                 JOIN published_videos p ON p.id=a.published_video_id ORDER BY a.captured_at DESC LIMIT 500""")]
 
 
+    @app.get("/api/renders/{render_id}/thumbnail")
+    def render_thumbnail(render_id: str):
+        with connect(cfg.database_path) as c:
+            row=c.execute("SELECT thumbnail_path,thumbnail_sha256,thumbnail_width,thumbnail_height FROM rendered_outputs WHERE id=?",(render_id,)).fetchone()
+        if not row: raise HTTPException(404,detail="Rendered output not found.")
+        if not row["thumbnail_path"]: raise HTTPException(404,detail="Local poster frame was not generated for this render.")
+        path=Path(row["thumbnail_path"]).resolve()
+        if not path.is_file(): raise HTTPException(404,detail="Poster image is missing.")
+        try: path.relative_to((cfg.database_path.parent/"outputs").resolve())
+        except ValueError: raise HTTPException(403,detail="Poster path is outside the managed output directory.")
+        if row["thumbnail_width"]!=720 or row["thumbnail_height"]!=1280:
+            raise HTTPException(409,detail="Poster metadata does not match the expected 720x1280 dimensions.")
+        if row["thumbnail_sha256"] and digest(path)!=row["thumbnail_sha256"]:
+            raise HTTPException(409,detail="Poster hash does not match the registered artifact.")
+        return FileResponse(path,media_type="image/jpeg",filename=path.name)
+
     @app.get("/api/renders/{render_id}/file")
     def render_file(render_id: str):
         with connect(cfg.database_path) as c:
