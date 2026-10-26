@@ -596,6 +596,30 @@ def create_app(settings=None,start_worker=True):
         with connect(cfg.database_path) as c:
             return [dict(r) for r in c.execute("SELECT id,output_path,title,description,qc_status,publishing_status,youtube_video_id,created_at,updated_at,scheduled_publish_at,remote_processing_status,processing_checked_at,processing_failure_reason FROM published_videos ORDER BY created_at DESC LIMIT 200")]
 
+
+    @app.post("/api/publishing/videos/{published_id}/recheck-processing",status_code=202)
+    def recheck_youtube_processing(published_id: str):
+        channel=connected_status()
+        if not channel.get("connected"):
+            raise HTTPException(503,detail="YouTube channel is not connected: "+str(channel.get("reason") or "connection check failed"))
+        t=now(); jid=str(uuid4())
+        with session(cfg.database_path) as c:
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            row=c.execute("SELECT id,youtube_video_id,publishing_status,scheduled_publish_at FROM published_videos WHERE id=?",(published_id,)).fetchone()
+            if not row: raise HTTPException(404,detail="Publication record not found.")
+            if not row["youtube_video_id"]: raise HTTPException(409,detail="No YouTube video ID is recorded for this publication.")
+            if row["publishing_status"] not in {"PROCESSING_TIMEOUT","PROCESSING_STATUS_ERROR","PROCESSING"}:
+                raise HTTPException(409,detail=f"Processing recheck is unavailable in state {row['publishing_status']}.")
+            active=c.execute("SELECT id FROM jobs WHERE job_type='CHECK_YOUTUBE_PROCESSING' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+            if active: return {"id":active["id"],"status":"ALREADY_QUEUED"}
+            c.execute("INSERT INTO jobs(id,job_type,status,payload_json,created_at,updated_at) VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?,?)",
+                      (jid,json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20}),t,t))
+            c.execute("UPDATE published_videos SET publishing_status='PROCESSING',processing_failure_reason='',updated_at=? WHERE id=?",(t,published_id))
+            event(c,"INFO","youtube.processing_recheck_queued","Owner requested another bounded YouTube processing poll.",{"job_id":jid,"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"]})
+        return {"id":jid,"status":"QUEUED","published_video_id":published_id,"public_release_requires_current_rights":True}
+
     @app.post("/api/publishing/videos/{published_id}/cancel-public-release")
     def cancel_public_release(published_id: str):
         t=now()
