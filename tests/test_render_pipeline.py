@@ -53,6 +53,13 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         assert Path(render["output_path"]).is_file()
         assert render["file_size"]>0
         assert render["audio_codec"]=="aac"
+        assert render["thumbnail_width"]==720 and render["thumbnail_height"]==1280
+        thumbnail_path=Path(render["thumbnail_path"])
+        assert thumbnail_path.is_file() and thumbnail_path.stat().st_size>0
+        poster_response=client.get(f"/api/renders/{render['id']}/thumbnail")
+        assert poster_response.status_code==200,poster_response.text[:300]
+        assert poster_response.headers["content-type"].startswith("image/jpeg")
+        assert poster_response.content[:2]==b"\\xff\\xd8"
         qc_report=render["qc_report"]
         assert qc_report["captions_burned"] is False
         sidecar=Path(qc_report["caption_sidecar_path"])
@@ -75,6 +82,8 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         blur_render=next(x for x in client.get("/api/renders").json() if x["candidate_id"]==blur_cid)
         assert blur_render["qc_status"]=="PASS",blur_render["qc_report"]
         assert blur_render["render_profile"]=="blur_fill"
+        assert blur_render["thumbnail_width"]==720 and blur_render["thumbnail_height"]==1280
+        assert Path(blur_render["thumbnail_path"]).is_file()
         assert blur_render["width"]==1080 and blur_render["height"]==1920
         assert Path(blur_render["output_path"]).is_file()
         assert blur_render["qc_report"]["layout"]=="blur_fill"
