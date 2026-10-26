@@ -1,25 +1,23 @@
 # Dependency audit
 
-## Required runtime
+## Required Python runtime
 
-- Python sqlite3: persistent local database and migrations; standard library.
 - FastAPI, Pydantic v2, Uvicorn: API and request validation.
-- python-dotenv: load local .env configuration.
-- React, React DOM, TypeScript, Vite, lucide-react: dashboard UI and frontend build.
-- FFmpeg/FFprobe: media analysis, encoding, subtitle/defect filters and QC. Binaries are installed separately; don't commit them. Review the actual build's license and notices. Gyan identifies its static builds as GPLv3.
-- requests: Twitch Helix HTTP client.
-- google-api-python-client and google-auth-oauthlib: YouTube Data/Analytics APIs and local OAuth flow.
-- keyring: stores OAuth credential JSON in the operating system's credential store, not a repository file.
+- python-dotenv: local .env configuration.
+- requests: Twitch/vision HTTP clients.
+- google-api-python-client, google-auth-oauthlib, google-auth-httplib2: YouTube Data/Analytics, OAuth and bounded authenticated HTTP requests.
+- keyring: stores YouTube OAuth credentials in the operating-system credential store.
+- pytest and httpx: tests.
+- Python sqlite3, subprocess, hashlib, tempfile and other standard-library modules: persistence, media commands, hashes and temporary frame extraction.
 
-## Optional local AI
+## External/local processes
 
-- faster-whisper (from backend/requirements-ml.txt): local speech recognition and timestamped segments. Model weights are not bundled. A model download requires explicit GCF_WHISPER_ALLOW_MODEL_DOWNLOAD=true, otherwise configure an existing GCF_WHISPER_MODEL_PATH. Review the model/weight terms and resource use.
+- FFmpeg/FFprobe: media analysis, frame sampling, rendering, subtitle handling and QC. Install separately. Never commit binaries without checking distribution/license obligations. Gyan identifies its static builds as GPLv3.
+- Ollama-compatible local vision server: optional, disabled by default, and no Python Ollama SDK required. Default API target is the loopback endpoint http://127.0.0.1:11434/api/chat. A vision model and its weights must be installed separately; review current model license, hardware needs and accuracy. Remote endpoints are blocked unless explicitly allowed.
+- Twitch Helix: requires a Twitch developer app and client credentials for official metadata discovery.
+- YouTube Data API v3: public search can use GCF_YOUTUBE_API_KEY; this does not authenticate the channel or grant reuse rights.
+- YouTube upload/privacy changes/Analytics: require a Google Cloud project, OAuth Desktop client, owner authentication, scopes and current quota/account-policy review.
+- Faster-Whisper: optional local speech recognition from backend/requirements-ml.txt; weights are not bundled and downloads are disabled unless explicitly opted in.
+- Remotion: not integrated; compatibility and licensing review required before adoption.
 
-## External services / setup requirements
-
-- Twitch Helix requires a registered Twitch developer app and app credentials for client-credentials requests.
-- YouTube public metadata search can use a Google Cloud YouTube Data API v3 key; search does not authenticate channel ownership or give reuse permission.
-- Upload and analytics require a Google OAuth Desktop client, accepted consent configuration, owner authentication and required scopes/quotas. OAuth tokens are held in OS keyring.
-- Remotion is not installed or integrated; licensing and current package compatibility must be reviewed before adoption.
-
-No external provider is assumed operational until configured and tested against the actual credentials.
+An integration is not marked operational until real credential/setup and end-to-end acceptance checks have been completed.
