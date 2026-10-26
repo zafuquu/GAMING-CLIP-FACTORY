@@ -864,36 +864,49 @@ def create_app(settings=None,start_worker=True):
             if not enabled or enabled["value"]!="true":
                 raise HTTPException(403,detail="YouTube uploads are disabled in database settings.")
             row=c.execute("""SELECT pv.*,p.status AS rights_status,p.expires_at,
-                ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size
+                ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size,
+                ro.thumbnail_path AS poster_path
                 FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id
                 JOIN source_permissions p ON p.source_id=m.source_id
                 LEFT JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
                 WHERE pv.id=?""",(published_id,)).fetchone()
             if not row: raise HTTPException(404,detail="Publication record not found.")
             if not row["youtube_video_id"] or row["remote_processing_status"]!="succeeded":
-                raise HTTPException(409,detail="Thumbnail upload requires a recorded video ID and successful YouTube processing.")
+                raise HTTPException(409,detail="Thumbnail retry requires a recorded YouTube video ID and successful YouTube processing.")
             if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
-                raise HTTPException(409,detail="Thumbnail upload is blocked without current AUTHORIZED permission.")
+                raise HTTPException(409,detail="Thumbnail retry is blocked without current AUTHORIZED permission.")
             if row["qc_status"]!="PASS" or row["render_qc"]!="PASS":
-                raise HTTPException(409,detail="Thumbnail upload requires a QC-passed render.")
+                raise HTTPException(409,detail="Thumbnail retry requires a QC-passed render.")
             if row["publishing_status"] in {"BLOCKED_RIGHTS","BLOCKED_QC","PROCESSING_FAILED","PROCESSING_TERMINATED"}:
                 raise HTTPException(409,detail="The publication is blocked and cannot receive a custom thumbnail.")
-            image_path=Path(row["custom_thumbnail_path"]).resolve() if row["custom_thumbnail_path"] else None
-            if not image_path or not image_path.is_file():
-                raise HTTPException(409,detail="No generated custom thumbnail exists to retry.")
-            try: image_path.relative_to((cfg.database_path.parent/"outputs").resolve())
-            except ValueError: raise HTTPException(403,detail="Custom thumbnail is outside the managed outputs directory.")
-            if not row["custom_thumbnail_sha256"] or digest(image_path)!=row["custom_thumbnail_sha256"]:
-                raise HTTPException(409,detail="Custom thumbnail hash does not match its registered artifact.")
-            active=c.execute("SELECT id FROM jobs WHERE job_type='SET_YOUTUBE_THUMBNAIL' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+            active=c.execute("SELECT id,job_type FROM jobs WHERE job_type IN ('GENERATE_YOUTUBE_THUMBNAIL','SET_YOUTUBE_THUMBNAIL') AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
             if active:
-                return {"id":active["id"],"status":"ALREADY_QUEUED"}
-            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'SET_YOUTUBE_THUMBNAIL','QUEUED',?,?, ?,?,?)",
-                (job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"owner_retry":True}),t,t))
-            c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING',custom_thumbnail_error='',updated_at=? WHERE id=?",(t,published_id))
-            event(c,"INFO","youtube.thumbnail_retry_queued","Owner queued a retry for the custom YouTube thumbnail.",{"job_id":job_id,"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"]})
-        return {"id":job_id,"status":"QUEUED","published_video_id":published_id}
-
+                return {"id":active["id"],"status":"ALREADY_QUEUED","job_type":active["job_type"]}
+            image_path=Path(row["custom_thumbnail_path"]).resolve() if row["custom_thumbnail_path"] else None
+            artifact_valid=False
+            if image_path and image_path.is_file() and row["custom_thumbnail_sha256"]:
+                try:
+                    image_path.relative_to((cfg.database_path.parent/"outputs").resolve())
+                    artifact_valid=digest(image_path)==row["custom_thumbnail_sha256"]
+                except (OSError,ValueError):
+                    artifact_valid=False
+            if artifact_valid:
+                job_type="SET_YOUTUBE_THUMBNAIL"
+                initial_status="SET_PENDING"
+            else:
+                if not row["poster_path"] or not Path(row["poster_path"]).is_file():
+                    raise HTTPException(409,detail="No valid render poster exists to regenerate the custom cover. Re-render the clip first.")
+                poster=Path(row["poster_path"]).resolve()
+                try: poster.relative_to((cfg.database_path.parent/"outputs").resolve())
+                except ValueError: raise HTTPException(403,detail="Render poster is outside the managed outputs directory.")
+                job_type="GENERATE_YOUTUBE_THUMBNAIL"
+                initial_status="GENERATION_PENDING"
+            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,'QUEUED',?,?, ?,?,?)",
+                (job_id,job_type,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"owner_retry":True}),t,t))
+            c.execute("UPDATE published_videos SET custom_thumbnail_status=?,custom_thumbnail_error='',updated_at=? WHERE id=?",(initial_status,t,published_id))
+            event(c,"INFO","youtube.thumbnail_retry_queued","Owner queued a custom thumbnail regeneration/upload retry.",{
+                "job_id":job_id,"job_type":job_type,"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"]})
+        return {"id":job_id,"status":"QUEUED","job_type":job_type,"published_video_id":published_id}
 
     @app.post("/api/publishing/videos/{published_id}/recheck-processing",status_code=202)
     def recheck_youtube_processing(published_id: str):
