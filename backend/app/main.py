@@ -90,6 +90,17 @@ class PublishRequest(BaseModel):
 class ReconcileVideoIn(BaseModel):
     youtube_video_id: str = Field(min_length=6,max_length=40,pattern=r"^[A-Za-z0-9_-]+$")
 
+class RescheduleIn(BaseModel):
+    publish_at: str
+    @model_validator(mode="after")
+    def check_publish_at(self):
+        try: parsed=datetime.fromisoformat(self.publish_at.replace("Z","+00:00"))
+        except ValueError as exc: raise ValueError("publish_at must be ISO 8601 with an explicit timezone.") from exc
+        if parsed.tzinfo is None or parsed<=datetime.now(timezone.utc):
+            raise ValueError("publish_at must be timezone-aware and in the future.")
+        self.publish_at=parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
+        return self
+
 class AnalyticsSyncIn(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
@@ -583,7 +594,78 @@ def create_app(settings=None,start_worker=True):
     @app.get("/api/publishing/videos")
     def publication_history():
         with connect(cfg.database_path) as c:
-            return [dict(r) for r in c.execute("SELECT id,output_path,title,description,qc_status,publishing_status,youtube_video_id,created_at,updated_at,scheduled_publish_at FROM published_videos ORDER BY created_at DESC LIMIT 200")]
+            return [dict(r) for r in c.execute("SELECT id,output_path,title,description,qc_status,publishing_status,youtube_video_id,created_at,updated_at,scheduled_publish_at,remote_processing_status,processing_checked_at,processing_failure_reason FROM published_videos ORDER BY created_at DESC LIMIT 200")]
+
+    @app.post("/api/publishing/videos/{published_id}/cancel-public-release")
+    def cancel_public_release(published_id: str):
+        t=now()
+        with session(cfg.database_path) as c:
+            row=c.execute("SELECT id,publishing_status,scheduled_publish_at,remote_processing_status,youtube_video_id FROM published_videos WHERE id=?",(published_id,)).fetchone()
+            if not row: raise HTTPException(404,detail="Publication record not found.")
+            if not row["scheduled_publish_at"] or row["publishing_status"] not in {"UPLOAD_PENDING","PROCESSING","SCHEDULED"}:
+                raise HTTPException(409,detail="This publication has no cancellable scheduled-public release.")
+            running=c.execute("""SELECT id FROM jobs WHERE job_type IN ('UPLOAD_YOUTUBE','PUBLISH_YOUTUBE')
+                AND status='RUNNING' AND payload_json LIKE ? LIMIT 1""",("%"+published_id+"%",)).fetchone()
+            if running:
+                raise HTTPException(409,detail="An external YouTube operation is in progress; reconcile or retry cancellation after it finishes.")
+            c.execute("UPDATE jobs SET status='CANCELLED',error='Scheduled public release cancelled by owner; video remains private.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+            final_state="READY_PRIVATE" if row["remote_processing_status"]=="succeeded" else ("UPLOAD_PENDING" if row["publishing_status"]=="UPLOAD_PENDING" else "PROCESSING")
+            c.execute("UPDATE published_videos SET scheduled_publish_at=NULL,publishing_status=?,updated_at=? WHERE id=?",(final_state,t,published_id))
+            event(c,"WARNING","youtube.scheduled_release_cancelled","Scheduled public release cancelled; the remote video remains private.",{"published_video_id":published_id,"state":final_state})
+        return {"published_video_id":published_id,"scheduled_publish_at":None,"publishing_status":final_state,"public_release_cancelled":True}
+
+    @app.post("/api/publishing/videos/{published_id}/reschedule")
+    def reschedule_public_release(published_id: str, data: RescheduleIn):
+        if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()!="true":
+            raise HTTPException(403,detail="Scheduled public release is disabled by local environment policy.")
+        t=now(); scheduled=datetime.fromisoformat(data.publish_at.replace("Z","+00:00"))
+        with session(cfg.database_path) as c:
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
+            uploads=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not uploads or uploads["value"]!="true": raise HTTPException(403,detail="YouTube uploads are disabled in database settings.")
+            row=c.execute("""SELECT pv.*,p.status AS rights_status,p.expires_at,ro.qc_status AS render_qc,ro.sha256 AS render_sha,
+                ro.file_size AS render_size FROM published_videos pv
+                JOIN media_assets m ON m.id=pv.media_id JOIN source_permissions p ON p.source_id=m.source_id
+                LEFT JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id WHERE pv.id=?""",(published_id,)).fetchone()
+            if not row: raise HTTPException(404,detail="Publication record not found.")
+            if row["publishing_status"] not in {"UPLOAD_PENDING","PROCESSING","SCHEDULED"}:
+                raise HTTPException(409,detail="This publication cannot be rescheduled in its current state.")
+            running=c.execute("""SELECT id FROM jobs WHERE job_type IN ('UPLOAD_YOUTUBE','PUBLISH_YOUTUBE')
+                AND status='RUNNING' AND payload_json LIKE ? LIMIT 1""",("%"+published_id+"%",)).fetchone()
+            if running: raise HTTPException(409,detail="An external YouTube operation is running; wait for it to finish before rescheduling.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Cannot schedule public release without current AUTHORIZED permission.")
+            if row["expires_at"]:
+                expiry=datetime.fromisoformat(row["expires_at"].replace("Z","+00:00"))
+                if expiry.tzinfo is None: expiry=expiry.replace(tzinfo=timezone.utc)
+                if expiry<=scheduled: raise HTTPException(409,detail="Source permission expires before the proposed publication time.")
+            if row["render_qc"]!="PASS" or row["qc_status"]!="PASS":
+                raise HTTPException(409,detail="Only a QC-passed render can be scheduled for public release.")
+            output=Path(row["output_path"])
+            if not output.is_file() or output.stat().st_size!=row["render_size"] or digest(output)!=row["render_sha"]:
+                raise HTTPException(409,detail="The output file no longer matches its QC record.")
+            c.execute("UPDATE published_videos SET scheduled_publish_at=?,updated_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),t,published_id))
+            upload_jobs=c.execute("SELECT id,payload_json FROM jobs WHERE job_type='UPLOAD_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",("%"+published_id+"%",)).fetchall()
+            for job in upload_jobs:
+                try: payload=json.loads(job["payload_json"] or "{}")
+                except ValueError: payload={}
+                payload["publish_at"]=scheduled.isoformat(timespec="seconds")
+                payload["publication_mode"]="scheduled_public"
+                c.execute("UPDATE jobs SET payload_json=?,updated_at=? WHERE id=?",(json.dumps(payload),t,job["id"]))
+            if row["youtube_video_id"] and row["remote_processing_status"]=="succeeded":
+                existing=c.execute("SELECT id,payload_json FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+                payload={"published_video_id":published_id,"publish_at":scheduled.isoformat(timespec="seconds")}
+                due=scheduled.astimezone(timezone.utc).isoformat(timespec="seconds")
+                if existing:
+                    c.execute("UPDATE jobs SET payload_json=?,next_attempt_at=?,updated_at=?,error='' WHERE id=?",(json.dumps(payload),due,t,existing["id"]))
+                else:
+                    jid=str(uuid4())
+                    c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at) VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)",
+                              (jid,row["source_id"],row["media_id"],json.dumps(payload),t,t,due))
+                c.execute("UPDATE published_videos SET publishing_status='SCHEDULED' WHERE id=?",(published_id,))
+            event(c,"INFO","youtube.scheduled_release_rescheduled","Scheduled public release time updated after rechecking rights and QC.",{"published_video_id":published_id,"publish_at":scheduled.isoformat(timespec="seconds")})
+        return {"published_video_id":published_id,"scheduled_publish_at":scheduled.isoformat(timespec="seconds"),"rescheduled":True}
 
     @app.post("/api/youtube/analytics/sync",status_code=202)
     def sync_youtube_analytics(data: AnalyticsSyncIn):
