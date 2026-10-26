@@ -811,6 +811,11 @@ def create_app(settings=None,start_worker=True):
                 c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',updated_at=? WHERE id=?",
                           (final_state,data.youtube_video_id,t,t,published_id))
                 c.execute("UPDATE jobs SET status='CANCELLED',error='Remote publication is already complete; reconciled.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+            elif scheduled and not rights_cover_schedule:
+                final_state="BLOCKED_RIGHTS"
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Source permission does not cover the scheduled release time.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+                c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,scheduled_publish_at=NULL,remote_processing_status=?,processing_checked_at=?,processing_failure_reason='Source permission does not cover the scheduled release time.',updated_at=? WHERE id=?",
+                          (final_state,data.youtube_video_id,remote_processing,t,t,published_id))
             elif remote_processing in {"failed","terminated"}:
                 final_state="PROCESSING_FAILED" if remote_processing=="failed" else "PROCESSING_TERMINATED"
                 failure=(video.get("processingDetails") or {}).get("processingFailureReason") or remote_processing
