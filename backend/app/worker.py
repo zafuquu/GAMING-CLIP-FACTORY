@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event, session
 from .integrations.twitch import TwitchHelix
-from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
+from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, ThumbnailUploadError, set_custom_thumbnail, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
+from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
 from .render_profiles import build_video_filter, profile_warning
 from .vision import assess_candidate_images, VisionNotConfigured
@@ -86,6 +87,8 @@ class Worker(threading.Thread):
                 self.discover_youtube(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
                 self.upload_youtube(job)
+            elif job["job_type"] == "SET_YOUTUBE_THUMBNAIL":
+                self.set_youtube_thumbnail(job)
             elif job["job_type"] == "CHECK_YOUTUBE_PROCESSING":
                 self.check_youtube_processing(job)
             elif job["job_type"] == "PUBLISH_YOUTUBE":
@@ -107,7 +110,7 @@ class Worker(threading.Thread):
                     if published_id:
                         c.execute("UPDATE published_videos SET publishing_status='RECONCILE_REQUIRED',updated_at=? WHERE id=?",(t,published_id))
                 else:
-                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,YouTubeNotConfigured) and not isinstance(e,VisionNotConfigured)
+                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,YouTubeNotConfigured) and not isinstance(e,VisionNotConfigured) and bool(getattr(e,"retryable",True))
                     should_retry = bool(r and r["attempt_count"]<r["max_attempts"] and retryable)
                     status="QUEUED" if should_retry else "FAILED"
                     next_attempt = None
@@ -150,6 +153,14 @@ class Worker(threading.Thread):
                             c.execute("UPDATE published_videos SET remote_processing_status='check_error',processing_checked_at=?,processing_failure_reason=?,publishing_status='PROCESSING_STATUS_ERROR',updated_at=? WHERE id=? AND remote_processing_status NOT IN ('succeeded','failed','terminated')",
                                       (t,str(e)[:1000],t,published_id))
                     except (ValueError, TypeError):
+                        pass
+                if status == "FAILED" and job["job_type"] == "SET_YOUTUBE_THUMBNAIL":
+                    try:
+                        published_id=json.loads(job["payload_json"] or "{}").get("published_video_id")
+                        if published_id:
+                            c.execute("UPDATE published_videos SET custom_thumbnail_status='FAILED',custom_thumbnail_error=?,updated_at=? WHERE id=? AND custom_thumbnail_status<>'SET_SUCCESS'",
+                                      (str(e)[:1200],t,published_id))
+                    except (ValueError,TypeError):
                         pass
                 if status == "FAILED" and job["job_type"] == "PUBLISH_YOUTUBE":
                     try:
@@ -469,9 +480,9 @@ class Worker(threading.Thread):
         c=connect(self.db)
         try:
             row=c.execute("""SELECT pv.*,ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size,
-                m.source_id,p.status AS rights_status,p.expires_at
+                ro.thumbnail_path AS poster_path,m.source_id,p.status AS rights_status,p.expires_at,s.game
                 FROM published_videos pv JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
-                JOIN media_assets m ON m.id=ro.media_id
+                JOIN media_assets m ON m.id=ro.media_id JOIN sources s ON s.id=m.source_id
                 JOIN source_permissions p ON p.source_id=m.source_id
                 WHERE pv.id=?""",(published_id,)).fetchone()
             if not row: raise FileNotFoundError("Publishing record or linked rendered output not found.")
@@ -517,6 +528,46 @@ class Worker(threading.Thread):
                 c.execute("UPDATE published_videos SET publishing_status='UPLOAD_PENDING',upload_request_started_at=NULL,updated_at=? WHERE id=? AND publishing_status='UPLOADING'",(t,published_id))
                 c.execute("UPDATE jobs SET status='QUEUED',error='Global pause enabled before upload started; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
                 event(c,"WARNING","youtube.upload_deferred_by_pause","Global pause prevented the remote upload from starting.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
+            # Generate a designed cover from the actual rendered poster and the owner-selected title.
+            # Cover failures are non-fatal to the video upload and remain visible in history.
+            cover=None; cover_error=""
+            try:
+                poster=Path(row["poster_path"]) if row["poster_path"] else None
+                if not poster or not poster.is_file():
+                    raise FileNotFoundError("The render has no valid local poster frame.")
+                cover_path=self.db.parent/"outputs"/(published_id+"_youtube_cover.jpg")
+                cover=generate_shorts_thumbnail(poster,row["title"],row["game"],cover_path)
+            except Exception as exc:
+                cover_error=f"{type(exc).__name__}: {str(exc)[:1000]}"
+            t=now()
+            if cover:
+                c.execute("""UPDATE published_videos SET custom_thumbnail_path=?,custom_thumbnail_sha256=?,
+                    custom_thumbnail_width=?,custom_thumbnail_height=?,custom_thumbnail_status='GENERATED',
+                    custom_thumbnail_error='',updated_at=? WHERE id=?""",
+                    (cover["path"],cover["sha256"],cover["width"],cover["height"],t,published_id))
+                event(c,"INFO","youtube.thumbnail_generated","Generated a title-led Shorts cover from the rendered video frame.",{
+                    "published_video_id":published_id,"thumbnail_path":cover["path"],"sha256":cover["sha256"],
+                    "width":cover["width"],"height":cover["height"],"file_size":cover["file_size"],"design_version":cover["design_version"]})
+            else:
+                c.execute("UPDATE published_videos SET custom_thumbnail_status='GENERATION_FAILED',custom_thumbnail_error=?,updated_at=? WHERE id=?",
+                    (cover_error,t,published_id))
+                event(c,"WARNING","youtube.thumbnail_generation_failed","Custom cover generation failed; video upload will continue without it.",{
+                    "published_video_id":published_id,"error":cover_error})
+            c.commit()
+            # Re-check rights and pause after cover generation, immediately before the non-idempotent upload.
+            latest=c.execute("""SELECT p.status AS rights_status,p.expires_at FROM media_assets m
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?""",(row["media_id"],)).fetchone()
+            if not latest or latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights gate blocked upload: permission expired or was revoked during preparation.")
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                t=now()
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+                c.execute("UPDATE published_videos SET publishing_status='UPLOAD_PENDING',upload_request_started_at=NULL,updated_at=? WHERE id=? AND publishing_status='UPLOADING'",(t,published_id))
+                c.execute("UPDATE jobs SET status='QUEUED',error='Global pause enabled before upload started; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
+                event(c,"WARNING","youtube.upload_deferred_by_pause","Global pause prevented the remote upload from starting after local cover generation.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
                 c.commit()
                 return
             result=upload_video(output,row["title"],row["description"],[str(x) for x in tags])
@@ -603,6 +654,16 @@ class Worker(threading.Thread):
                         c.execute("UPDATE jobs SET status='CANCELLED',error='Public release gate was disabled; video remains private.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
                 c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',publishing_status=?,updated_at=? WHERE id=?",
                           (t,final_state,t,published_id))
+                # Generate the custom cover before any scheduled public-state change. It is a
+                # separate, idempotent job so thumbnail permission/quota failures do not break upload.
+                thumb=c.execute("SELECT custom_thumbnail_path,custom_thumbnail_status FROM published_videos WHERE id=?",(published_id,)).fetchone()
+                if rights_current and thumb and thumb["custom_thumbnail_path"] and thumb["custom_thumbnail_status"]=="GENERATED":
+                    thumb_active=c.execute("SELECT id FROM jobs WHERE job_type='SET_YOUTUBE_THUMBNAIL' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+                    if not thumb_active:
+                        thumb_job_id=str(uuid4())
+                        c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'SET_YOUTUBE_THUMBNAIL','QUEUED',?,?, ?,?,?)",
+                            (thumb_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id}),t,t))
+                        c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING',updated_at=? WHERE id=?",(t,published_id))
                 if final_state=="SCHEDULED":
                     existing=c.execute("SELECT id FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? ORDER BY created_at DESC LIMIT 1",("%"+published_id+"%",)).fetchone()
                     if not existing:
@@ -641,6 +702,80 @@ class Worker(threading.Thread):
                 VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?, ?,?,?,?)""",
                 (next_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"poll_attempt":poll_attempt+1,"max_polls":max_polls}),t,t,due))
             event(c,"INFO","youtube.processing_pending","YouTube is still processing; next status check is scheduled with a bounded poll count.",{"job_id":job["id"],"next_job_id":next_id,"published_video_id":published_id,"processing_status":remote_status,"next_poll_at":due,"poll_attempt":poll_attempt+1})
+            c.commit()
+        finally:
+            c.close()
+
+    def set_youtube_thumbnail(self, job):
+        payload=json.loads(job["payload_json"] or "{}")
+        published_id=payload.get("published_video_id")
+        if not published_id:
+            raise ValueError("Thumbnail job is missing published_video_id.")
+        c=connect(self.db)
+        try:
+            row=c.execute("""SELECT pv.*,ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size,
+                p.status AS rights_status,p.expires_at
+                FROM published_videos pv JOIN media_assets m ON m.id=pv.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                LEFT JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
+                WHERE pv.id=?""",(published_id,)).fetchone()
+            if not row: raise FileNotFoundError("Publication record not found for thumbnail upload.")
+            if not row["youtube_video_id"]:
+                raise PermissionError("Thumbnail upload requires a recorded YouTube video ID.")
+            if row["remote_processing_status"]!="succeeded":
+                raise PermissionError("Thumbnail upload waits until YouTube processing succeeds.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked custom-thumbnail upload: current permission is required.")
+            if row["qc_status"]!="PASS" or row["render_qc"]!="PASS":
+                raise PermissionError("Custom-thumbnail upload requires a QC-passed render.")
+            if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true":
+                raise PermissionError("YouTube uploads are disabled by environment policy.")
+            enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not enabled or enabled["value"]!="true":
+                raise PermissionError("YouTube uploads are disabled in database settings.")
+            image_path=Path(row["custom_thumbnail_path"]).resolve() if row["custom_thumbnail_path"] else None
+            if not image_path or not image_path.is_file() or image_path.stat().st_size<=0:
+                raise FileNotFoundError("Generated custom thumbnail is missing.")
+            try: image_path.relative_to((self.db.parent/"outputs").resolve())
+            except ValueError: raise PermissionError("Custom thumbnail path is outside the managed outputs directory.")
+            if not row["custom_thumbnail_sha256"] or hashlib.sha256(image_path.read_bytes()).hexdigest()!=row["custom_thumbnail_sha256"]:
+                raise PermissionError("Custom thumbnail hash does not match its stored artifact.")
+            if row["custom_thumbnail_width"] not in {1080,2160} or row["custom_thumbnail_height"] not in {1920,3840}:
+                raise PermissionError("Custom thumbnail dimensions are not a supported vertical profile.")
+            # Recheck mutable gates immediately before the external upload.
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                t=now(); due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+                c.execute("UPDATE jobs SET status='QUEUED',error='Global pause prevented thumbnail upload; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
+                c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING',updated_at=? WHERE id=?",(t,published_id))
+                event(c,"WARNING","youtube.thumbnail_deferred_by_pause","Global pause prevented custom-thumbnail upload.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
+            latest=c.execute("""SELECT p.status AS rights_status,p.expires_at FROM media_assets m
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?""",(row["media_id"],)).fetchone()
+            if not latest or latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights gate blocked custom-thumbnail upload: permission expired or was revoked.")
+            image_hash=hashlib.sha256(image_path.read_bytes()).hexdigest()
+            if image_hash!=row["custom_thumbnail_sha256"]:
+                raise PermissionError("Custom thumbnail changed during preparation.")
+            video_id=row["youtube_video_id"]
+            thumbnail_path=str(image_path)
+            thumb_hash=row["custom_thumbnail_sha256"]
+            t=now()
+        finally:
+            c.close()
+        result=set_custom_thumbnail(video_id,Path(thumbnail_path))
+        c=connect(self.db)
+        try:
+            # Do not attach the result to a different or since-reconciled remote video ID.
+            current=c.execute("SELECT youtube_video_id,custom_thumbnail_sha256 FROM published_videos WHERE id=?",(published_id,)).fetchone()
+            if not current or current["youtube_video_id"]!=video_id or current["custom_thumbnail_sha256"]!=thumb_hash:
+                raise RuntimeError("Publication or thumbnail changed while YouTube thumbnail upload was in flight.")
+            t=now()
+            c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_SUCCESS',custom_thumbnail_error='',custom_thumbnail_uploaded_at=?,updated_at=? WHERE id=?",(t,t,published_id))
+            summary={"published_video_id":published_id,"youtube_video_id":video_id,"thumbnail_path":thumbnail_path,"sha256":thumb_hash,"uploaded":True,"remote_items":len(result.get("items",[]))}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","youtube.thumbnail_uploaded","Custom Shorts cover uploaded to the connected YouTube video.",{"job_id":job["id"],**summary})
             c.commit()
         finally:
             c.close()
