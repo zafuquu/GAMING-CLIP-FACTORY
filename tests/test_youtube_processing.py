@@ -89,3 +89,24 @@ def test_youtube_processing_pending_queues_bounded_poll(tmp_path,monkeypatch):
     assert polls==1
     assert job_status=="COMPLETED"
     client.__exit__(None,None,None)
+
+def test_expired_rights_block_public_job_after_processing_succeeds(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    future=(datetime.now(timezone.utc)+__import__("datetime").timedelta(days=1)).isoformat()
+    expired=(datetime.now(timezone.utc)-__import__("datetime").timedelta(days=1)).isoformat()
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(future,pub_id))
+        db.execute("UPDATE source_permissions SET expires_at=? WHERE source_id=?",(expired,sid))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_uploads_enabled','true',?)",(datetime.now(timezone.utc).isoformat(),))
+    payload={"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]}
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:_YouTubeService(payload))
+    worker=Worker(cfg.database_path,None,None,5)
+    worker.check_youtube_processing({"id":"processing-job","payload_json":json.dumps({"published_video_id":pub_id,"poll_attempt":0,"max_polls":2})})
+    with sqlite3.connect(cfg.database_path) as db:
+        state=db.execute("SELECT publishing_status,remote_processing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()
+        public_jobs=db.execute("SELECT COUNT(*) FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED'").fetchone()[0]
+    assert tuple(state)==("BLOCKED_RIGHTS","succeeded")
+    assert public_jobs==0
+    client.__exit__(None,None,None)
