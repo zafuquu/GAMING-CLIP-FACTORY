@@ -1,5 +1,5 @@
 import json, sqlite3, hashlib, subprocess, re, os, importlib.util
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 from datetime import datetime, timezone, date, timedelta
 from contextlib import asynccontextmanager
@@ -69,6 +69,28 @@ class TwitchScheduleIn(BaseModel):
         self.game_queries=list(dict.fromkeys(x.strip()[:120] for x in self.game_queries if x.strip()))[:20]
         if self.enabled and not self.game_queries: raise ValueError("Scheduled discovery needs at least one game query.")
         return self
+class FolderWatchIn(BaseModel):
+    source_id: str
+    relative_path: str = Field(min_length=1,max_length=500)
+    enabled: bool = True
+    recursive: bool = False
+    auto_analyze: bool = True
+    scan_interval_seconds: int = Field(default=60,ge=15,le=3600)
+    @model_validator(mode="after")
+    def normalize_relative_path(self):
+        raw=self.relative_path.strip().replace(chr(92), "/")
+        path=PurePosixPath(raw)
+        if path.is_absolute() or not path.parts or any(part in {"",".",".."} for part in path.parts):
+            raise ValueError("relative_path must be a safe, non-empty folder path under the configured media root.")
+        if any(part.startswith(".") for part in path.parts):
+            raise ValueError("Hidden/system folders cannot be watched.")
+        self.relative_path=path.as_posix()
+        return self
+class FolderWatchUpdateIn(BaseModel):
+    enabled: bool | None = None
+    recursive: bool | None = None
+    auto_analyze: bool | None = None
+    scan_interval_seconds: int | None = Field(default=None,ge=15,le=3600)
 class PublishingEnableIn(BaseModel):
     enabled: bool
 class PublishRequest(BaseModel):
@@ -192,7 +214,7 @@ def create_app(settings=None,start_worker=True):
     async def lifespan(app):
         initialize(cfg.database_path); recover_interrupted_jobs(cfg.database_path); cfg.media_root.mkdir(parents=True,exist_ok=True)
         if start_worker:
-            w=Worker(cfg.database_path,cfg.ffmpeg_path,cfg.ffprobe_path,cfg.timeout_seconds); w.start(); workers["worker"]=w
+            w=Worker(cfg.database_path,cfg.ffmpeg_path,cfg.ffprobe_path,cfg.timeout_seconds,media_root=cfg.media_root); w.start(); workers["worker"]=w
         yield
         if "worker" in workers: workers["worker"].stop(); workers["worker"].join(timeout=5)
     app=FastAPI(title="Gaming Clip Factory AI",version="0.1.0",lifespan=lifespan)
