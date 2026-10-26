@@ -81,9 +81,11 @@ def test_render_migration_is_applied(tmp_path):
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
     assert "media_folder_watches" in tables and "watched_media_files" in tables
+    watch_columns={row[1] for row in raw.execute("PRAGMA table_info(media_folder_watches)")}
+    assert "recursive" in watch_columns
     columns={row[1] for row in raw.execute("PRAGMA table_info(rendered_outputs)")}
     assert {"render_profile","thumbnail_path","thumbnail_sha256","thumbnail_width","thumbnail_height"}.issubset(columns)
-    assert {1,2,3,4,5,6,7,8,9,10}.issubset(versions)
+    assert {1,2,3,4,5,6,7,8,9,10,11}.issubset(versions)
     with sqlite3.connect(c.app.state.settings.database_path) as raw:
         render_columns={row[1] for row in raw.execute("PRAGMA table_info(rendered_outputs)")}
     assert {"render_profile","thumbnail_path","thumbnail_sha256","thumbnail_width","thumbnail_height"}.issubset(render_columns)
@@ -670,4 +672,32 @@ def test_folder_watch_prevents_overlapping_source_mappings(tmp_path):
     assert first.status_code==201,first.text
     overlap=c.post("/api/automation/folder-watches",json={"source_id":sid2,"relative_path":"incoming/another"})
     assert overlap.status_code==409,overlap.text
+    c.__exit__(None,None,None)
+
+def test_folder_watch_update_cannot_enable_overlap(tmp_path):
+    c,_=setup_client(tmp_path)
+    sid1=add_source(c)
+    s2=c.post("/api/sources",json={"source_url":"https://example.com/second","platform":"manual","title":"Second"})
+    assert s2.status_code==201
+    sid2=s2.json()["id"]
+    assert authorize(c,sid1).status_code==200 and authorize(c,sid2).status_code==200
+    first=c.post("/api/automation/folder-watches",json={"source_id":sid1,"relative_path":"incoming"})
+    assert first.status_code==201,first.text
+    second=c.post("/api/automation/folder-watches",json={"source_id":sid2,"relative_path":"incoming/subfolder","enabled":False})
+    assert second.status_code==409,second.text
+    c.__exit__(None,None,None)
+
+def test_folder_watch_can_be_disabled_without_deleting_imported_media(tmp_path):
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    watch=c.post("/api/automation/folder-watches",json={"source_id":sid,"relative_path":"incoming"})
+    assert watch.status_code==201,watch.text
+    wid=watch.json()["id"]
+    updated=c.put(f"/api/automation/folder-watches/{wid}",json={"enabled":False})
+    assert updated.status_code==200 and updated.json()["enabled"] is False
+    assert c.get("/api/automation/folder-watches").json()[0]["enabled"] is False
+    deleted=c.delete(f"/api/automation/folder-watches/{wid}")
+    assert deleted.status_code==200 and deleted.json()["media_retained"] is True
+    assert c.get("/api/automation/folder-watches").json()==[]
     c.__exit__(None,None,None)
