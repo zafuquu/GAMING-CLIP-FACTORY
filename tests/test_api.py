@@ -80,7 +80,10 @@ def test_render_migration_is_applied(tmp_path):
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
-    assert {1,2,3,4,5,6,7,8}.issubset(versions)
+    assert {1,2,3,4,5,6,7,8,9}.issubset(versions)
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        render_columns={row[1] for row in raw.execute("PRAGMA table_info(rendered_outputs)")}
+    assert {"render_profile","thumbnail_path","thumbnail_sha256","thumbnail_width","thumbnail_height"}.issubset(render_columns)
     c.__exit__(None,None,None)
 
 def test_candidate_rejection_is_persisted(tmp_path):
@@ -512,3 +515,9 @@ def test_candidate_render_profile_validation():
     assert CandidateDecisionIn(decision="approve",render_profile="blur_fill").render_profile=="blur_fill"
     with pytest.raises(Exception):
         CandidateDecisionIn(decision="approve",render_profile="crop_fill")
+
+def test_migration_prefixes_are_unique():
+    from pathlib import Path
+    migrations=ROOT/"backend"/"app"/"migrations"
+    versions=[int(path.name.split("_",1)[0]) for path in migrations.glob("[0-9][0-9][0-9]_*.sql")]
+    assert len(versions)==len(set(versions)),f"Duplicate migration version prefixes: {versions}"
