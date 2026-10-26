@@ -12,12 +12,12 @@
 
 ## External/local processes
 
-- FFmpeg/FFprobe: media analysis, frame sampling, rendering, subtitle handling and QC. Install separately. Never commit binaries without checking distribution/license obligations. Gyan identifies its static builds as GPLv3.
-- Ollama-compatible local vision server: optional, disabled by default, and no Python Ollama SDK required. Default API target is the loopback endpoint http://127.0.0.1:11434/api/chat. A vision model and its weights must be installed separately; review current model license, hardware needs and accuracy. Remote endpoints are blocked unless explicitly allowed.
+- FFmpeg/FFprobe: media analysis, frame sampling, rendering profiles, subtitle handling, poster extraction and QC. Install separately. Never commit binaries without checking distribution/license obligations. Gyan identifies its static builds as GPLv3.
+- Ollama-compatible local vision server: optional, disabled by default, no Python Ollama SDK required. Default API is loopback at http://127.0.0.1:11434/api/chat. A vision model and its weights must be installed separately; review license, hardware needs and accuracy. Remote endpoints are blocked unless explicitly allowed.
 - Twitch Helix: requires a Twitch developer app and client credentials for official metadata discovery.
-- YouTube Data API v3: public search can use GCF_YOUTUBE_API_KEY; this does not authenticate the channel or grant reuse rights.
-- YouTube upload/privacy changes/Analytics: require a Google Cloud project, OAuth Desktop client, owner authentication, scopes and current quota/account-policy review.
-- Faster-Whisper: optional local speech recognition from backend/requirements-ml.txt; weights are not bundled and downloads are disabled unless explicitly opted in.
+- YouTube Data API v3: public search can use GCF_YOUTUBE_API_KEY; this does not authenticate channel ownership or grant reuse rights.
+- YouTube upload/privacy changes/Analytics: require Google Cloud project, OAuth Desktop client, owner authentication, scopes and current quota/account-policy review.
+- Faster-Whisper: optional local speech recognition from backend/requirements-ml.txt; weights are not bundled and model downloads are disabled unless explicitly opted in.
 - Remotion: not integrated; compatibility and licensing review required before adoption.
 
-An integration is not marked operational until real credential/setup and end-to-end acceptance checks have been completed.
+An integration is not operational until real credentials/setup and end-to-end acceptance checks are completed.
