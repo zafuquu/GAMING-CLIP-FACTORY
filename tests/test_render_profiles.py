@@ -25,7 +25,8 @@ def test_blurred_backdrop_profile_preserves_fitted_foreground():
     assert "force_original_aspect_ratio=decrease[fg]" in result["filter"]
     assert "overlay=(W-w)/2:(H-h)/2" in result["filter"]
     assert "crop=1080:1920" in result["filter"]  # Only the blurred background is cropped.
-    assert "crop=1080:1920" in result["filter"].split("[fgsrc]")[1] is False
+    foreground=result["filter"].rsplit("[fgsrc]",1)[1].split("[fg]")[0]
+    assert "crop=1080:1920" not in foreground
 
 def test_subtitles_are_applied_after_composition():
     subtitle="subtitles=filename='captions.srt':force_style='FontSize=24'"
