@@ -95,3 +95,41 @@ def test_candidate_rejection_is_persisted(tmp_path):
     assert response.json()["state"]=="REJECTED"
     assert next(x for x in c.get("/api/candidates").json() if x["id"]==cid)["state"]=="REJECTED"
     c.__exit__(None,None,None)
+
+def test_twitch_discovery_requires_credentials(tmp_path,monkeypatch):
+    monkeypatch.delenv("GCF_TWITCH_CLIENT_ID",raising=False)
+    monkeypatch.delenv("GCF_TWITCH_CLIENT_SECRET",raising=False)
+    c,_=setup_client(tmp_path)
+    r=c.post("/api/discovery/twitch",json={"game_queries":["Valorant"]})
+    assert r.status_code==503
+    c.__exit__(None,None,None)
+
+def test_twitch_schedule_requires_credentials(tmp_path,monkeypatch):
+    monkeypatch.delenv("GCF_TWITCH_CLIENT_ID",raising=False)
+    monkeypatch.delenv("GCF_TWITCH_CLIENT_SECRET",raising=False)
+    c,_=setup_client(tmp_path)
+    r=c.put("/api/discovery/twitch/schedule",json={"enabled":True,"game_queries":["Valorant"],"interval_minutes":60})
+    assert r.status_code==503
+    c.__exit__(None,None,None)
+
+def test_uploads_are_disabled_by_default(tmp_path,monkeypatch):
+    monkeypatch.delenv("GCF_ENABLE_YOUTUBE_UPLOADS",raising=False)
+    c,_=setup_client(tmp_path)
+    status=c.get("/api/publishing/status").json()
+    assert status["uploads_enabled"] is False
+    assert status["upload_environment_gate"] is False
+    r=c.post("/api/publishing/schedule",json={"rendered_output_id":"not-a-real-output","title":"Test private upload"})
+    assert r.status_code==403
+    c.__exit__(None,None,None)
+
+def test_interrupted_upload_requires_reconciliation(tmp_path):
+    from app.db import recover_interrupted_jobs
+    c,_=setup_client(tmp_path)
+    db=c.app.state.settings.database_path
+    with sqlite3.connect(db) as raw:
+        raw.execute("INSERT INTO jobs(id,job_type,status,payload_json,created_at,updated_at) VALUES('uncertain-upload','UPLOAD_YOUTUBE','RUNNING','{}','2026-01-01T00:00:00+00:00','2026-01-01T00:00:00+00:00')")
+    recover_interrupted_jobs(db)
+    with sqlite3.connect(db) as raw:
+        status=raw.execute("SELECT status FROM jobs WHERE id='uncertain-upload'").fetchone()[0]
+    assert status=="RECONCILE_REQUIRED"
+    c.__exit__(None,None,None)
