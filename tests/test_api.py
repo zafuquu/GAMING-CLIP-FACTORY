@@ -80,7 +80,7 @@ def test_render_migration_is_applied(tmp_path):
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
-    assert {1,2,3,4,5,6,7}.issubset(versions)
+    assert {1,2,3,4,5,6,7,8}.issubset(versions)
     c.__exit__(None,None,None)
 
 def test_candidate_rejection_is_persisted(tmp_path):
@@ -502,3 +502,13 @@ def test_candidate_caption_edit_requires_current_rights_and_review_state(tmp_pat
     response=c.put(f"/api/candidates/{cid}/captions",json={"segments":[{"start_seconds":0,"end_seconds":1,"text":"Caption"}]})
     assert response.status_code==409
     c.__exit__(None,None,None)
+
+def test_candidate_render_profile_validation():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"backend"))
+    from app.main import CandidateDecisionIn
+    assert CandidateDecisionIn(decision="approve").render_profile=="fit_pad"
+    assert CandidateDecisionIn(decision="approve",render_profile="blur_fill").render_profile=="blur_fill"
+    with pytest.raises(Exception):
+        CandidateDecisionIn(decision="approve",render_profile="crop_fill")
