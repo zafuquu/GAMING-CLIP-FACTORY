@@ -77,7 +77,8 @@ def test_render_migration_is_applied(tmp_path):
         tables={row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
-    assert 1 in versions and 2 in versions
+    assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
+    assert {1,2,3,4}.issubset(versions)
     c.__exit__(None,None,None)
 
 def test_candidate_rejection_is_persisted(tmp_path):
@@ -132,4 +133,25 @@ def test_interrupted_upload_requires_reconciliation(tmp_path):
     with sqlite3.connect(db) as raw:
         status=raw.execute("SELECT status FROM jobs WHERE id='uncertain-upload'").fetchone()[0]
     assert status=="RECONCILE_REQUIRED"
+    c.__exit__(None,None,None)
+
+def test_transcription_is_opt_in(tmp_path,monkeypatch):
+    monkeypatch.delenv("GCF_ENABLE_TRANSCRIPTION",raising=False)
+    c,_=setup_client(tmp_path)
+    response=c.post("/api/media/fake-media-id/transcribe")
+    assert response.status_code==403
+    c.__exit__(None,None,None)
+
+def test_integrations_status_does_not_expose_credentials(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_TWITCH_CLIENT_ID","example-id")
+    monkeypatch.setenv("GCF_TWITCH_CLIENT_SECRET","example-secret")
+    c,_=setup_client(tmp_path)
+    response=c.get("/api/integrations/status")
+    assert response.status_code==200
+    body=response.json()
+    serialized=str(body)
+    assert "example-secret" not in serialized
+    assert "example-id" not in serialized
+    assert body["twitch"]["configured"] is True
+    assert "transcription" in body
     c.__exit__(None,None,None)
