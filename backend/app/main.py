@@ -232,6 +232,7 @@ def create_app(settings=None,start_worker=True):
     @app.post("/api/media/{mid}/analyze",status_code=202)
     def analyze(mid: str):
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if pause and pause["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
             r=c.execute("SELECT m.source_id,p.status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(mid,)).fetchone()
@@ -252,6 +253,7 @@ def create_app(settings=None,start_worker=True):
             raise HTTPException(503,detail="Optional dependency missing. Run scripts/setup-ml-windows.bat or install backend/requirements-ml.txt.")
         t=now(); jid=str(uuid4())
         with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
             r=c.execute("SELECT m.source_id,p.status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(mid,)).fetchone()
