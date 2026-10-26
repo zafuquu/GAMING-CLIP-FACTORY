@@ -1212,27 +1212,40 @@ class Worker(threading.Thread):
                                   (str(uuid4()),watch["id"],rel,stat.st_size,stat.st_mtime_ns,t,t,t))
                     pending+=1
                     continue
-                # The file is stable. Query permission again immediately before any import.
+                # Commit any stability observations, then hold a write lock from the
+                # just-in-time rights check through registration to serialize with revocation.
+                c.commit()
+                c.execute("BEGIN IMMEDIATE")
                 latest_rights=c.execute("SELECT status,expires_at FROM source_permissions WHERE source_id=?",(watch["source_id"],)).fetchone()
                 if not latest_rights or latest_rights["status"]!="AUTHORIZED" or expiry_passed(latest_rights["expires_at"]):
                     blocked+=1
                     c.execute("""UPDATE watched_media_files SET status='SKIPPED_RIGHTS',error='Source is not currently authorized or its permission has expired.',last_seen_at=? WHERE watch_id=? AND relative_path=?""",(t,watch["id"],rel))
+                    c.commit()
                     continue
                 current=path.stat()
                 if current.st_size!=stat.st_size or current.st_mtime_ns!=stat.st_mtime_ns:
                     c.execute("UPDATE watched_media_files SET observed_size=?,observed_mtime_ns=?,stable_since=?,status='PENDING_STABILITY',last_seen_at=? WHERE watch_id=? AND relative_path=?",
                               (current.st_size,current.st_mtime_ns,t,t,watch["id"],rel))
                     pending+=1
+                    c.commit()
                     continue
                 digest=hashlib.sha256()
                 with path.open("rb") as stream:
                     for block in iter(lambda:stream.read(1024*1024),b""): digest.update(block)
                 sha=digest.hexdigest()
+                after_hash=path.stat()
+                if after_hash.st_size!=current.st_size or after_hash.st_mtime_ns!=current.st_mtime_ns:
+                    c.execute("UPDATE watched_media_files SET observed_size=?,observed_mtime_ns=?,stable_since=?,status='PENDING_STABILITY',last_seen_at=? WHERE watch_id=? AND relative_path=?",
+                              (after_hash.st_size,after_hash.st_mtime_ns,t,t,watch["id"],rel))
+                    pending+=1
+                    c.commit()
+                    continue
                 dupe=c.execute("SELECT id FROM media_assets WHERE source_id=? AND sha256=?",(watch["source_id"],sha)).fetchone()
                 if dupe:
                     duplicates+=1
                     c.execute("""UPDATE watched_media_files SET status='DUPLICATE',media_id=?,error='This exact file is already registered for the source.',last_seen_at=? WHERE watch_id=? AND relative_path=?""",
                               (dupe["id"],t,watch["id"],rel))
+                    c.commit()
                     continue
                 media_id=str(uuid4())
                 c.execute("""INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,state,created_at)
@@ -1250,6 +1263,7 @@ class Worker(threading.Thread):
                 event(c,"INFO","folder_watch.media_imported","Stable, authorized local file was imported from a watched folder.",
                       {"watch_id":watch["id"],"media_id":media_id,"source_id":watch["source_id"],"file_name":path.name,"auto_analyze":bool(watch["auto_analyze"])})
                 imported+=1
+                c.commit()
             c.execute("UPDATE media_folder_watches SET last_error='',updated_at=? WHERE id=?",(t,watch["id"]))
             c.commit()
             return {"watch_id":watch["id"],"files_seen":len(files),"imported":imported,"duplicates":duplicates,"pending_stability":pending,"blocked_rights":blocked}
