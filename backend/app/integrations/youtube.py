@@ -135,6 +135,16 @@ def youtube_discovery_available() -> bool:
     except Exception:
         return False
 
+def youtube_oauth_available() -> bool:
+    """True only when a local YouTube token is present and marked as having current required scopes."""
+    try:
+        return bool(
+            keyring.get_password(SERVICE_NAME, CREDENTIALS_KEY)
+            and keyring.get_password(SERVICE_NAME, CREDENTIALS_SCOPE_VERSION_KEY) == CREDENTIALS_SCOPE_VERSION
+        )
+    except Exception:
+        return False
+
 def search_public_videos(query: str, days: int = 7, max_results: int = 50) -> list[dict]:
     """Search public video metadata only; results always remain UNKNOWN for reuse rights."""
     query=query.strip()
