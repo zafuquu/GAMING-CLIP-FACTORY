@@ -466,6 +466,9 @@ class Worker(threading.Thread):
             c.commit()
             tags=payload.get("tags",[])
             if not isinstance(tags,list): tags=[]
+            # Re-read pause immediately before starting the non-idempotent remote upload.
+            # The check is separate from the earlier queue claim to close the pause race.
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             # Remote upload always starts private. A separate worker polls processing status,
             # then schedules public release only after YouTube reports processing succeeded.
             if pause and pause["value"]=="true":
@@ -611,6 +614,15 @@ class Worker(threading.Thread):
             raise PermissionError("Scheduled public publishing is disabled by environment policy.")
         c=connect(self.db)
         try:
+            # Global pause has priority over schedule-time deferral and any remote mutation.
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                t=now()
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+                c.execute("UPDATE jobs SET status='QUEUED',error='Global pause enabled before public state change; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
+                event(c,"WARNING","youtube.publication_deferred_by_pause","Global pause prevented the scheduled worker from changing remote video privacy.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
             row=c.execute("""SELECT pv.*,ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size,
                 p.status AS rights_status,p.expires_at
                 FROM published_videos pv JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
