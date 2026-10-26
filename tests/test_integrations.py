@@ -91,3 +91,32 @@ def test_youtube_discovery_availability_never_needs_channel_oauth_for_api_key(mo
     monkeypatch.setenv("GCF_YOUTUBE_API_KEY","local-test-key")
     monkeypatch.setattr(yt.keyring,"get_password",lambda *args: None)
     assert yt.youtube_discovery_available() is True
+
+def test_private_upload_uses_private_default_without_guessing_made_for_kids(tmp_path,monkeypatch):
+    import app.integrations.youtube as yt
+    video=tmp_path/"authorized-render.mp4"
+    video.write_bytes(b"test video bytes")
+    captured={}
+    class UploadRequest:
+        def next_chunk(self):
+            return None,{"id":"uploaded-video-123"}
+    class Videos:
+        def insert(self,**kwargs):
+            captured.update(kwargs)
+            return UploadRequest()
+    class Service:
+        def videos(self): return Videos()
+    monkeypatch.setattr(yt,"youtube_service",lambda:Service())
+    result=yt.upload_video(video,"Test title","Test description",["gaming","test"])
+    assert result["video_id"]=="uploaded-video-123"
+    assert result["privacy_status"]=="private"
+    assert captured["body"]["status"]["privacyStatus"]=="private"
+    assert "selfDeclaredMadeForKids" not in captured["body"]["status"]
+    assert captured["part"]=="snippet,status"
+    assert captured["media_body"].mimetype=="video/mp4"
+
+def test_youtube_oauth_scopes_include_private_upload_and_video_update_permissions():
+    from app.integrations.youtube import SCOPES
+    assert "https://www.googleapis.com/auth/youtube.upload" in SCOPES
+    assert "https://www.googleapis.com/auth/youtube.force-ssl" in SCOPES
+    assert "https://www.googleapis.com/auth/yt-analytics.readonly" in SCOPES
