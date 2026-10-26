@@ -138,3 +138,70 @@ def test_processing_success_schedules_fresh_public_job_after_old_deferral(tmp_pa
     assert current[2] is not None
     assert json.loads(current[3])["published_video_id"]=="publication-1"
     assert service.videos().update_calls==[]
+
+def _attach_qc_render(db_path: Path, output_path: Path, state="UPLOAD_PENDING", scheduled_at=None):
+    import hashlib
+    output_path.parent.mkdir(parents=True,exist_ok=True)
+    output_path.write_bytes(b"valid synthetic output fixture")
+    stamp=now()
+    sha=hashlib.sha256(output_path.read_bytes()).hexdigest()
+    with sqlite3.connect(db_path) as db:
+        db.execute("""INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at)
+            VALUES(?,?,?,?,?,?,?,?)""",("candidate-1","media-1",0.0,5.0,"test","QC fixture","RENDERED_QC_PASSED",stamp))
+        db.execute("""INSERT INTO rendered_outputs
+            (id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("render-1","candidate-1","media-1",str(output_path),output_path.stat().st_size,sha,5.0,1080,1920,"h264","aac","PASS",'{"passed":true}',stamp))
+        db.execute("""UPDATE published_videos SET output_path=?,rendered_output_id='render-1',qc_status='PASS',
+            publishing_status=?,scheduled_publish_at=?,remote_processing_status='succeeded' WHERE id='publication-1'""",
+            (str(output_path),state,scheduled_at))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_uploads_enabled','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
+        db.execute("UPDATE jobs SET status='FAILED' WHERE id='processing-check'")
+
+def test_global_pause_defers_youtube_upload_before_network_request(tmp_path,monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    db_path=tmp_path/"pause-upload.sqlite3"
+    _seed_youtube_processing_db(db_path)
+    output=tmp_path/"data"/"outputs"/"upload.mp4"
+    _attach_qc_render(db_path,output,state="UPLOAD_PENDING")
+    def unexpected_upload(*args,**kwargs):
+        raise AssertionError("upload request must not start while global pause is enabled")
+    monkeypatch.setattr(worker_module,"upload_video",unexpected_upload)
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    job_payload={"published_video_id":"publication-1","publish_at":None,"tags":[],"publication_mode":"private"}
+    stamp=now()
+    with sqlite3.connect(db_path) as db:
+        db.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)""",("upload-job","UPLOAD_YOUTUBE","RUNNING","source-1","media-1",json.dumps(job_payload),stamp,stamp))
+    Worker(db_path,None,None,timeout=5).upload_youtube({"id":"upload-job","payload_json":json.dumps(job_payload)})
+    with sqlite3.connect(db_path) as db:
+        publication=db.execute("SELECT publishing_status,upload_request_started_at FROM published_videos WHERE id='publication-1'").fetchone()
+        job=db.execute("SELECT status,next_attempt_at,error FROM jobs WHERE id='upload-job'").fetchone()
+    assert publication==("UPLOAD_PENDING",None)
+    assert job[0]=="QUEUED" and job[1]
+    assert "Global pause" in job[2]
+
+def test_global_pause_prevents_scheduled_video_from_becoming_public(tmp_path,monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    db_path=tmp_path/"pause-publication.sqlite3"
+    _seed_youtube_processing_db(db_path)
+    scheduled=(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(timespec="seconds")
+    output=tmp_path/"data"/"outputs"/"scheduled.mp4"
+    _attach_qc_render(db_path,output,state="SCHEDULED",scheduled_at=scheduled)
+    service=_FakeYouTubeService({"items":[{"id":"youtube-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:service)
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    stamp=now()
+    with sqlite3.connect(db_path) as db:
+        db.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)""",("publish-job","PUBLISH_YOUTUBE","RUNNING","source-1","media-1",json.dumps({"published_video_id":"publication-1","publish_at":scheduled}),stamp,stamp))
+    Worker(db_path,None,None,timeout=5).publish_youtube({"id":"publish-job","payload_json":json.dumps({"published_video_id":"publication-1","publish_at":scheduled})})
+    with sqlite3.connect(db_path) as db:
+        publication=db.execute("SELECT publishing_status FROM published_videos WHERE id='publication-1'").fetchone()[0]
+        job=db.execute("SELECT status,next_attempt_at,error FROM jobs WHERE id='publish-job'").fetchone()
+    assert publication=="SCHEDULED"
+    assert job[0]=="QUEUED" and job[1]
+    assert "Global pause" in job[2]
+    assert service.videos().update_calls==[]
