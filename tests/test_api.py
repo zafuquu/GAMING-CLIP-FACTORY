@@ -78,7 +78,7 @@ def test_render_migration_is_applied(tmp_path):
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
-    assert {1,2,3,4}.issubset(versions)
+    assert {1,2,3,4,5}.issubset(versions)
     c.__exit__(None,None,None)
 
 def test_candidate_rejection_is_persisted(tmp_path):
