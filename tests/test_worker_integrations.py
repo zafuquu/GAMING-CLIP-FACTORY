@@ -212,7 +212,7 @@ def test_opt_in_analytics_scheduler_queues_completed_date_window(tmp_path,monkey
     initialize(db_path)
     stamp=now()
     with sqlite3.connect(db_path) as db:
-        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','false',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','false',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_enabled','true',?)",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_interval_minutes','720',?)",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_window_days','7',?)",(stamp,))
@@ -234,7 +234,7 @@ def test_analytics_scheduler_respects_global_pause_and_is_opt_in(tmp_path,monkey
     initialize(db_path)
     stamp=now()
     with sqlite3.connect(db_path) as db:
-        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?)",(stamp,))
+        db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_enabled','true',?)",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_interval_minutes','720',?)",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_analytics_schedule_window_days','7',?)",(stamp,))
