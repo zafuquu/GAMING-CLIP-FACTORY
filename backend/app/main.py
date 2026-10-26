@@ -9,7 +9,7 @@ from pydantic import BaseModel, AnyHttpUrl, Field, model_validator
 from .config import Settings
 from .db import initialize, connect, session, now, event, recover_interrupted_jobs
 from .worker import Worker
-from .integrations.youtube import connected_status, youtube_service
+from .integrations.youtube import connected_status, youtube_service, youtube_discovery_available
 
 class SourceIn(BaseModel):
     source_url: AnyHttpUrl
@@ -355,12 +355,65 @@ def create_app(settings=None,start_worker=True):
         except Exception:
             youtube_credentials_present=False
         with connect(cfg.database_path) as c:
-            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('youtube_uploads_enabled','twitch_discovery_enabled','twitch_discovery_queries','twitch_discovery_interval_minutes','twitch_discovery_next_at')")}
+            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('youtube_uploads_enabled','twitch_discovery_enabled','twitch_discovery_queries','twitch_discovery_interval_minutes','twitch_discovery_next_at','youtube_discovery_enabled','youtube_discovery_queries','youtube_discovery_interval_minutes','youtube_discovery_next_at')")}
+        try: twitch_queries=json.loads(values.get("twitch_discovery_queries","[]"))
+        except (ValueError,TypeError): twitch_queries=[]
+        try: youtube_queries=json.loads(values.get("youtube_discovery_queries","[]"))
+        except (ValueError,TypeError): youtube_queries=[]
         return {
-            "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":json.loads(values.get("twitch_discovery_queries","[]")),"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at")},
+            "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":twitch_queries,"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at")},
             "transcription":{"enabled":os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true","dependency_installed":importlib.util.find_spec("faster_whisper") is not None,"model_path_configured":bool(os.getenv("GCF_WHISPER_MODEL_PATH")),"model_download_allowed":os.getenv("GCF_WHISPER_ALLOW_MODEL_DOWNLOAD","").lower()=="true","device":os.getenv("GCF_WHISPER_DEVICE","cpu")},
-            "youtube":{"credentials_present":youtube_credentials_present,"upload_gate_configured":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true","uploads_enabled":values.get("youtube_uploads_enabled")=="true","scheduled_public_gate_configured":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true","public_publishing_enabled":False},
+            "youtube":{"credentials_present":youtube_credentials_present,"public_discovery_configured":youtube_discovery_available(),"scheduled_discovery_enabled":values.get("youtube_discovery_enabled")=="true","discovery_queries":youtube_queries,"discovery_interval_minutes":int(values.get("youtube_discovery_interval_minutes","60")),"discovery_next_run":values.get("youtube_discovery_next_at"),"api_key_discovery_configured":bool(os.getenv("GCF_YOUTUBE_API_KEY","").strip()),"upload_gate_configured":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true","uploads_enabled":values.get("youtube_uploads_enabled")=="true","scheduled_public_gate_configured":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true","public_publishing_enabled":False},
         }
+
+
+    @app.get("/api/discovery/youtube/status")
+    def youtube_discovery_status():
+        with connect(cfg.database_path) as c:
+            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key LIKE 'youtube_discovery_%'")}
+        try: queries=json.loads(values.get("youtube_discovery_queries","[]"))
+        except (ValueError,TypeError): queries=[]
+        return {
+            "configured":youtube_discovery_available(),
+            "api_key_configured":bool(os.getenv("GCF_YOUTUBE_API_KEY","").strip()),
+            "enabled":values.get("youtube_discovery_enabled")=="true",
+            "game_queries":queries,
+            "interval_minutes":int(values.get("youtube_discovery_interval_minutes","60")),
+            "next_run":values.get("youtube_discovery_next_at"),
+        }
+
+    @app.put("/api/discovery/youtube/schedule")
+    def set_youtube_discovery_schedule(data: TwitchScheduleIn):
+        if data.enabled and not youtube_discovery_available():
+            raise HTTPException(503,detail="YouTube metadata discovery requires GCF_YOUTUBE_API_KEY or a stored YouTube OAuth connection.")
+        t=now()
+        with session(cfg.database_path) as c:
+            values={
+                "youtube_discovery_enabled":"true" if data.enabled else "false",
+                "youtube_discovery_queries":json.dumps(data.game_queries),
+                "youtube_discovery_interval_minutes":str(data.interval_minutes),
+                "youtube_discovery_next_at":t if data.enabled else "",
+            }
+            for key,value in values.items():
+                c.execute("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,value,t))
+            event(c,"INFO","discovery.schedule_changed","YouTube metadata discovery schedule updated.",{"enabled":data.enabled,"queries":data.game_queries,"interval_minutes":data.interval_minutes})
+        return {"enabled":data.enabled,"game_queries":data.game_queries,"interval_minutes":data.interval_minutes,"next_run":t if data.enabled else None}
+
+    @app.post("/api/discovery/youtube",status_code=202)
+    def queue_youtube_discovery(data: TwitchDiscoveryIn):
+        if not youtube_discovery_available():
+            raise HTTPException(503,detail="YouTube metadata discovery requires GCF_YOUTUBE_API_KEY or a stored YouTube OAuth connection.")
+        t=now(); jid=str(uuid4())
+        with session(cfg.database_path) as c:
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            active=c.execute("SELECT id FROM jobs WHERE job_type='DISCOVER_YOUTUBE_VIDEOS' AND status IN ('QUEUED','RUNNING') LIMIT 1").fetchone()
+            if active:
+                return {"id":active["id"],"status":"ALREADY_QUEUED"}
+            c.execute("INSERT INTO jobs(id,job_type,status,payload_json,created_at,updated_at) VALUES(?,'DISCOVER_YOUTUBE_VIDEOS','QUEUED',?,?,?)",(jid,json.dumps(data.model_dump()),t,t))
+            event(c,"INFO","discovery.queued","YouTube metadata search queued.",{"job_id":jid,"queries":data.game_queries})
+        return {"id":jid,"status":"QUEUED","provider":"youtube_data_api","game_queries":data.game_queries,"rights_status":"UNKNOWN","media_downloaded":False}
 
     @app.get("/api/discovery/runs")
     def discovery_runs():
@@ -507,10 +560,10 @@ def create_app(settings=None,start_worker=True):
         with connect(cfg.database_path) as c:
             row=c.execute("SELECT output_path,qc_status FROM rendered_outputs WHERE id=?",(render_id,)).fetchone()
         if not row: raise HTTPException(404,detail="Rendered output not found.")
-        if row["qc_status"]!="PASS": raise HTTPException(409,detail="Only QC-passed outputs may be previewed from the production library.")
+        # Allow previewing REVIEW outputs so the owner can inspect QC flags; publishing still requires PASS.
         path=Path(row["output_path"]).resolve()
         if not path.is_file(): raise HTTPException(404,detail="Rendered file is missing.")
-        try: path.relative_to((cfg.data_dir/"outputs").resolve())
+        try: path.relative_to((cfg.database_path.parent/"outputs").resolve())
         except ValueError: raise HTTPException(403,detail="Output path is outside the managed output directory.")
         return FileResponse(path,media_type="video/mp4",filename=path.name)
 
