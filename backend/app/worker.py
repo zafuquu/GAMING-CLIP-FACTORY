@@ -2,7 +2,7 @@ import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfi
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
-from .db import connect, now, event
+from .db import connect, now, event, session
 from .integrations.twitch import TwitchHelix
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .content_director import plan_candidate
@@ -41,8 +41,8 @@ def run(args,timeout,cwd=None):
     if p.returncode: raise RuntimeError(f"{Path(args[0]).name} exited {p.returncode}: {(p.stderr or p.stdout)[-1500:]}")
     return p
 class Worker(threading.Thread):
-    def __init__(self,db,ffmpeg,ffprobe,timeout=120):
-        super().__init__(daemon=True,name="gcf-worker"); self.db=db; self.ffmpeg=ffmpeg; self.ffprobe=ffprobe; self.timeout=timeout; self.stop_event=threading.Event()
+    def __init__(self,db,ffmpeg,ffprobe,timeout=120,media_root=None):
+        super().__init__(daemon=True,name="gcf-worker"); self.db=Path(db).resolve(); self.ffmpeg=ffmpeg; self.ffprobe=ffprobe; self.timeout=timeout; self.media_root=Path(media_root or (self.db.parent/"media")).expanduser().resolve(); self.stop_event=threading.Event()
     def stop(self): self.stop_event.set()
     def run(self):
         while not self.stop_event.is_set():
@@ -54,6 +54,7 @@ class Worker(threading.Thread):
                 worked=False
             if not worked: self.stop_event.wait(1)
     def one(self):
+        self.scan_due_folder_watches()
         c=connect(self.db); job=None
         try:
             c.execute("BEGIN IMMEDIATE")
@@ -1094,6 +1095,165 @@ class Worker(threading.Thread):
             summary={"provider":"youtube_data_api","queries":outcomes,"found_total":found_total,"new_sources":inserted_total,"rights_status":"UNKNOWN","media_downloaded":False}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","discovery.completed",f"Discovered metadata for {found_total} YouTube videos; inserted {inserted_total} new sources.",{"job_id":job["id"],**summary}); c.commit()
+        finally:
+            c.close()
+
+
+    def scan_due_folder_watches(self):
+        """Scan mapped local folders on a persisted cadence; only import files for a current authorized source."""
+        t=now()
+        c=connect(self.db)
+        watches=[]
+        try:
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                return
+            c.execute("BEGIN IMMEDIATE")
+            watches=list(c.execute("""SELECT * FROM media_folder_watches
+                WHERE enabled=1 AND (next_scan_at IS NULL OR next_scan_at<=?)
+                ORDER BY created_at LIMIT 20""",(t,)))
+            for watch in watches:
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=max(15,min(3600,int(watch["scan_interval_seconds"]))))).isoformat(timespec="seconds")
+                c.execute("UPDATE media_folder_watches SET last_scan_at=?,next_scan_at=?,last_error='' WHERE id=?",(t,due,watch["id"]))
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
+        for watch in watches:
+            try:
+                self.scan_folder_watch(watch["id"])
+            except Exception as exc:
+                c=connect(self.db)
+                try:
+                    stamp=now()
+                    c.execute("UPDATE media_folder_watches SET last_error=?,updated_at=? WHERE id=?",(f"{type(exc).__name__}: {str(exc)[:900]}",stamp,watch["id"]))
+                    event(c,"ERROR","folder_watch.scan_failed","Local watched-folder scan failed.",{"watch_id":watch["id"],"error":str(exc)[:900]})
+                    c.commit()
+                finally:
+                    c.close()
+
+    def scan_folder_watch(self, watch_id, force=False):
+        c=connect(self.db)
+        try:
+            watch=c.execute("SELECT * FROM media_folder_watches WHERE id=?",(watch_id,)).fetchone()
+            if not watch:
+                raise FileNotFoundError("Watched-folder record not found.")
+            if not watch["enabled"] and not force:
+                return {"watch_id":watch_id,"enabled":False,"files_seen":0,"imported":0}
+            root=self.media_root.resolve()
+            folder=(root/str(watch["relative_path"]).replace("\\\\","/")).resolve()
+            try: folder.relative_to(root)
+            except ValueError: raise PermissionError("Watched folder escapes the configured media root.")
+            if not folder.is_dir():
+                raise FileNotFoundError("Watched folder does not exist; create it under the media root.")
+            source=c.execute("""SELECT s.id,p.status,p.expires_at FROM sources s
+                JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(watch["source_id"],)).fetchone()
+            if not source:
+                raise FileNotFoundError("Watched-folder source no longer exists.")
+            supported={".mp4",".mkv",".webm",".mov",".avi",".m4v"}
+            files=[]
+            if bool(watch["recursive"]):
+                iterator=folder.rglob("*")
+            else:
+                iterator=folder.iterdir()
+            for path in iterator:
+                try:
+                    if path.name.startswith(".") or path.is_symlink() or not path.is_file() or path.suffix.lower() not in supported:
+                        continue
+                    resolved=path.resolve()
+                    resolved.relative_to(root)
+                    resolved.relative_to(folder)
+                    if resolved.stat().st_size<=0:
+                        continue
+                    files.append(resolved)
+                except (OSError,ValueError):
+                    continue
+            files.sort(key=lambda p:str(p).casefold())
+            c.close()
+            return self._process_watched_files(watch,source,files,root)
+        finally:
+            try: c.close()
+            except Exception: pass
+
+    def _process_watched_files(self, watch, source, files, root):
+        c=connect(self.db)
+        imported=0; duplicates=0; pending=0; blocked=0
+        try:
+            t=now()
+            stable_seconds=max(5,min(300,int(os.getenv("GCF_WATCH_STABLE_SECONDS","15") or "15")))
+            for path in files:
+                stat=path.stat()
+                rel=path.relative_to(root).as_posix()
+                prior=c.execute("SELECT * FROM watched_media_files WHERE watch_id=? AND relative_path=?",(watch["id"],rel)).fetchone()
+                if prior and prior["status"] in {"IMPORTED","DUPLICATE"}:
+                    continue
+                if prior and int(prior["observed_size"])==stat.st_size and int(prior["observed_mtime_ns"])==stat.st_mtime_ns:
+                    try:
+                        stable_since=datetime.fromisoformat(str(prior["stable_since"]).replace("Z","+00:00"))
+                        if stable_since.tzinfo is None: stable_since=stable_since.replace(tzinfo=timezone.utc)
+                        stable_age=(datetime.now(timezone.utc)-stable_since).total_seconds()
+                    except (ValueError,TypeError):
+                        stable_age=0
+                    if stable_age<stable_seconds:
+                        pending+=1
+                        c.execute("UPDATE watched_media_files SET last_seen_at=? WHERE id=?",(t,prior["id"]))
+                        continue
+                else:
+                    stable_since=t
+                    if prior:
+                        c.execute("UPDATE watched_media_files SET observed_size=?,observed_mtime_ns=?,stable_since=?,last_seen_at=?,status='PENDING_STABILITY',error='' WHERE id=?",
+                                  (stat.st_size,stat.st_mtime_ns,t,t,prior["id"]))
+                    else:
+                        c.execute("""INSERT INTO watched_media_files(id,watch_id,relative_path,observed_size,observed_mtime_ns,stable_since,first_seen_at,last_seen_at,status)
+                            VALUES(?,?,?,?,?,?,?,?,'PENDING_STABILITY')""",
+                                  (str(uuid4()),watch["id"],rel,stat.st_size,stat.st_mtime_ns,t,t,t))
+                    pending+=1
+                    continue
+                # The file is stable. Re-check rights immediately before importing and queueing analysis.
+                if source["status"]!="AUTHORIZED" or expiry_passed(source["expires_at"]):
+                    blocked+=1
+                    c.execute("""UPDATE watched_media_files SET status='SKIPPED_RIGHTS',error='Source is not currently authorized or its permission has expired.',last_seen_at=? WHERE watch_id=? AND relative_path=?""",(t,watch["id"],rel))
+                    continue
+                current=path.stat()
+                if current.st_size!=stat.st_size or current.st_mtime_ns!=stat.st_mtime_ns:
+                    c.execute("UPDATE watched_media_files SET observed_size=?,observed_mtime_ns=?,stable_since=?,status='PENDING_STABILITY',last_seen_at=? WHERE watch_id=? AND relative_path=?",
+                              (current.st_size,current.st_mtime_ns,t,t,watch["id"],rel))
+                    pending+=1
+                    continue
+                digest=hashlib.sha256()
+                with path.open("rb") as stream:
+                    for block in iter(lambda:stream.read(1024*1024),b""): digest.update(block)
+                sha=digest.hexdigest()
+                dupe=c.execute("SELECT id FROM media_assets WHERE source_id=? AND sha256=?",(watch["source_id"],sha)).fetchone()
+                if dupe:
+                    duplicates+=1
+                    c.execute("""UPDATE watched_media_files SET status='DUPLICATE',media_id=?,error='This exact file is already registered for the source.',last_seen_at=? WHERE watch_id=? AND relative_path=?""",
+                              (dupe["id"],t,watch["id"],rel))
+                    continue
+                media_id=str(uuid4())
+                c.execute("""INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,state,created_at)
+                    VALUES(?,?,?,?,?,?,'IMPORTED',?)""",
+                    (media_id,watch["source_id"],str(path),path.name,current.st_size,sha,t))
+                if bool(watch["auto_analyze"]):
+                    active=c.execute("""SELECT id FROM jobs WHERE media_id=? AND job_type='ANALYZE_MEDIA'
+                        AND status IN ('QUEUED','RUNNING') LIMIT 1""",(media_id,)).fetchone()
+                    if not active:
+                        job_id=str(uuid4())
+                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,created_at,updated_at)
+                            VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?,?,?)""",(job_id,watch["source_id"],media_id,t,t))
+                c.execute("""UPDATE watched_media_files SET status='IMPORTED',media_id=?,error='',last_seen_at=? WHERE watch_id=? AND relative_path=?""",
+                          (media_id,t,watch["id"],rel))
+                event(c,"INFO","folder_watch.media_imported","Stable, authorized local file was imported from a watched folder.",
+                      {"watch_id":watch["id"],"media_id":media_id,"source_id":watch["source_id"],"file_name":path.name,"auto_analyze":bool(watch["auto_analyze"])})
+                imported+=1
+            c.execute("UPDATE media_folder_watches SET last_error='',updated_at=? WHERE id=?",(t,watch["id"]))
+            c.commit()
+            return {"watch_id":watch["id"],"files_seen":len(files),"imported":imported,"duplicates":duplicates,"pending_stability":pending,"blocked_rights":blocked}
+        except Exception:
+            c.rollback()
+            raise
         finally:
             c.close()
 
