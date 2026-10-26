@@ -10,6 +10,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - **Local media intake:** files must be under the configured media root; file extension, SHA-256 and duplicate checks are enforced.
 - **Analysis:** FFprobe metadata and FFmpeg scene-change intervals. Scene changes are heuristics, not a semantic highlight detector.
 - **Optional local speech recognition:** Faster-Whisper can produce transcript and timed word/phrase segments after explicit opt-in. A deterministic transcript-grounded content director suggests a format/title/description/tags and writes caption timing. It does not invent narration or assert that an event happened.
+- **Optional local vision assessment:** an Ollama-compatible vision model can sample three frames per candidate and return a structured event/evidence estimate. These model scores are uncalibrated and cannot auto-approve candidates. Vision is disabled by default, blocks remote inference endpoints unless explicitly overridden, and keeps review/rights/QC gates intact.
 - **Candidate review:** owner can approve/reject candidate windows in the dashboard.
 - **Local rendering:** approved intervals render as H.264/AAC 1080×1920 MP4 fit-and-pad output, preserving the full gameplay frame rather than forcing a center crop. When transcript caption timings exist and the FFmpeg subtitle filter is present, captions may be burned in; an SRT sidecar is also saved.
 - **Automated QC:** verifies file size, probe/decode success, dimensions, duration, codecs, source audio preservation and scans for long fully-black frames/potential frozen frames. Warnings are REVIEW, not PASS. Only PASS outputs may be queued for YouTube.
@@ -19,7 +20,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 ## Still not complete
 
 - No platform currently provides automatic legal permission to republish the footage found in its public search results. Owner must supply/prove rights or provide authorized files; no source media is downloaded by this alpha.
-- Scene-change + transcript heuristics do not reliably identify gameplay events (clutches, kills, strategy, funny moments) across games. A verified game-aware vision model/event classifier and score calibration still need implementation and labelled validation footage.
+- Scene-change + transcript heuristics and sparse-frame vision assessments do not reliably identify gameplay events (clutches, kills, strategy, funny moments) across games. Vision assessments are subjective estimates, not a validated detector or calibrated ranker; broad game-aware accuracy still needs labelled validation footage.
 - AI narration, high-quality caption correction, thumbnails, diverse advanced compositions, safe-area validation and full template system remain incomplete.
 - Remotion is not integrated; first review license/version fit for the intended use.
 - No real credentials/channel has been set up or tested from this repository. YouTube integrations are credential-gated.
@@ -88,6 +89,15 @@ API quotas, YouTube account/channel restrictions, credential verification, publi
 2. Set GCF_ENABLE_TRANSCRIPTION=true.
 3. Prefer GCF_WHISPER_MODEL_PATH to an already downloaded local model directory. Alternatively set GCF_WHISPER_ALLOW_MODEL_DOWNLOAD=true to explicitly allow the optional model download. Check model/dependency licensing and use CPU int8 first unless you have verified compatible GPU support.
 4. Restart the backend. Media analysis will queue local transcription after scene analysis, persist timed segments and produce a draft content plan. Human review is still required.
+
+## Optional local gameplay vision assessment
+
+1. Install Ollama locally and run `ollama run llama3.2-vision` once to download/start a vision model (check the model's current license and hardware requirements first).
+2. Set `GCF_ENABLE_VISION_ANALYSIS=true` in local `.env`; the default endpoint is `http://127.0.0.1:11434/api/chat`.
+3. Restart the backend. Use Candidate Review → Analyze with vision or enable the flag to queue assessments after media analysis.
+4. Vision samples three frames per candidate, optionally supplies an available transcript excerpt, and records the model's event type, visible evidence, quality issues, subjective highlight score and confidence. These are not calibrated probabilities and do not prove an event. The candidate remains `NEEDS_REVIEW`; a person still watches the clip before approval.
+5. Remote endpoints are blocked by default because sampled gameplay frames may be private. Only set `GCF_VISION_ALLOW_REMOTE=true` after a deliberate privacy review. This does not bypass the rights gate.
+
 
 ## Test and CI
 
