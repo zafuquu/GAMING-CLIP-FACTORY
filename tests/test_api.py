@@ -80,6 +80,8 @@ def test_render_migration_is_applied(tmp_path):
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
+    columns={row[1] for row in raw.execute("PRAGMA table_info(rendered_outputs)")}
+    assert {"render_profile","thumbnail_path","thumbnail_sha256","thumbnail_width","thumbnail_height"}.issubset(columns)
     assert {1,2,3,4,5,6,7,8,9}.issubset(versions)
     with sqlite3.connect(c.app.state.settings.database_path) as raw:
         render_columns={row[1] for row in raw.execute("PRAGMA table_info(rendered_outputs)")}
@@ -521,3 +523,37 @@ def test_migration_prefixes_are_unique():
     migrations=ROOT/"backend"/"app"/"migrations"
     versions=[int(path.name.split("_",1)[0]) for path in migrations.glob("[0-9][0-9][0-9]_*.sql")]
     assert len(versions)==len(set(versions)),f"Duplicate migration version prefixes: {versions}"
+
+def test_migration_files_have_unique_versions():
+    from pathlib import Path
+    migration_dir=Path(__file__).resolve().parents[1]/"backend"/"app"/"migrations"
+    versions=[int(path.name.split("_",1)[0]) for path in migration_dir.glob("[0-9][0-9][0-9]_*.sql")]
+    assert len(versions)==len(set(versions)),f"Duplicate migration versions: {versions}"
+    assert sorted(versions)==list(range(1,max(versions)+1))
+
+def test_failed_migration_rolls_back_schema_and_version_marker(tmp_path,monkeypatch):
+    import app.db as database
+    migrations=tmp_path/"migrations"; migrations.mkdir()
+    (migrations/"001_bad.sql").write_text("CREATE TABLE partial_migration_table(id INTEGER);\\nTHIS IS NOT SQL;\\n",encoding="utf-8")
+    monkeypatch.setattr(database,"MIGRATIONS_DIR",migrations)
+    path=tmp_path/"broken.sqlite3"
+    with pytest.raises(sqlite3.OperationalError):
+        database.initialize(path)
+    with sqlite3.connect(path) as raw:
+        tables={row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
+    assert "partial_migration_table" not in tables
+    assert 1 not in versions
+
+def test_duplicate_migration_versions_fail_before_applying(tmp_path,monkeypatch):
+    import app.db as database
+    migrations=tmp_path/"migrations"; migrations.mkdir()
+    (migrations/"001_first.sql").write_text("CREATE TABLE first_table(id INTEGER);",encoding="utf-8")
+    (migrations/"001_second.sql").write_text("CREATE TABLE second_table(id INTEGER);",encoding="utf-8")
+    monkeypatch.setattr(database,"MIGRATIONS_DIR",migrations)
+    path=tmp_path/"duplicate.sqlite3"
+    with pytest.raises(RuntimeError,match="Duplicate SQL migration version"):
+        database.initialize(path)
+    with sqlite3.connect(path) as raw:
+        tables={row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "first_table" not in tables and "second_table" not in tables
