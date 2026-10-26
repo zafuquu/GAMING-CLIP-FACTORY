@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import sqlite3
 import sys
 from fastapi.testclient import TestClient
 ROOT=Path(__file__).resolve().parents[1]
@@ -54,4 +56,17 @@ def test_pause_blocks_analysis_queue(tmp_path):
 def test_autonomous_mode_is_refused(tmp_path):
     c,_=setup_client(tmp_path)
     assert c.put("/api/settings/mode",json={"mode":"autonomous"}).status_code==422
+    c.__exit__(None,None,None)
+
+def test_expired_permission_blocks_media_import(tmp_path):
+    c,media=setup_client(tmp_path); sid=add_source(c)
+    media.mkdir(parents=True,exist_ok=True); (media/"clip.mp4").write_bytes(b"test")
+    expired=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat()
+    db=c.app.state.settings.database_path
+    with sqlite3.connect(db) as raw:
+        raw.execute("UPDATE source_permissions SET status='AUTHORIZED',license_type='Written permission',permission_evidence='https://example.com/proof',editing_allowed=1,commercial_use_allowed=1,reviewed_by_owner=1,expires_at=? WHERE source_id=?",(expired,sid))
+    listed=c.get("/api/sources").json()
+    assert next(x for x in listed if x["id"]==sid)["rights_status"]=="EXPIRED"
+    response=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
+    assert response.status_code==409
     c.__exit__(None,None,None)
