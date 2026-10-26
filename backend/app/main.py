@@ -208,7 +208,7 @@ def create_app(settings=None,start_worker=True):
     def media():
         with connect(cfg.database_path) as c:
             result=[]
-            for r in c.execute("SELECT m.*,s.title AS source_title,p.status AS rights_status,p.expires_at FROM media_assets m JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id ORDER BY m.created_at DESC"):
+            for r in c.execute("SELECT m.*,s.title AS source_title,p.status AS rights_status,p.expires_at,t.status AS transcript_status FROM media_assets m JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id LEFT JOIN transcripts t ON t.media_id=m.id ORDER BY m.created_at DESC"):
                 item=dict(r); item["probe"]=json.loads(item.pop("probe_json")) if item["probe_json"] else None
                 if item["rights_status"] == "AUTHORIZED" and expiry_passed(item.get("expires_at")): item["rights_status"] = "EXPIRED"
                 result.append(item)
@@ -310,8 +310,8 @@ def create_app(settings=None,start_worker=True):
     def renders():
         with connect(cfg.database_path) as c:
             rows=[]
-            for r in c.execute("SELECT ro.*,m.file_name,s.title AS source_title FROM rendered_outputs ro JOIN media_assets m ON m.id=ro.media_id JOIN sources s ON s.id=m.source_id ORDER BY ro.created_at DESC"):
-                item=dict(r); item["qc_report"]=json.loads(item.pop("qc_report_json")); rows.append(item)
+            for r in c.execute("SELECT ro.*,m.file_name,s.title AS source_title,cp.title AS suggested_title,cp.description AS suggested_description,cp.tags_json AS suggested_tags_json,cp.chosen_format AS content_format,cp.hook_text AS content_hook FROM rendered_outputs ro JOIN media_assets m ON m.id=ro.media_id JOIN sources s ON s.id=m.source_id LEFT JOIN content_plans cp ON cp.candidate_id=ro.candidate_id ORDER BY ro.created_at DESC"):
+                item=dict(r); item["qc_report"]=json.loads(item.pop("qc_report_json")); item["suggested_tags"]=json.loads(item.pop("suggested_tags_json") or "[]"); rows.append(item)
             return rows
     @app.get("/api/jobs")
     def jobs():
