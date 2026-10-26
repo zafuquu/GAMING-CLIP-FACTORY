@@ -154,3 +154,46 @@ def test_retry_thumbnail_endpoint_regenerates_missing_cover_and_respects_gates(t
         row=db.execute("SELECT job_type,status FROM jobs WHERE id=?",(response.json()["id"],)).fetchone()
     assert tuple(row)==("GENERATE_YOUTUBE_THUMBNAIL","QUEUED")
     client.__exit__(None,None,None)
+
+
+def test_custom_thumbnail_preview_checks_hash_and_returns_jpeg(tmp_path,monkeypatch):
+    client,cfg,ids=fixture(tmp_path,monkeypatch,thumbnail_status="SET_PENDING",has_thumbnail=True)
+    response=client.get(f"/api/publishing/videos/{ids['published_id']}/thumbnail")
+    assert response.status_code==200,response.text[:300]
+    assert response.headers["content-type"].startswith("image/jpeg")
+    assert response.content[:2]==bytes((255,216))
+    corrupt_path=Path(response.headers.get("x-no-such-header",""))
+    with sqlite3.connect(ids["db"]) as db:
+        pub=db.execute("SELECT custom_thumbnail_path FROM published_videos WHERE id=?",(ids["published_id"],)).fetchone()[0]
+        with open(pub,"ab") as handle: handle.write(b"tampered")
+    corrupt=client.get(f"/api/publishing/videos/{ids['published_id']}/thumbnail")
+    assert corrupt.status_code==409
+    client.__exit__(None,None,None)
+
+
+def test_retry_thumbnail_is_blocked_by_global_pause(tmp_path,monkeypatch):
+    import app.main as main_module
+    client,cfg,ids=fixture(tmp_path,monkeypatch,thumbnail_status="SET_PENDING",has_thumbnail=True)
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":True,"channel_title":"Synthetic CI"})
+    assert client.post("/api/system/pause",json={"paused":True}).status_code==200
+    response=client.post(f"/api/publishing/videos/{ids['published_id']}/retry-thumbnail")
+    assert response.status_code==423,response.text
+    with sqlite3.connect(ids["db"]) as db:
+        count=db.execute("SELECT COUNT(*) FROM jobs WHERE job_type IN ('GENERATE_YOUTUBE_THUMBNAIL','SET_YOUTUBE_THUMBNAIL')").fetchone()[0]
+    assert count==0
+    client.__exit__(None,None,None)
+
+
+def test_retry_thumbnail_upload_when_artifact_is_valid(tmp_path,monkeypatch):
+    import app.main as main_module
+    client,cfg,ids=fixture(tmp_path,monkeypatch,thumbnail_status="FAILED",has_thumbnail=True)
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":True,"channel_title":"Synthetic CI"})
+    response=client.post(f"/api/publishing/videos/{ids['published_id']}/retry-thumbnail")
+    assert response.status_code==202,response.text
+    assert response.json()["job_type"]=="SET_YOUTUBE_THUMBNAIL"
+    with sqlite3.connect(ids["db"]) as db:
+        job=db.execute("SELECT job_type,status FROM jobs WHERE id=?",(response.json()["id"],)).fetchone()
+        status=db.execute("SELECT custom_thumbnail_status FROM published_videos WHERE id=?",(ids["published_id"],)).fetchone()[0]
+    assert tuple(job)==("SET_YOUTUBE_THUMBNAIL","QUEUED")
+    assert status=="SET_PENDING"
+    client.__exit__(None,None,None)
