@@ -106,13 +106,15 @@ class AnalyticsSyncIn(BaseModel):
     end_date: str | None = None
     @model_validator(mode="after")
     def check_dates(self):
-        end=self.end_date or date.today().isoformat()
-        start=self.start_date or (date.today()-timedelta(days=7)).isoformat()
+        # YouTube Analytics windows use UTC dates consistently with the worker scheduler.
+        utc_yesterday=datetime.now(timezone.utc).date()-timedelta(days=1)
+        end=self.end_date or utc_yesterday.isoformat()
+        start=self.start_date or (utc_yesterday-timedelta(days=6)).isoformat()
         try:
             start_d=date.fromisoformat(start); end_d=date.fromisoformat(end)
         except ValueError as exc: raise ValueError("Analytics dates must use YYYY-MM-DD.") from exc
         if end_d<start_d: raise ValueError("end_date cannot precede start_date.")
-        if end_d>date.today(): raise ValueError("end_date cannot be in the future.")
+        if end_d>utc_yesterday: raise ValueError("end_date must be yesterday or earlier in UTC; current-day metrics may be incomplete.")
         self.start_date=start_d.isoformat(); self.end_date=end_d.isoformat()
         return self
 
@@ -757,7 +759,8 @@ def create_app(settings=None,start_worker=True):
 
     @app.get("/api/youtube/analytics/summary")
     def youtube_analytics_summary(start_date: str | None=None, end_date: str | None=None):
-        yesterday=date.today()-timedelta(days=1)
+        # Keep the report window in UTC to match recurring worker snapshots.
+        yesterday=datetime.now(timezone.utc).date()-timedelta(days=1)
         try:
             report_end=date.fromisoformat(end_date) if end_date else yesterday
             report_start=date.fromisoformat(start_date) if start_date else report_end-timedelta(days=6)
