@@ -468,6 +468,14 @@ class Worker(threading.Thread):
             if not isinstance(tags,list): tags=[]
             # Remote upload always starts private. A separate worker polls processing status,
             # then schedules public release only after YouTube reports processing succeeded.
+            if pause and pause["value"]=="true":
+                t=now()
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+                c.execute("UPDATE published_videos SET publishing_status='UPLOAD_PENDING',upload_request_started_at=NULL,updated_at=? WHERE id=? AND publishing_status='UPLOADING'",(t,published_id))
+                c.execute("UPDATE jobs SET status='QUEUED',error='Global pause enabled before upload started; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
+                event(c,"WARNING","youtube.upload_deferred_by_pause","Global pause prevented the remote upload from starting.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
             result=upload_video(output,row["title"],row["description"],[str(x) for x in tags])
             t=now()
             c.execute("""UPDATE published_videos SET youtube_video_id=?,publishing_status='PROCESSING',
@@ -553,7 +561,7 @@ class Worker(threading.Thread):
                 c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',publishing_status=?,updated_at=? WHERE id=?",
                           (t,final_state,t,published_id))
                 if final_state=="SCHEDULED":
-                    existing=c.execute("SELECT id FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING','COMPLETED','RECONCILE_REQUIRED') AND payload_json LIKE ? ORDER BY created_at DESC LIMIT 1",("%"+published_id+"%",)).fetchone()
+                    existing=c.execute("SELECT id FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? ORDER BY created_at DESC LIMIT 1",("%"+published_id+"%",)).fetchone()
                     if not existing:
                         parsed=datetime.fromisoformat(scheduled_at.replace("Z","+00:00"))
                         if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
@@ -664,8 +672,8 @@ class Worker(threading.Thread):
                     check_id=str(uuid4())
                     c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at) VALUES(?,'CHECK_YOUTUBE_PROCESSING','QUEUED',?,?, ?,?,?,?)",
                               (check_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20}),t,t,due))
-                c.execute("UPDATE jobs SET status='QUEUED',error='Waiting for YouTube processing to succeed before public release.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",
-                          (t,due,job["id"]))
+                c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                          (json.dumps({"published_video_id":published_id,"deferred":True,"reason":"YouTube processing is not yet successful","processing_status":remote_processing,"recheck_job_queued":True}),t,t,job["id"]))
                 event(c,"WARNING","youtube.publication_deferred","Public release deferred because YouTube processing is not yet successful.",{"job_id":job["id"],"published_video_id":published_id,"processing_status":remote_processing,"next_attempt_at":due})
                 c.commit()
                 return
@@ -682,6 +690,14 @@ class Worker(threading.Thread):
             if row["remote_processing_status"]!="succeeded":
                 # Keep remote processing state as a recorded precondition; the live query above is authoritative.
                 c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,updated_at=? WHERE id=?",(now(),now(),published_id))
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                t=now()
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+                c.execute("UPDATE jobs SET status='QUEUED',error='Global pause enabled before public state change; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
+                event(c,"WARNING","youtube.publication_deferred_by_pause","Global pause prevented the remote video from being made public.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
             t=now()
             try:
                 service.videos().update(part="status",body={"id":row["youtube_video_id"],"status":{"privacyStatus":"public"}}).execute()
