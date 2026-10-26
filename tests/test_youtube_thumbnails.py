@@ -197,3 +197,34 @@ def test_retry_thumbnail_upload_when_artifact_is_valid(tmp_path,monkeypatch):
     assert tuple(job)==("SET_YOUTUBE_THUMBNAIL","QUEUED")
     assert status=="SET_PENDING"
     client.__exit__(None,None,None)
+
+
+def test_processing_success_queues_generated_thumbnail_after_remote_processing(tmp_path,monkeypatch):
+    client,cfg,ids=fixture(tmp_path,monkeypatch,thumbnail_status="GENERATED",has_thumbnail=True)
+    import json
+    import app.worker as worker_mod
+    class Req:
+        def execute(self):
+            return {"items":[{"id":"youtube-video-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]}
+    class Videos:
+        def list(self,**kwargs): return Req()
+    class Service:
+        def videos(self): return Videos()
+    monkeypatch.setattr(worker_mod,"youtube_service",lambda:Service())
+    stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with sqlite3.connect(ids["db"]) as db:
+        db.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+            ("check-thumb-processing","CHECK_YOUTUBE_PROCESSING","RUNNING",ids["source_id"],ids["media_id"],
+             json.dumps({"published_video_id":ids["published_id"],"poll_attempt":0,"max_polls":5}),stamp,stamp))
+        db.execute("UPDATE published_videos SET publishing_status='PROCESSING',remote_processing_status='processing' WHERE id=?",(ids["published_id"],))
+    worker=Worker(cfg.database_path,None,None,10)
+    worker.check_youtube_processing({"id":"check-thumb-processing","payload_json":json.dumps({"published_video_id":ids["published_id"],"poll_attempt":0,"max_polls":5})})
+    with sqlite3.connect(ids["db"]) as db:
+        db.row_factory=sqlite3.Row
+        jobs=db.execute("SELECT job_type,status,payload_json FROM jobs WHERE job_type='SET_YOUTUBE_THUMBNAIL'").fetchall()
+        pub=db.execute("SELECT publishing_status,custom_thumbnail_status,remote_processing_status FROM published_videos WHERE id=?",(ids["published_id"],)).fetchone()
+    assert len(jobs)==1
+    assert jobs[0]["status"]=="QUEUED"
+    assert json.loads(jobs[0]["payload_json"])["published_video_id"]==ids["published_id"]
+    assert tuple(pub)==("READY_PRIVATE","SET_PENDING","succeeded")
+    client.__exit__(None,None,None)
