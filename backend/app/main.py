@@ -888,7 +888,20 @@ def create_app(settings=None,start_worker=True):
                 try:
                     image_path.relative_to((cfg.database_path.parent/"outputs").resolve())
                     artifact_valid=digest(image_path)==row["custom_thumbnail_sha256"]
-                except (OSError,ValueError):
+                    if artifact_valid:
+                        from PIL import Image
+                        with Image.open(image_path) as cover: cover.verify()
+                        with Image.open(image_path) as cover:
+                            actual_width,actual_height=cover.size
+                            artifact_valid=(
+                                cover.format=="JPEG"
+                                and actual_width in {1080,2160}
+                                and actual_height in {1920,3840}
+                                and actual_height==actual_width*16//9
+                                and actual_width==row["custom_thumbnail_width"]
+                                and actual_height==row["custom_thumbnail_height"]
+                            )
+                except (OSError,ValueError,TypeError):
                     artifact_valid=False
             if artifact_valid:
                 job_type="SET_YOUTUBE_THUMBNAIL"
