@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event
 from .integrations.twitch import TwitchHelix
-from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service
+from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service, youtube_discovery_available, search_public_videos
 
 def expiry_passed(value):
     if not value:
@@ -64,6 +64,7 @@ class Worker(threading.Thread):
         finally: c.close()
         if not job:
             self.schedule_due_discovery()
+            self.schedule_due_youtube_discovery()
             return False
         try:
             if job["job_type"] == "ANALYZE_MEDIA":
@@ -72,6 +73,8 @@ class Worker(threading.Thread):
                 self.render_candidate(job)
             elif job["job_type"] == "DISCOVER_TWITCH_CLIPS":
                 self.discover_twitch(job)
+            elif job["job_type"] == "DISCOVER_YOUTUBE_VIDEOS":
+                self.discover_youtube(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
                 self.upload_youtube(job)
             elif job["job_type"] == "PUBLISH_YOUTUBE":
@@ -575,6 +578,76 @@ class Worker(threading.Thread):
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","transcription.completed","Local transcription, content plans and caption timings persisted.",{"job_id":job["id"],**summary})
             c.commit()
+        finally:
+            c.close()
+
+
+    def schedule_due_youtube_discovery(self):
+        """Queue scheduled YouTube public-metadata search when configured and due."""
+        if not youtube_discovery_available():
+            return
+        c=connect(self.db)
+        try:
+            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('global_paused','youtube_discovery_enabled','youtube_discovery_queries','youtube_discovery_interval_minutes','youtube_discovery_next_at')")}
+            if values.get("global_paused")=="true" or values.get("youtube_discovery_enabled")!="true":
+                return
+            try: queries=json.loads(values.get("youtube_discovery_queries","[]"))
+            except ValueError: return
+            if not isinstance(queries,list) or not queries: return
+            next_at=values.get("youtube_discovery_next_at")
+            if next_at:
+                try:
+                    due=datetime.fromisoformat(next_at.replace("Z","+00:00"))
+                    if due.tzinfo is None: due=due.replace(tzinfo=timezone.utc)
+                    if due>datetime.now(timezone.utc): return
+                except ValueError:
+                    pass
+            jid=str(uuid4()); t=now()
+            c.execute("INSERT INTO jobs(id,job_type,status,payload_json,created_at,updated_at) VALUES(?,'DISCOVER_YOUTUBE_VIDEOS','QUEUED',?,?,?)",(jid,json.dumps({"game_queries":queries,"days":7,"max_results":50}),t,t))
+            minutes=max(15,min(1440,int(values.get("youtube_discovery_interval_minutes","60"))))
+            next_time=(datetime.now(timezone.utc)+__import__("datetime").timedelta(minutes=minutes)).isoformat(timespec="seconds")
+            c.execute("UPDATE settings SET value=?,updated_at=? WHERE key='youtube_discovery_next_at'",(next_time,t))
+            event(c,"INFO","discovery.scheduled_job_queued","Scheduled YouTube metadata search queued.",{"job_id":jid,"queries":queries,"next_run":next_time})
+            c.commit()
+        finally:
+            c.close()
+
+    def discover_youtube(self, job):
+        payload=json.loads(job["payload_json"] or "{}")
+        queries=payload.get("game_queries",[])
+        if not isinstance(queries,list) or not queries:
+            raise ValueError("YouTube discovery job requires one or more search queries.")
+        if not youtube_discovery_available():
+            raise YouTubeNotConfigured("Set GCF_YOUTUBE_API_KEY for public metadata search or connect a YouTube OAuth channel.")
+        c=connect(self.db)
+        found_total=0; inserted_total=0; outcomes=[]
+        try:
+            for raw_query in queries[:20]:
+                query=str(raw_query).strip()[:120]
+                if not query: continue
+                run_id=str(uuid4()); started=now()
+                c.execute("INSERT INTO discovery_runs(id,provider,query,status,started_at) VALUES(?,?,?,?,?)",(run_id,"youtube_data_api",query,"RUNNING",started)); c.commit()
+                try:
+                    items=search_public_videos(query,days=int(payload.get("days",7)),max_results=int(payload.get("max_results",50)))
+                    inserted=0
+                    for item in items:
+                        found_total+=1
+                        cur=c.execute("""INSERT OR IGNORE INTO sources(id,source_url,platform,title,creator,game,discovered_at,created_at,external_source_id,provider_metadata_json)
+                            VALUES(?,?,?,?,?,?,?,?,?,?)""",(str(uuid4()),item["url"],"youtube",item["title"],item["creator"],item["game"],now(),now(),item["provider_video_id"],json.dumps(item)))
+                        if cur.rowcount:
+                            sid=c.execute("SELECT id FROM sources WHERE source_url=?",(item["url"],)).fetchone()["id"]
+                            c.execute("INSERT OR IGNORE INTO source_permissions(source_id,status,updated_at) VALUES(?,'UNKNOWN',?)",(sid,now()))
+                            inserted+=1; inserted_total+=1
+                    c.execute("UPDATE discovery_runs SET status='COMPLETED',found_count=?,inserted_count=?,finished_at=? WHERE id=?",(len(items),inserted,now(),run_id))
+                    outcomes.append({"query":query,"found":len(items),"inserted":inserted})
+                    c.commit()
+                except Exception as exc:
+                    c.execute("UPDATE discovery_runs SET status='FAILED',error=?,finished_at=? WHERE id=?",(str(exc)[:1500],now(),run_id)); c.commit()
+                    raise
+            t=now()
+            summary={"provider":"youtube_data_api","queries":outcomes,"found_total":found_total,"new_sources":inserted_total,"rights_status":"UNKNOWN","media_downloaded":False}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","discovery.completed",f"Discovered metadata for {found_total} YouTube videos; inserted {inserted_total} new sources.",{"job_id":job["id"],**summary}); c.commit()
         finally:
             c.close()
 
