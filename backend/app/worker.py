@@ -1,7 +1,19 @@
 import json, re, subprocess, threading
 from pathlib import Path
+from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event
+
+def expiry_passed(value):
+    if not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed <= datetime.now(timezone.utc)
+    except (ValueError, TypeError):
+        return True
 
 SCENE=re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 def run(args,timeout):
@@ -46,9 +58,9 @@ class Worker(threading.Thread):
         if not self.ffmpeg or not self.ffprobe: raise RuntimeError("FFmpeg/FFprobe not configured. Set GCF_FFMPEG_PATH and GCF_FFPROBE_PATH.")
         c=connect(self.db)
         try:
-            m=c.execute("SELECT m.*,p.status AS rights_status FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(job["media_id"],)).fetchone()
+            m=c.execute("SELECT m.*,p.status AS rights_status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(job["media_id"],)).fetchone()
             if not m: raise FileNotFoundError("Media record missing")
-            if m["rights_status"]!="AUTHORIZED": raise PermissionError("Rights gate blocked analysis")
+            if m["rights_status"]!="AUTHORIZED" or expiry_passed(m["expires_at"]): raise PermissionError("Rights gate blocked analysis: current AUTHORIZED permission is required")
             path=Path(m["original_path"])
             if not path.is_file(): raise FileNotFoundError("Media file missing")
             probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(path)],min(60,self.timeout))
