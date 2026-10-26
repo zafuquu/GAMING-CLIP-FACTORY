@@ -13,6 +13,8 @@ import keyring
 
 SERVICE_NAME = "gaming-clip-factory-ai"
 CREDENTIALS_KEY = "youtube-oauth-credentials"
+CREDENTIALS_SCOPE_VERSION_KEY = "youtube-oauth-scope-version"
+CREDENTIALS_SCOPE_VERSION = "2"
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.force-ssl",
@@ -26,6 +28,9 @@ def load_credentials():
     raw = keyring.get_password(SERVICE_NAME, CREDENTIALS_KEY)
     if not raw:
         raise YouTubeNotConfigured("YouTube is not connected. Configure GCF_YOUTUBE_CLIENT_SECRETS and run the local OAuth command.")
+    scope_version=keyring.get_password(SERVICE_NAME, CREDENTIALS_SCOPE_VERSION_KEY)
+    if scope_version!=CREDENTIALS_SCOPE_VERSION:
+        raise YouTubeNotConfigured("Stored YouTube authorization predates the current upload/processing scopes. Reconnect the channel by running the local OAuth command again.")
     try:
         data = json.loads(raw)
         credentials = Credentials.from_authorized_user_info(data, scopes=SCOPES)
