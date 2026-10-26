@@ -42,10 +42,13 @@ class MediaIn(BaseModel):
 class CandidateDecisionIn(BaseModel):
     decision: str
     notes: str = ""
+    render_profile: str = "fit_pad"
     @model_validator(mode="after")
     def check_decision(self):
         if self.decision not in {"approve","reject"}:
             raise ValueError("decision must be approve or reject")
+        if self.render_profile not in {"fit_pad","blur_fill"}:
+            raise ValueError("render_profile must be fit_pad or blur_fill.")
         return self
 class TwitchDiscoveryIn(BaseModel):
     game_queries: list[str] = Field(min_length=1,max_length=20)
@@ -422,9 +425,9 @@ def create_app(settings=None,start_worker=True):
             jid=str(uuid4())
             c.execute("UPDATE candidate_moments SET state='APPROVED' WHERE id=?",(cid,))
             c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)",
-                (jid,row["source_id"],row["media_id"],json.dumps({"candidate_id":cid,"owner_notes":data.notes}),t,t))
-            event(c,"INFO","candidate.approved","Candidate approved; render/QC job queued.",{"candidate_id":cid,"job_id":jid})
-        return {"candidate_id":cid,"state":"APPROVED","job_id":jid,"job_status":"QUEUED"}
+                (jid,row["source_id"],row["media_id"],json.dumps({"candidate_id":cid,"owner_notes":data.notes,"render_profile":data.render_profile}),t,t))
+            event(c,"INFO","candidate.approved","Candidate approved; render/QC job queued.",{"candidate_id":cid,"job_id":jid,"render_profile":data.render_profile})
+        return {"candidate_id":cid,"state":"APPROVED","job_id":jid,"job_status":"QUEUED","render_profile":data.render_profile}
     @app.get("/api/renders")
     def renders():
         with connect(cfg.database_path) as c:
