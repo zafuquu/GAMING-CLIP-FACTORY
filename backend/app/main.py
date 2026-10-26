@@ -10,6 +10,7 @@ from .config import Settings
 from .db import initialize, connect, session, now, event, recover_interrupted_jobs
 from .worker import Worker
 from .integrations.youtube import connected_status, youtube_service, youtube_discovery_available
+from .vision import vision_status
 
 class SourceIn(BaseModel):
     source_url: AnyHttpUrl
@@ -277,7 +278,57 @@ def create_app(settings=None,start_worker=True):
             for row in rows:
                 if row["rights_status"] == "AUTHORIZED" and expiry_passed(row.get("expires_at")):
                     row["rights_status"] = "EXPIRED"
+                plan=c.execute("SELECT * FROM content_plans WHERE candidate_id=?",(row["id"],)).fetchone()
+                if plan:
+                    plan_data=dict(plan)
+                    plan_data["tags"]=json.loads(plan_data.pop("tags_json") or "[]")
+                    plan_data["evidence"]=json.loads(plan_data.pop("evidence_json") or "{}")
+                    row["content_plan"]=plan_data
+                else:
+                    row["content_plan"]=None
+                visual=c.execute("SELECT * FROM candidate_vision_assessments WHERE candidate_id=?",(row["id"],)).fetchone()
+                if visual:
+                    visual_data=dict(visual)
+                    visual_data["evidence"]=json.loads(visual_data.pop("evidence_json") or "[]")
+                    visual_data["quality_issues"]=json.loads(visual_data.pop("quality_issues_json") or "[]")
+                    visual_data["frame_times_seconds"]=json.loads(visual_data.pop("frame_times_json") or "[]")
+                    visual_data["raw_response"]=json.loads(visual_data.pop("raw_response_json") or "{}")
+                    row["vision_assessment"]=visual_data
+                else:
+                    row["vision_assessment"]=None
+                row["caption_segment_count"]=c.execute("SELECT COUNT(*) FROM caption_segments WHERE candidate_id=?",(row["id"],)).fetchone()[0]
             return rows
+
+    @app.get("/api/vision/status")
+    def get_vision_status():
+        return vision_status()
+
+    @app.post("/api/candidates/{cid}/analyze-vision",status_code=202)
+    def queue_candidate_vision(cid: str):
+        status=vision_status()
+        if not status.get("ready"):
+            raise HTTPException(403,detail="Local vision analysis is not ready. Enable GCF_ENABLE_VISION_ANALYSIS=true and configure a valid local Ollama-compatible endpoint/model.")
+        if not cfg.ffmpeg_path:
+            raise HTTPException(503,detail="FFmpeg is required to extract candidate frames.")
+        t=now(); jid=str(uuid4())
+        with session(cfg.database_path) as c:
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true": raise HTTPException(423,detail="Global pause is enabled.")
+            row=c.execute("""SELECT cm.id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
+            if not row: raise HTTPException(404,detail="Candidate not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Rights gate blocked vision analysis: current AUTHORIZED permission is required.")
+            if row["state"]!="NEEDS_REVIEW":
+                raise HTTPException(409,detail=f"Vision analysis only accepts candidates in NEEDS_REVIEW (state={row['state']}).")
+            active=c.execute("SELECT id FROM jobs WHERE job_type='ANALYZE_CANDIDATE_VISION' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+cid+"%",)).fetchone()
+            if active: return {"id":active["id"],"status":"ALREADY_QUEUED"}
+            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'ANALYZE_CANDIDATE_VISION','QUEUED',?,?, ?,?,?)",
+                      (jid,row["source_id"],row["media_id"],json.dumps({"candidate_id":cid}),t,t))
+            event(c,"INFO","vision.queued","Local vision assessment queued; candidate remains human-review-only.",{"job_id":jid,"candidate_id":cid,"model":status["model"]})
+        return {"id":jid,"status":"QUEUED","candidate_id":cid,"model":status["model"],"automatic_approval":False}
+
     @app.post("/api/candidates/{cid}/decision", status_code=202)
     def candidate_decision(cid: str, data: CandidateDecisionIn):
         if data.decision == "approve" and (not cfg.ffmpeg_path or not cfg.ffprobe_path):
@@ -363,6 +414,7 @@ def create_app(settings=None,start_worker=True):
         return {
             "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":twitch_queries,"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at")},
             "transcription":{"enabled":os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true","dependency_installed":importlib.util.find_spec("faster_whisper") is not None,"model_path_configured":bool(os.getenv("GCF_WHISPER_MODEL_PATH")),"model_download_allowed":os.getenv("GCF_WHISPER_ALLOW_MODEL_DOWNLOAD","").lower()=="true","device":os.getenv("GCF_WHISPER_DEVICE","cpu")},
+            "vision":vision_status(),
             "youtube":{"credentials_present":youtube_credentials_present,"public_discovery_configured":youtube_discovery_available(),"scheduled_discovery_enabled":values.get("youtube_discovery_enabled")=="true","discovery_queries":youtube_queries,"discovery_interval_minutes":int(values.get("youtube_discovery_interval_minutes","60")),"discovery_next_run":values.get("youtube_discovery_next_at"),"api_key_discovery_configured":bool(os.getenv("GCF_YOUTUBE_API_KEY","").strip()),"upload_gate_configured":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true","uploads_enabled":values.get("youtube_uploads_enabled")=="true","scheduled_public_gate_configured":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true","public_publishing_enabled":False},
         }
 
