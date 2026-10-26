@@ -59,7 +59,7 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         poster_response=client.get(f"/api/renders/{render['id']}/thumbnail")
         assert poster_response.status_code==200,poster_response.text[:300]
         assert poster_response.headers["content-type"].startswith("image/jpeg")
-        assert poster_response.content[:2]==b"\\xff\\xd8"
+        assert poster_response.content[:2]==bytes((255,216))
         qc_report=render["qc_report"]
         assert qc_report["captions_burned"] is False
         sidecar=Path(qc_report["caption_sidecar_path"])
