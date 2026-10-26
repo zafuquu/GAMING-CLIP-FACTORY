@@ -39,3 +39,23 @@ def initialize(path):
 def event(c, level, kind, message, details=None):
     c.execute("INSERT INTO system_events(id,level,event_type,message,details_json,created_at) VALUES(?,?,?,?,?,?)",
       (str(uuid4()),level,kind,message,json.dumps(details or {}),now()))
+
+def recover_interrupted_jobs(path):
+    """Recover interrupted work without blindly retrying uploads with uncertain remote outcomes."""
+    t=now()
+    with session(path) as c:
+        uncertain=list(c.execute("SELECT id,payload_json FROM jobs WHERE status='RUNNING' AND job_type='UPLOAD_YOUTUBE'"))
+        for job in uncertain:
+            try:
+                payload=json.loads(job["payload_json"] or "{}")
+                published_id=payload.get("published_video_id")
+                if published_id:
+                    c.execute("UPDATE published_videos SET publishing_status='RECONCILE_REQUIRED',updated_at=? WHERE id=?",(t,published_id))
+            except (ValueError,TypeError):
+                pass
+            c.execute("UPDATE jobs SET status='RECONCILE_REQUIRED',error='Application restarted while upload was in progress; reconcile remote status before retrying.',updated_at=?,finished_at=? WHERE id=?",(t,t,job["id"]))
+            event(c,"ERROR","job.recovery_reconciliation_required","Interrupted YouTube upload requires manual reconciliation.",{"job_id":job["id"]})
+        interrupted=c.execute("SELECT id FROM jobs WHERE status='RUNNING' AND job_type<>'UPLOAD_YOUTUBE'").fetchall()
+        for job in interrupted:
+            c.execute("UPDATE jobs SET status='QUEUED',error='Recovered after application restart.',updated_at=?,next_attempt_at=? WHERE id=?",(t,t,job["id"]))
+            event(c,"WARNING","job.recovered","Interrupted job returned to queue after application restart.",{"job_id":job["id"]})
