@@ -185,22 +185,47 @@ class Worker(threading.Thread):
             expected=end-start
             if not video or video.get("width")!=1080 or video.get("height")!=1920:
                 raise RuntimeError("QC failed: output is missing expected 1080x1920 video.")
+            if video.get("codec_name") != "h264":
+                raise RuntimeError("QC failed: expected H.264 video encoding.")
+            if audio and audio.get("codec_name") != "aac":
+                raise RuntimeError("QC failed: expected AAC audio encoding.")
             if not (max(0.5,expected-0.5) <= duration <= expected+0.5):
                 raise RuntimeError(f"QC failed: output duration {duration:.3f}s differs from expected {expected:.3f}s.")
             if source_has_audio and not audio:
                 raise RuntimeError("QC failed: source contains audio but output audio stream is missing.")
+            # Extra decode/defect scan. Black or frozen intervals are review flags, not silently ignored.
+            scan=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(output),"-vf","blackdetect=d=1.5:pix_th=0.10,freezedetect=n=-50dB:d=2.0","-an","-f","null","-"],self.timeout)
+            black_events=[]
+            for match in re.finditer(r"black_start:([0-9.]+) black_end:([0-9.]+) black_duration:([0-9.]+)",scan.stderr):
+                black_events.append({"start":float(match.group(1)),"end":float(match.group(2)),"duration":float(match.group(3))})
+            freeze_events=[]
+            freeze_start=None
+            for line in scan.stderr.splitlines():
+                start_match=re.search(r"freeze_start:([0-9.]+)",line)
+                if start_match: freeze_start=float(start_match.group(1))
+                duration_match=re.search(r"freeze_duration:([0-9.]+)",line)
+                if duration_match and freeze_start is not None:
+                    freeze_events.append({"start":freeze_start,"duration":float(duration_match.group(1))})
+                    freeze_start=None
+            review_flags=[]
+            if black_events: review_flags.append("black_interval_detected")
+            if freeze_events: review_flags.append("potential_frozen_frame_detected")
+            qc_status="REVIEW" if review_flags else "PASS"
             h=hashlib.sha256()
             with output.open("rb") as handle:
                 for block in iter(lambda:handle.read(1024*1024),b""):
                     h.update(block)
-            report={"passed":True,"checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio)},"layout":"fit-and-pad-no-crop","warnings":[] if audio or not source_has_audio else ["Source had no audio stream."]}
+            warnings=list(review_flags)
+            if not audio and not source_has_audio: warnings.append("Source had no audio stream.")
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events},"layout":"fit-and-pad-no-crop","warnings":warnings}
             out_id=str(uuid4()); t=now()
             c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,"PASS",json.dumps(report),t))
-            c.execute("UPDATE candidate_moments SET state='RENDERED_QC_PASSED' WHERE id=?",(cid,))
-            summary={"rendered_output_id":out_id,"output_path":str(output),"file_size":output.stat().st_size,"sha256":h.hexdigest(),"qc_status":"PASS","qc_report":report}
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t))
+            candidate_state="RENDERED_QC_PASSED" if qc_status=="PASS" else "RENDERED_QC_REVIEW"
+            c.execute("UPDATE candidate_moments SET state=? WHERE id=?",(candidate_state,cid))
+            summary={"rendered_output_id":out_id,"output_path":str(output),"file_size":output.stat().st_size,"sha256":h.hexdigest(),"qc_status":qc_status,"qc_report":report}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","render.qc_passed","Candidate rendered and passed deterministic QC.",{"job_id":job["id"],"candidate_id":cid,"output_id":out_id,"duration_seconds":duration})
+            event(c,"INFO" if qc_status=="PASS" else "WARNING","render.qc_passed" if qc_status=="PASS" else "render.qc_review_required","Candidate rendered; deterministic QC status is "+qc_status+".",{"job_id":job["id"],"candidate_id":cid,"output_id":out_id,"duration_seconds":duration,"warnings":warnings})
             c.commit()
         finally:
             c.close()
