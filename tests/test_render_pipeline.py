@@ -58,6 +58,6 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         sidecar=Path(qc_report["caption_sidecar_path"])
         assert sidecar.is_file()
         subtitle=sidecar.read_text(encoding="utf-8")
-        assert "1\\n00:00:00,500 --> 00:00:01,500\\nNice shot!\\n" in subtitle
+        assert "1\n00:00:00,500 --> 00:00:01,500\nNice shot!\n" in subtitle
         candidates=client.get("/api/candidates").json()
         assert next(x for x in candidates if x["id"]==cid)["state"]=="RENDERED_QC_PASSED"
