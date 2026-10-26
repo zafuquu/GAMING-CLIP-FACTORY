@@ -132,6 +132,22 @@ class Worker(threading.Thread):
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","media.analysis_completed",f"Created {added} scene-change review candidates.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
         finally: c.close()
+        if os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true":
+            if importlib.util.find_spec("faster_whisper") is not None:
+                c=connect(self.db)
+                try:
+                    active=c.execute("SELECT id FROM jobs WHERE job_type='TRANSCRIBE_MEDIA' AND media_id=? AND status IN ('QUEUED','RUNNING')",(job["media_id"],)).fetchone()
+                    if not active:
+                        jid=str(uuid4()); t=now()
+                        c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,created_at,updated_at) VALUES(?,'TRANSCRIBE_MEDIA','QUEUED',?,?,?,?)",(jid,job["source_id"],job["media_id"],t,t))
+                        event(c,"INFO","transcription.queued","Local transcription queued after media analysis.",{"job_id":jid,"media_id":job["media_id"]})
+                        c.commit()
+                finally: c.close()
+            else:
+                c=connect(self.db)
+                try:
+                    event(c,"WARNING","transcription.not_installed","Transcription is enabled but faster-whisper is not installed; install backend/requirements-ml.txt.",{"media_id":job["media_id"]}); c.commit()
+                finally: c.close()
 
     def render_candidate(self, job):
         if not self.ffmpeg or not self.ffprobe:
