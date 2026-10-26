@@ -263,6 +263,122 @@ def create_app(settings=None,start_worker=True):
             c.execute("UPDATE source_permissions SET status=?,license_type=?,permission_evidence=?,editing_allowed=?,commercial_use_allowed=?,reviewed_by_owner=?,attribution=?,expires_at=?,notes=?,updated_at=? WHERE source_id=?",(data.status,data.license_type,data.permission_evidence,int(data.editing_allowed),int(data.commercial_use_allowed),int(data.reviewed_by_owner),data.attribution,data.expires_at,data.notes,t,sid))
             event(c,"INFO" if data.status=="AUTHORIZED" else "WARNING","rights.reviewed","Rights status changed to "+data.status,{"source_id":sid,"status":data.status})
         return {"source_id":sid,"status":data.status,"updated_at":t}
+
+    @app.get("/api/automation/folder-watches")
+    def list_folder_watches():
+        with connect(cfg.database_path) as c:
+            rows=[]
+            sql="""SELECT w.*,s.title AS source_title,s.source_url,p.status AS rights_status,p.expires_at,
+                (SELECT COUNT(*) FROM watched_media_files f WHERE f.watch_id=w.id) AS files_seen,
+                (SELECT COUNT(*) FROM watched_media_files f WHERE f.watch_id=w.id AND f.status='PENDING_STABILITY') AS files_waiting,
+                (SELECT COUNT(*) FROM watched_media_files f WHERE f.watch_id=w.id AND f.status='IMPORTED') AS files_imported,
+                (SELECT COUNT(*) FROM watched_media_files f WHERE f.watch_id=w.id AND f.status='SKIPPED_RIGHTS') AS files_blocked_rights,
+                (SELECT COUNT(*) FROM watched_media_files f WHERE f.watch_id=w.id AND f.status='DUPLICATE') AS files_duplicate
+                FROM media_folder_watches w JOIN sources s ON s.id=w.source_id
+                JOIN source_permissions p ON p.source_id=s.id ORDER BY w.created_at DESC"""
+            for r in c.execute(sql):
+                item=dict(r)
+                item["enabled"]=bool(item["enabled"])
+                item["recursive"]=bool(item["recursive"])
+                item["auto_analyze"]=bool(item["auto_analyze"])
+                if item["rights_status"]=="AUTHORIZED" and expiry_passed(item.get("expires_at")):
+                    item["rights_status"]="EXPIRED"
+                rows.append(item)
+            return rows
+
+    @app.post("/api/automation/folder-watches",status_code=201)
+    def create_folder_watch(data: FolderWatchIn):
+        t=now()
+        root=cfg.media_root.resolve()
+        path=(root/data.relative_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            raise HTTPException(400,detail="Watched folder must remain inside the configured media root.")
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            source=c.execute("""SELECT s.id,p.status,p.expires_at FROM sources s
+                JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(data.source_id,)).fetchone()
+            if not source:
+                raise HTTPException(404,detail="Source not found.")
+            if source["status"]!="AUTHORIZED" or expiry_passed(source["expires_at"]):
+                raise HTTPException(409,detail="Folder watches require a currently AUTHORIZED, unexpired source. Public metadata alone is not permission.")
+            existing=c.execute("SELECT id,relative_path,source_id FROM media_folder_watches WHERE enabled=1").fetchall()
+            new_parts=PurePosixPath(data.relative_path).parts
+            for item in existing:
+                old_parts=PurePosixPath(item["relative_path"]).parts
+                if new_parts[:len(old_parts)]==old_parts or old_parts[:len(new_parts)]==new_parts:
+                    if str(item["source_id"])!=data.source_id:
+                        raise HTTPException(409,detail="This folder overlaps another active watch assigned to a different source.")
+                    if item["relative_path"]==data.relative_path:
+                        raise HTTPException(409,detail="This source/folder watch already exists.")
+                    raise HTTPException(409,detail="Overlapping watched folders are not allowed; create one parent watch instead.")
+            path.mkdir(parents=True,exist_ok=True)
+            watch_id=str(uuid4())
+            c.execute("""INSERT INTO media_folder_watches(id,source_id,relative_path,enabled,auto_analyze,recursive,scan_interval_seconds,next_scan_at,last_scan_at,last_error,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,NULL,'',?,?)""",
+                (watch_id,data.source_id,data.relative_path,int(data.enabled),int(data.auto_analyze),int(data.recursive),data.scan_interval_seconds,t,t,t))
+            event(c,"INFO","folder_watch.created","Local folder watch created for an authorized source.",{"watch_id":watch_id,"source_id":data.source_id,"relative_path":data.relative_path,"auto_analyze":data.auto_analyze})
+        return {"id":watch_id,"source_id":data.source_id,"relative_path":data.relative_path,"enabled":data.enabled,
+                "recursive":data.recursive,"auto_analyze":data.auto_analyze,"scan_interval_seconds":data.scan_interval_seconds,
+                "next_scan_at":t,"folder_path":str(path)}
+
+    @app.put("/api/automation/folder-watches/{watch_id}")
+    def update_folder_watch(watch_id: str,data: FolderWatchUpdateIn):
+        updates=data.model_dump(exclude_unset=True)
+        if not updates:
+            raise HTTPException(400,detail="Provide at least one folder-watch setting to update.")
+        t=now()
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            row=c.execute("""SELECT w.*,p.status AS rights_status,p.expires_at FROM media_folder_watches w
+                JOIN source_permissions p ON p.source_id=w.source_id WHERE w.id=?""",(watch_id,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Folder watch not found.")
+            if updates.get("enabled") is True and (row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"])):
+                raise HTTPException(409,detail="Cannot enable a folder watch without current AUTHORIZED permission.")
+            values={k:v for k,v in updates.items() if v is not None}
+            columns={"enabled":"enabled","recursive":"recursive","auto_analyze":"auto_analyze","scan_interval_seconds":"scan_interval_seconds"}
+            assignments=[columns[k]+"=?" for k in values]
+            args=[int(v) if k in {"enabled","recursive","auto_analyze"} else int(v) for k,v in values.items()]
+            assignments.extend(["next_scan_at=?","updated_at=?"])
+            args.extend([t,t,watch_id])
+            c.execute("UPDATE media_folder_watches SET "+", ".join(assignments)+" WHERE id=?",args)
+            event(c,"INFO","folder_watch.updated","Local folder watch settings updated.",{"watch_id":watch_id,**values})
+        return {"id":watch_id,**updates,"updated_at":t}
+
+    @app.post("/api/automation/folder-watches/{watch_id}/scan",status_code=202)
+    def trigger_folder_watch_scan(watch_id: str):
+        t=now()
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            row=c.execute("SELECT id,enabled,source_id FROM media_folder_watches WHERE id=?",(watch_id,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Folder watch not found.")
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            if not row["enabled"]:
+                raise HTTPException(409,detail="Enable this folder watch before requesting a scan.")
+            c.execute("UPDATE media_folder_watches SET next_scan_at=?,updated_at=? WHERE id=?",(t,t,watch_id))
+            event(c,"INFO","folder_watch.scan_requested","Owner requested an immediate local folder scan.",{"watch_id":watch_id})
+        return {"id":watch_id,"status":"SCAN_QUEUED","next_scan_at":t}
+
+    @app.delete("/api/automation/folder-watches/{watch_id}",status_code=200)
+    def delete_folder_watch(watch_id: str):
+        t=now()
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            row=c.execute("SELECT id,relative_path,source_id FROM media_folder_watches WHERE id=?",(watch_id,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Folder watch not found.")
+            c.execute("DELETE FROM media_folder_watches WHERE id=?",(watch_id,))
+            event(c,"WARNING","folder_watch.deleted","Folder watch removed. Already imported media is retained.",{"watch_id":watch_id,"relative_path":row["relative_path"],"source_id":row["source_id"],"deleted_at":t})
+        return {"id":watch_id,"deleted":True,"media_retained":True}
+
     @app.get("/api/media")
     def media():
         with connect(cfg.database_path) as c:
