@@ -110,3 +110,23 @@ def test_expired_rights_block_public_job_after_processing_succeeds(tmp_path,monk
     assert tuple(state)==("BLOCKED_RIGHTS","succeeded")
     assert public_jobs==0
     client.__exit__(None,None,None)
+
+def test_owner_can_recheck_timed_out_processing_without_creating_duplicate_jobs(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":True,"channel_title":"Synthetic CI"})
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("UPDATE published_videos SET publishing_status='PROCESSING_TIMEOUT',remote_processing_status='processing',processing_failure_reason='poll limit reached' WHERE id=?",(pub_id,))
+        db.execute("UPDATE jobs SET status='COMPLETED',finished_at=? WHERE id='processing-job'",(datetime.now(timezone.utc).isoformat(),))
+    response=client.post(f"/api/publishing/videos/{pub_id}/recheck-processing")
+    assert response.status_code==202,response.text
+    assert response.json()["status"]=="QUEUED"
+    second=client.post(f"/api/publishing/videos/{pub_id}/recheck-processing")
+    assert second.status_code==202,second.text
+    assert second.json()["status"]=="ALREADY_QUEUED"
+    with sqlite3.connect(cfg.database_path) as db:
+        status=db.execute("SELECT publishing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()[0]
+        jobs=db.execute("SELECT COUNT(*) FROM jobs WHERE job_type='CHECK_YOUTUBE_PROCESSING' AND status IN ('QUEUED','RUNNING')").fetchone()[0]
+    assert status=="PROCESSING"
+    assert jobs==1
+    client.__exit__(None,None,None)
