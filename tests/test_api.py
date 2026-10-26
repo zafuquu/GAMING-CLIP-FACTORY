@@ -301,3 +301,43 @@ def test_reschedule_public_release_updates_upload_payload_and_checks_rights(tmp_
     assert upload["publication_mode"]=="scheduled_public"
     assert upload["publish_at"] is not None
     c.__exit__(None,None,None)
+
+def test_reconcile_public_video_is_forced_private_when_public_gate_is_disabled(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":True,"channel_title":"Synthetic CI"})
+    monkeypatch.delenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING",raising=False)
+    monkeypatch.delenv("GCF_ENABLE_YOUTUBE_UPLOADS",raising=False)
+    c,media=setup_client(tmp_path)
+    pubid,render_id,future=_add_scheduled_public_fixture(c,media,"unexpected-public.mp4")
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("UPDATE published_videos SET publishing_status='RECONCILE_REQUIRED',youtube_video_id=? WHERE id=?",
+                    ("yt-id-public",pubid))
+    class Request:
+        def __init__(self,result): self.result=result
+        def execute(self): return self.result
+    class Channels:
+        def list(self,**kwargs): return Request({"items":[{"id":"connected-channel"}]})
+    class Videos:
+        def __init__(self): self.updates=[]
+        def list(self,**kwargs):
+            assert kwargs["id"]=="yt-id-public"
+            return Request({"items":[{"id":"yt-id-public","snippet":{"channelId":"connected-channel"},"status":{"privacyStatus":"public"},"processingDetails":{"processingStatus":"succeeded"}}]})
+        def update(self,**kwargs):
+            self.updates.append(kwargs)
+            return Request({"id":"yt-id-public","status":{"privacyStatus":"private"}})
+    class Service:
+        def __init__(self): self.channel_api=Channels(); self.video_api=Videos()
+        def channels(self): return self.channel_api
+        def videos(self): return self.video_api
+    service=Service()
+    monkeypatch.setattr(main_module,"youtube_service",lambda:service)
+    response=c.post(f"/api/publishing/videos/{pubid}/reconcile",json={"youtube_video_id":"yt-id-public"})
+    assert response.status_code==200,response.text
+    assert response.json()["remote_privacy_status"]=="private"
+    assert response.json()["local_status"]=="UPLOADED_PRIVATE"
+    assert len(service.video_api.updates)==1
+    assert service.video_api.updates[0]["body"]["status"]["privacyStatus"]=="private"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        row=raw.execute("SELECT publishing_status,youtube_video_id,scheduled_publish_at FROM published_videos WHERE id=?",(pubid,)).fetchone()
+    assert row==("UPLOADED_PRIVATE","yt-id-public",None)
+    c.__exit__(None,None,None)
