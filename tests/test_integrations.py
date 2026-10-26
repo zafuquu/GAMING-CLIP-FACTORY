@@ -60,5 +60,5 @@ def test_content_plan_without_transcript_avoids_invented_event_claims():
     plan=plan_candidate("Valorant","Ranked match",1.0,9.0,[])
     assert plan["chosen_format"]=="gameplay_highlight"
     assert plan["hook_text"]==""
-    assert "Gameplay highlight" in plan["title"]
+    assert "Gameplay Highlight" in plan["title"]
     assert plan["evidence"]["transcript_excerpt"]==""
