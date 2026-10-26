@@ -130,3 +130,50 @@ def test_legacy_youtube_oauth_requires_reconnect_after_scope_change(monkeypatch)
     monkeypatch.setattr(yt.keyring,"get_password",fake_get)
     with pytest.raises(yt.YouTubeNotConfigured,match="predates the current"):
         yt.load_credentials()
+
+
+def test_custom_shorts_thumbnail_upload_uses_official_thumbnail_set(monkeypatch,tmp_path):
+    import app.integrations.youtube as yt
+    cover=tmp_path/"vertical-cover.jpg"
+    cover.write_bytes(bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffdb004300") + b"fixture" + bytes.fromhex("ffd9"))
+    captured={}
+    class Upload:
+        def mimetype(self): return "image/jpeg"
+        def next_chunk(self): return None,{"items":[{"default":{"url":"https://example.invalid/thumb.jpg"}}]}
+    class Thumbnails:
+        def set(self,**kwargs):
+            captured.update(kwargs)
+            return Upload()
+    class Service:
+        def thumbnails(self): return Thumbnails()
+    monkeypatch.setattr(yt,"youtube_service",lambda:Service())
+    result=yt.set_custom_thumbnail("youtube-video-123",cover)
+    assert result["uploaded"] is True
+    assert result["video_id"]=="youtube-video-123"
+    assert captured["videoId"]=="youtube-video-123"
+    assert captured["media_body"].mimetype()=="image/jpeg"
+    with pytest.raises(ValueError,match="ID"):
+        yt.set_custom_thumbnail("invalid",cover)
+
+def test_custom_thumbnail_upload_blocks_non_jpeg(tmp_path):
+    from app.integrations.youtube import set_custom_thumbnail
+    image=tmp_path/"cover.png"
+    image.write_bytes(b"not a jpeg")
+    with pytest.raises(ValueError,match="JPEG"):
+        set_custom_thumbnail("youtube-video-123",image)
+
+def test_custom_thumbnail_art_is_vertical_title_led_and_hash_verified(tmp_path):
+    from PIL import Image
+    from app.thumbnail_art import generate_shorts_thumbnail
+    poster=tmp_path/"poster.jpg"
+    Image.new("RGB",(360,640),(45,90,130)).save(poster,"JPEG",quality=80)
+    output=tmp_path/"cover.jpg"
+    result=generate_shorts_thumbnail(poster,"A clean round wins","Valorant",output)
+    assert output.is_file() and output.stat().st_size==result["file_size"]
+    assert result["width"] in {1080,2160}
+    assert result["height"] in {1920,3840}
+    assert result["height"]==result["width"]*16//9
+    assert result["mime_type"]=="image/jpeg"
+    assert result["file_size"]<=result["max_bytes"]
+    import hashlib
+    assert hashlib.sha256(output.read_bytes()).hexdigest()==result["sha256"]
