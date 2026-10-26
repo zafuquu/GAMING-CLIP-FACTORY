@@ -352,3 +352,28 @@ def test_rendered_output_can_have_only_one_publication_record(tmp_path):
                 SELECT 'duplicate-output-pub',source_id,media_id,candidate_id,output_path,'Duplicate','','test','PASS','UPLOAD_PENDING',created_at,updated_at,rendered_output_id
                 FROM published_videos WHERE id=?""",(pubid,))
     c.__exit__(None,None,None)
+
+def test_youtube_analytics_schedule_requires_connected_oauth(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":False,"reason":"no connected test channel"})
+    c,_=setup_client(tmp_path)
+    response=c.put("/api/youtube/analytics/schedule",json={"enabled":True,"interval_minutes":720,"window_days":7})
+    assert response.status_code==503,response.text
+    status=c.get("/api/youtube/analytics/schedule").json()
+    assert status["enabled"] is False
+    assert status["interval_minutes"]==1440
+    assert status["window_days"]==7
+    c.__exit__(None,None,None)
+
+def test_youtube_analytics_schedule_persists_configuration(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":True,"channel_title":"Test channel","reason":None})
+    c,_=setup_client(tmp_path)
+    response=c.put("/api/youtube/analytics/schedule",json={"enabled":True,"interval_minutes":720,"window_days":14})
+    assert response.status_code==200,response.text
+    status=c.get("/api/youtube/analytics/schedule").json()
+    assert status["enabled"] is True
+    assert status["interval_minutes"]==720
+    assert status["window_days"]==14
+    assert status["next_run"] is not None
+    c.__exit__(None,None,None)
