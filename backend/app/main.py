@@ -648,7 +648,7 @@ def create_app(settings=None,start_worker=True):
             pub_id=str(uuid4()); job_id=str(uuid4())
             status="UPLOAD_PENDING"
             c.execute("""INSERT INTO published_videos(id,source_id,media_id,candidate_id,output_path,title,description,template_id,qc_status,publishing_status,youtube_video_id,created_at,updated_at,rendered_output_id,scheduled_publish_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)""",(pub_id,output["source_id"],output["media_id"],output["candidate_id"],output["output_path"],data.title,data.description,"portrait_fit_pad","PASS",status,t,t,data.rendered_output_id,publish_at))
+                VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)""",(pub_id,output["source_id"],output["media_id"],output["candidate_id"],output["output_path"],data.title,data.description,"portrait_"+str(output["render_profile"] or "fit_pad"),"PASS",status,t,t,data.rendered_output_id,publish_at))
             payload={"published_video_id":pub_id,"publish_at":publish_at,"tags":data.tags,"publication_mode":data.publication_mode}
             c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'UPLOAD_YOUTUBE','QUEUED',?,?, ?,?,?)",(job_id,output["source_id"],output["media_id"],json.dumps(payload),t,t))
             event(c,"INFO","youtube.upload_queued","QC-passed output queued for private or scheduled YouTube upload.",{"job_id":job_id,"published_video_id":pub_id,"rendered_output_id":data.rendered_output_id,"publication_mode":data.publication_mode})
