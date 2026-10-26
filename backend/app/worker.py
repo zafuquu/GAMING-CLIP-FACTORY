@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event
 from .integrations.twitch import TwitchHelix
-from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured
+from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, youtube_service
 
 def expiry_passed(value):
     if not value:
@@ -60,6 +60,8 @@ class Worker(threading.Thread):
                 self.discover_twitch(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
                 self.upload_youtube(job)
+            elif job["job_type"] == "PUBLISH_YOUTUBE":
+                self.publish_youtube(job)
             elif job["job_type"] == "SYNC_YOUTUBE_ANALYTICS":
                 self.sync_youtube_analytics(job)
             else:
@@ -312,20 +314,29 @@ class Worker(threading.Thread):
                     raise ValueError("Scheduled publication must have a timezone-aware future timestamp.")
                 if os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()!="true":
                     raise PermissionError("Scheduled public publication is disabled by environment policy.")
+                if row["expires_at"]:
+                    expiry=datetime.fromisoformat(row["expires_at"].replace("Z","+00:00"))
+                    if expiry.tzinfo is None: expiry=expiry.replace(tzinfo=timezone.utc)
+                    if expiry<=publish_at:
+                        raise PermissionError("Rights expire before scheduled publication; scheduled public publishing is blocked.")
             t=now()
             c.execute("UPDATE published_videos SET publishing_status='UPLOADING',upload_request_started_at=?,updated_at=? WHERE id=?",(t,t,published_id))
             c.commit()
             title=row["title"]; description=row["description"]
             tags=payload.get("tags",[])
             if not isinstance(tags,list): tags=[]
-            # upload_video raises a dedicated non-retryable reconciliation status on any uncertain result.
-            result=upload_video(output,title,description,[str(x) for x in tags],publish_at=publish_at,allow_scheduled_public=os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true")
+            # Upload always starts private. A separate scheduled worker rechecks rights immediately before publication.
+            result=upload_video(output,title,description,[str(x) for x in tags])
             final_status="SCHEDULED" if publish_at else "UPLOADED_PRIVATE"
-            c.execute("UPDATE published_videos SET youtube_video_id=?,publishing_status=?,scheduled_publish_at=?,updated_at=? WHERE id=?",(result["video_id"],final_status,result.get("publish_at"),now(),published_id))
+            c.execute("UPDATE published_videos SET youtube_video_id=?,publishing_status=?,scheduled_publish_at=?,updated_at=? WHERE id=?",(result["video_id"],final_status,publish_at.isoformat() if publish_at else None,now(),published_id))
             t=now()
-            summary={"published_video_id":published_id,"youtube_video_id":result["video_id"],"url":result["url"],"publishing_status":final_status,"scheduled_publish_at":result.get("publish_at")}
+            summary={"published_video_id":published_id,"youtube_video_id":result["video_id"],"url":result["url"],"publishing_status":final_status,"scheduled_publish_at":publish_at.isoformat() if publish_at else None,"initial_privacy_status":"private"}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","youtube.upload_completed","Video uploaded to YouTube as private or scheduled.",{"job_id":job["id"],**summary})
+            if publish_at:
+                publish_job_id=str(uuid4())
+                c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at) VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)",
+                    (publish_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"publish_at":publish_at.isoformat()}),t,t,publish_at.astimezone(timezone.utc).isoformat(timespec="seconds")))
+            event(c,"INFO","youtube.upload_completed","Video uploaded as private; any scheduled public release uses a separate rights-rechecking job.",{"job_id":job["id"],**summary})
             c.commit()
         finally:
             c.close()
@@ -354,3 +365,54 @@ class Worker(threading.Thread):
             c.commit()
         finally:
             c.close()
+
+    def publish_youtube(self, job):
+        payload=json.loads(job["payload_json"] or "{}")
+        published_id=payload.get("published_video_id")
+        if not published_id:
+            raise ValueError("Publication job is missing published_video_id.")
+        if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()!="true":
+            raise PermissionError("Scheduled public publishing is disabled by environment policy.")
+        c=connect(self.db)
+        try:
+            row=c.execute("""SELECT pv.*,ro.qc_status AS render_qc,ro.sha256 AS render_sha,ro.file_size AS render_size,
+                p.status AS rights_status,p.expires_at
+                FROM published_videos pv JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
+                JOIN media_assets m ON m.id=ro.media_id JOIN source_permissions p ON p.source_id=m.source_id
+                WHERE pv.id=?""",(published_id,)).fetchone()
+            if not row:
+                raise FileNotFoundError("Scheduled publication record not found.")
+            if row["publishing_status"]!="SCHEDULED" or not row["youtube_video_id"]:
+                raise PermissionError("Publication is not in a valid scheduled state.")
+            if row["qc_status"]!="PASS" or row["render_qc"]!="PASS":
+                raise PermissionError("Scheduled publication blocked: output no longer has QC PASS.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_RIGHTS',updated_at=? WHERE id=?",(now(),published_id)); c.commit()
+                raise PermissionError("Scheduled publication blocked because rights are expired, revoked or unauthorized.")
+            output=Path(row["output_path"])
+            if not output.is_file() or output.stat().st_size!=row["render_size"]:
+                raise PermissionError("Scheduled publication blocked: rendered output changed or disappeared.")
+            h=hashlib.sha256()
+            with output.open("rb") as stream:
+                for block in iter(lambda:stream.read(1024*1024),b""): h.update(block)
+            if h.hexdigest()!=row["render_sha"]:
+                raise PermissionError("Scheduled publication blocked: output hash no longer matches QC.")
+            enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not enabled or enabled["value"]!="true":
+                raise PermissionError("Scheduled publication blocked: owner disabled YouTube uploads.")
+            t=now()
+            try:
+                youtube_service().videos().update(part="status",body={"id":row["youtube_video_id"],"status":{"privacyStatus":"public"}}).execute()
+            except Exception as exc:
+                status=getattr(getattr(exc,"resp",None),"status",None)
+                if status in {400,401,403,404,409,422}:
+                    raise RuntimeError(f"YouTube rejected scheduled publication with HTTP {status}; video remains private.") from exc
+                raise UploadReconciliationRequired(f"Public update outcome is uncertain ({type(exc).__name__}); check the channel before retrying.") from exc
+            c.execute("UPDATE published_videos SET publishing_status='PUBLISHED',updated_at=? WHERE id=?",(t,published_id))
+            summary={"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"],"publishing_status":"PUBLISHED"}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","youtube.scheduled_video_published","Scheduled video made public after just-in-time rights/QC checks.",{"job_id":job["id"],**summary})
+            c.commit()
+        finally:
+            c.close()
+
