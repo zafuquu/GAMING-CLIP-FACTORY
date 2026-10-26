@@ -80,9 +80,10 @@ def test_render_migration_is_applied(tmp_path):
         versions={row[0] for row in raw.execute("SELECT version FROM schema_migrations")}
     assert "rendered_outputs" in tables
     assert "transcripts" in tables and "content_plans" in tables and "caption_segments" in tables
+    assert "media_folder_watches" in tables and "watched_media_files" in tables
     columns={row[1] for row in raw.execute("PRAGMA table_info(rendered_outputs)")}
     assert {"render_profile","thumbnail_path","thumbnail_sha256","thumbnail_width","thumbnail_height"}.issubset(columns)
-    assert {1,2,3,4,5,6,7,8,9}.issubset(versions)
+    assert {1,2,3,4,5,6,7,8,9,10}.issubset(versions)
     with sqlite3.connect(c.app.state.settings.database_path) as raw:
         render_columns={row[1] for row in raw.execute("PRAGMA table_info(rendered_outputs)")}
     assert {"render_profile","thumbnail_path","thumbnail_sha256","thumbnail_width","thumbnail_height"}.issubset(render_columns)
@@ -557,3 +558,116 @@ def test_duplicate_migration_versions_fail_before_applying(tmp_path,monkeypatch)
     with sqlite3.connect(path) as raw:
         tables={row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "first_table" not in tables and "second_table" not in tables
+
+def test_folder_watch_requires_current_authorized_source(tmp_path):
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    (media/"incoming").mkdir(parents=True)
+    response=c.post("/api/automation/folder-watches",json={"source_id":sid,"relative_path":"incoming"})
+    assert response.status_code==409,response.text
+    c.__exit__(None,None,None)
+
+def test_folder_watch_rejects_paths_that_escape_media_root(tmp_path):
+    c,_=setup_client(tmp_path)
+    sid=add_source(c)
+    authorize(c,sid)
+    response=c.post("/api/automation/folder-watches",json={"source_id":sid,"relative_path":"../outside"})
+    assert response.status_code==422,response.text
+    c.__exit__(None,None,None)
+
+def test_folder_watch_automatically_imports_stable_authorized_media(tmp_path,monkeypatch):
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_WATCH_STABLE_SECONDS","5")
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    folder=media/"incoming"
+    folder.mkdir(parents=True)
+    video=folder/"test-gameplay.mp4"
+    video.write_bytes(b"authorized synthetic watched media")
+    watch=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","enabled":True,
+        "recursive":False,"auto_analyze":True,"scan_interval_seconds":15})
+    assert watch.status_code==201,watch.text
+    watch_id=watch.json()["id"]
+    worker=Worker(c.app.state.settings.database_path,None,None,5,media_root=media)
+    # First scan records the stable file signature; it does not import files still being copied.
+    first=worker.scan_folder_watch(watch_id)
+    assert first["files_seen"]==1 and first["imported"]==0 and first["pending_stability"]==1
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        old=(datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat()
+        raw.execute("UPDATE watched_media_files SET stable_since=? WHERE watch_id=?",(old,watch_id))
+    # A subsequent scan after the stable interval imports and queues analysis without running FFmpeg in the API.
+    second=worker.scan_folder_watch(watch_id)
+    assert second["imported"]==1
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        media_row=raw.execute("SELECT id,source_id,original_path,state FROM media_assets").fetchone()
+        job=raw.execute("SELECT job_type,status,media_id FROM jobs WHERE media_id=?",(media_row[0],)).fetchone()
+        watch_file=raw.execute("SELECT status,media_id FROM watched_media_files WHERE watch_id=?",(watch_id,)).fetchone()
+    assert media_row[1]==sid and Path(media_row[2])==video.resolve() and media_row[3]=="IMPORTED"
+    assert tuple(job)==("ANALYZE_MEDIA","QUEUED",media_row[0])
+    assert watch_file[0]=="IMPORTED" and watch_file[1]==media_row[0]
+    c.__exit__(None,None,None)
+
+def test_folder_watch_rechecks_rights_after_file_becomes_stable(tmp_path):
+    from app.worker import Worker
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    folder=media/"incoming";folder.mkdir(parents=True)
+    (folder/"clip.mp4").write_bytes(b"rights-revocation fixture")
+    watch=c.post("/api/automation/folder-watches",json={"source_id":sid,"relative_path":"incoming","scan_interval_seconds":15})
+    assert watch.status_code==201,watch.text
+    watch_id=watch.json()["id"]
+    worker=Worker(c.app.state.settings.database_path,None,None,5,media_root=media)
+    assert worker.scan_folder_watch(watch_id)["pending_stability"]==1
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        old=(datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat()
+        raw.execute("UPDATE watched_media_files SET stable_since=? WHERE watch_id=?",(old,watch_id))
+        raw.execute("UPDATE source_permissions SET status='REVOKED' WHERE source_id=?",(sid,))
+    result=worker.scan_folder_watch(watch_id)
+    assert result["blocked_rights"]==1 and result["imported"]==0
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        assert raw.execute("SELECT COUNT(*) FROM media_assets").fetchone()[0]==0
+        assert raw.execute("SELECT status FROM watched_media_files WHERE watch_id=?",(watch_id,)).fetchone()[0]=="SKIPPED_RIGHTS"
+    c.__exit__(None,None,None)
+
+def test_folder_watch_reimports_replaced_file_after_stability(tmp_path):
+    from app.worker import Worker
+    c,media=setup_client(tmp_path); sid=add_source(c); assert authorize(c,sid).status_code==200
+    folder=media/"incoming";folder.mkdir(parents=True)
+    path=folder/"replace.mp4";path.write_bytes(b"original clip bytes")
+    watch=c.post("/api/automation/folder-watches",json={"source_id":sid,"relative_path":"incoming","scan_interval_seconds":15})
+    assert watch.status_code==201,watch.text
+    watch_id=watch.json()["id"]
+    worker=Worker(c.app.state.settings.database_path,None,None,5,media_root=media)
+    worker.scan_folder_watch(watch_id)
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        old=(datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat()
+        raw.execute("UPDATE watched_media_files SET stable_since=? WHERE watch_id=?",(old,watch_id))
+    assert worker.scan_folder_watch(watch_id)["imported"]==1
+    path.write_bytes(b"replacement clip has different size")
+    changed=worker.scan_folder_watch(watch_id)
+    assert changed["imported"]==0 and changed["pending_stability"]==1
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        old=(datetime.now(timezone.utc)-timedelta(minutes=2)).isoformat()
+        raw.execute("UPDATE watched_media_files SET stable_since=? WHERE watch_id=?",(old,watch_id))
+    replacement=worker.scan_folder_watch(watch_id)
+    assert replacement["imported"]==1
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        assert raw.execute("SELECT COUNT(*) FROM media_assets WHERE source_id=?",(sid,)).fetchone()[0]==2
+    c.__exit__(None,None,None)
+
+def test_folder_watch_prevents_overlapping_source_mappings(tmp_path):
+    c,media=setup_client(tmp_path)
+    sid1=add_source(c)
+    # Register a second distinct source URL for the second mapping.
+    second=c.post("/api/sources",json={"source_url":"https://example.com/other-game","platform":"manual","title":"Other game"})
+    assert second.status_code==201
+    sid2=second.json()["id"]
+    assert authorize(c,sid1).status_code==200 and authorize(c,sid2).status_code==200
+    first=c.post("/api/automation/folder-watches",json={"source_id":sid1,"relative_path":"incoming"})
+    assert first.status_code==201,first.text
+    overlap=c.post("/api/automation/folder-watches",json={"source_id":sid2,"relative_path":"incoming/another"})
+    assert overlap.status_code==409,overlap.text
+    c.__exit__(None,None,None)
