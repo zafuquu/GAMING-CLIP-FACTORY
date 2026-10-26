@@ -125,16 +125,21 @@ def test_thumbnail_failure_does_not_change_video_publication_status(tmp_path,mon
     def fake_set(*args): raise ThumbnailUploadError("custom thumbnail not eligible",retryable=False)
     monkeypatch.setattr(worker_module,"set_custom_thumbnail",fake_set)
     worker=Worker(cfg.database_path,None,None,10)
-    job={"id":"set-thumb-failed-job","payload_json":json.dumps({"published_video_id":ids["published_id"]})}
+    job_id="set-thumb-failed-job"
+    stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
     with sqlite3.connect(ids["db"]) as db:
         db.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-            (job["id"],"SET_YOUTUBE_THUMBNAIL","RUNNING",ids["source_id"],ids["media_id"],job["payload_json"],datetime.now(timezone.utc).isoformat(),datetime.now(timezone.utc).isoformat()))
-    worker.one = lambda: None # invoke the existing worker exception handler via one() dispatch below
-    worker.set_youtube_thumbnail(job)
-    # This direct test asserts the adapter exception type is distinct; job-state separation is exercised
-    # by the test below, which executes the actual dispatch path.
-    with pytest.raises(ThumbnailUploadError):
-        fake_set("youtube-video-123",Path("cover.jpg"))
+            (job_id,"SET_YOUTUBE_THUMBNAIL","QUEUED",ids["source_id"],ids["media_id"],json.dumps({"published_video_id":ids["published_id"]}),stamp,stamp))
+    assert worker.one() is True
+    with sqlite3.connect(ids["db"]) as db:
+        db.row_factory=sqlite3.Row
+        pub=db.execute("SELECT custom_thumbnail_status,custom_thumbnail_error,publishing_status FROM published_videos WHERE id=?",(ids["published_id"],)).fetchone()
+        task=db.execute("SELECT status,error FROM jobs WHERE id=?",(job_id,)).fetchone()
+    assert pub["custom_thumbnail_status"]=="FAILED"
+    assert "not eligible" in pub["custom_thumbnail_error"]
+    assert pub["publishing_status"]=="READY_PRIVATE"
+    assert task["status"]=="FAILED"
+    assert "not eligible" in task["error"]
     client.__exit__(None,None,None)
 
 
