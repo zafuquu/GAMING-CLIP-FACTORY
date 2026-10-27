@@ -1318,6 +1318,18 @@ def create_app(settings=None,start_worker=True):
                 c.execute("UPDATE jobs SET status='CANCELLED',error='No valid, enabled public-release policy remains.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
                 c.execute("UPDATE published_videos SET publishing_status=?,youtube_video_id=?,scheduled_publish_at=NULL,remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',updated_at=? WHERE id=?",
                           (final_state,data.youtube_video_id,t,t,published_id))
+            # If an uncertain video upload reconciles to a private, processed video, finish the
+            # separate custom-cover stage too. Thumbnail failure remains independent of video state.
+            if (rights_current and output_current and remote_processing=="succeeded"
+                and final_state in {"PUBLISHED","SCHEDULED","UPLOADED_PRIVATE"}
+                and row["custom_thumbnail_path"] and row["custom_thumbnail_status"]=="GENERATED"
+                and uploads_enabled):
+                thumb_active=c.execute("SELECT id FROM jobs WHERE job_type='SET_YOUTUBE_THUMBNAIL' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+published_id+"%",)).fetchone()
+                if not thumb_active:
+                    thumb_id=str(uuid4())
+                    c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'SET_YOUTUBE_THUMBNAIL','QUEUED',?,?, ?,?,?)",
+                        (thumb_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"reconciled_upload":True}),t,t))
+                    c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING',custom_thumbnail_error='',updated_at=? WHERE id=?",(t,published_id))
             for pending_job in c.execute("SELECT id,payload_json FROM jobs WHERE status='RECONCILE_REQUIRED'").fetchall():
                 try:
                     if json.loads(pending_job["payload_json"] or "{}").get("published_video_id")==published_id:
