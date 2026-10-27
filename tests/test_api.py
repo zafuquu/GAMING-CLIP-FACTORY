@@ -455,7 +455,8 @@ def test_analytics_summary_rejects_malformed_or_incomplete_date_windows(tmp_path
     c,_=setup_client(tmp_path)
     assert c.get("/api/youtube/analytics/summary?start_date=not-a-date").status_code==422
     assert c.get("/api/youtube/analytics/summary?start_date=2026-10-20&end_date=2026-10-19").status_code==422
-    assert c.get("/api/youtube/analytics/summary?end_date=2026-10-26").status_code==422
+    utc_today=datetime.now(timezone.utc).date().isoformat()
+    assert c.get(f"/api/youtube/analytics/summary?end_date={utc_today}").status_code==422
     c.__exit__(None,None,None)
 
 def test_candidate_caption_edits_round_trip_as_candidate_relative_times(tmp_path):

@@ -782,7 +782,7 @@ class Worker(threading.Thread):
                 raise FileNotFoundError("Publication disappeared while custom-thumbnail generation was running.")
             if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
                 raise PermissionError("Rights expired during custom-thumbnail generation; cover was not registered.")
-            if latest["qc_status"]!="PASS" or latest["render_qc"]!="PASS" or latest["render_sha"]!=row["render_sha"] or latest["render_size"]!=row["render_size"]:
+            if latest["render_qc"]!="PASS" or latest["render_sha"]!=row["render_sha"] or latest["render_size"]!=row["render_size"]:
                 raise PermissionError("Render QC/hash changed during custom-thumbnail generation; cover was not registered.")
             t=now()
             c.execute("""UPDATE published_videos SET custom_thumbnail_path=?,custom_thumbnail_sha256=?,

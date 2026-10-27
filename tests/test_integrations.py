@@ -153,7 +153,7 @@ def test_custom_shorts_thumbnail_upload_uses_official_thumbnail_set(monkeypatch,
     assert captured["videoId"]=="youtube-video-123"
     assert captured["media_body"].mimetype()=="image/jpeg"
     with pytest.raises(ValueError,match="ID"):
-        yt.set_custom_thumbnail("invalid",cover)
+        yt.set_custom_thumbnail("not a valid ID",cover)
 
 def test_custom_thumbnail_upload_blocks_non_jpeg(tmp_path):
     from app.integrations.youtube import set_custom_thumbnail
