@@ -9,6 +9,7 @@ from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
 from .render_profiles import build_video_filter, profile_warning
 from .vision import assess_candidate_images, VisionNotConfigured
+from .narration import synthesize_piper, NarrationNotConfigured, NarrationError, narration_status as get_narration_status, validate_script
 
 def expiry_passed(value):
     if not value:
@@ -79,6 +80,8 @@ class Worker(threading.Thread):
                 self.render_candidate(job)
             elif job["job_type"] == "TRANSCRIBE_MEDIA":
                 self.transcribe_media(job)
+            elif job["job_type"] == "SYNTHESIZE_NARRATION":
+                self.synthesize_narration(job)
             elif job["job_type"] == "ANALYZE_CANDIDATE_VISION":
                 self.analyze_candidate_vision(job)
             elif job["job_type"] == "DISCOVER_TWITCH_CLIPS":
@@ -112,7 +115,7 @@ class Worker(threading.Thread):
                     if published_id:
                         c.execute("UPDATE published_videos SET publishing_status='RECONCILE_REQUIRED',updated_at=? WHERE id=?",(t,published_id))
                 else:
-                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,YouTubeNotConfigured) and not isinstance(e,VisionNotConfigured) and bool(getattr(e,"retryable",True))
+                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,(YouTubeNotConfigured,VisionNotConfigured,NarrationNotConfigured)) and bool(getattr(e,"retryable",True))
                     should_retry = bool(r and r["attempt_count"]<r["max_attempts"] and retryable)
                     status="QUEUED" if should_retry else "FAILED"
                     next_attempt = None
@@ -256,10 +259,13 @@ class Worker(threading.Thread):
             raise RuntimeError("Render job is missing candidate_id.")
         c=connect(self.db)
         try:
-            row=c.execute("""SELECT cm.*,m.original_path,m.file_name,m.source_id,p.status AS rights_status,p.expires_at
+            row=c.execute("""SELECT cm.*,m.original_path,m.file_name,m.source_id,p.status AS rights_status,p.expires_at,
+                cp.narration_text,cp.narration_audio_path,cp.narration_audio_sha256,
+                cp.narration_audio_duration_seconds,cp.narration_audio_status
                 FROM candidate_moments cm
                 JOIN media_assets m ON m.id=cm.media_id
                 JOIN source_permissions p ON p.source_id=m.source_id
+                LEFT JOIN content_plans cp ON cp.candidate_id=cm.id
                 WHERE cm.id=?""",(cid,)).fetchone()
             if not row:
                 raise FileNotFoundError("Candidate no longer exists.")
@@ -279,6 +285,33 @@ class Worker(threading.Thread):
             if source_duration <= 0 or end > source_duration + 0.05:
                 raise RuntimeError("Candidate interval exceeds verified source duration.")
             source_has_audio=any(x.get("codec_type")=="audio" for x in source_data.get("streams",[]))
+            narration_path=None
+            narration_duration=None
+            narration_sha=None
+            narration_requested=bool(row["narration_audio_status"] and row["narration_audio_status"] in {"QUEUED","SYNTHESIZING"})
+            if row["narration_audio_status"]=="READY":
+                if not row["narration_audio_path"] or not row["narration_audio_sha256"]:
+                    raise RuntimeError("Narration is marked READY but its audio artifact is missing from the content plan.")
+                narration_path=Path(row["narration_audio_path"]).resolve()
+                try: narration_path.relative_to((self.db.parent/"outputs").resolve())
+                except ValueError: raise PermissionError("Narration audio must remain inside the managed outputs directory.")
+                if not narration_path.is_file() or narration_path.stat().st_size<=44:
+                    raise FileNotFoundError("Narration audio is missing or empty; synthesize narration again.")
+                audio_hash=hashlib.sha256()
+                with narration_path.open("rb") as audio_handle:
+                    for block in iter(lambda:audio_handle.read(1024*1024),b""): audio_hash.update(block)
+                if audio_hash.hexdigest()!=row["narration_audio_sha256"]:
+                    raise PermissionError("Narration audio hash no longer matches the stored artifact.")
+                try:
+                    with wave.open(str(narration_path),"rb") as voice:
+                        narration_duration=voice.getnframes()/float(voice.getframerate())
+                except (wave.Error,EOFError,OSError) as exc:
+                    raise RuntimeError("Narration audio is not a valid WAV file.") from exc
+                if narration_duration>end-start+0.25:
+                    raise ValueError(f"Narration takes {narration_duration:.1f}s but this clip is only {end-start:.1f}s. Shorten the script or select a longer candidate.")
+                narration_sha=audio_hash.hexdigest()
+            elif narration_requested:
+                raise RuntimeError("Narration synthesis is still in progress; wait for READY before rendering the voiceover.")
             output_dir=self.db.parent/"outputs"
             output_dir.mkdir(parents=True,exist_ok=True)
             output=output_dir/(cid+"_"+uuid4().hex[:12]+".mp4")
@@ -316,9 +349,37 @@ class Worker(threading.Thread):
             # Both profiles keep the complete original game frame; blur_fill uses a darkened,
             # blurred enlargement of that same frame to avoid black bars without cropping the foreground.
             rendered_filter=build_video_filter(render_profile,subtitle_filter if captions_burned else None)
-            args=[self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{start:.3f}","-i",str(source),"-t",f"{end-start:.3f}"]
-            args += ["-map",rendered_filter["video_map"],"-map","0:a?"]
-            args += ["-vf" if rendered_filter["mode"]=="vf" else "-filter_complex",rendered_filter["filter"]]
+            args=[self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{start:.3f}","-i",str(source)]
+            if narration_path:
+                args += ["-i",str(narration_path)]
+            args += ["-t",f"{end-start:.3f}"]
+            audio_graph=None
+            if narration_path and source_has_audio:
+                audio_graph=(
+                    "[0:a]aformat=sample_rates=48000:channel_layouts=stereo[gameaudio];"
+                    "[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[voicekey][voice];"
+                    "[gameaudio][voicekey]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=300[ducked];"
+                    "[ducked][voice]amix=inputs=2:duration=first:dropout_transition=0,alimiter=limit=0.95[aout]"
+                )
+            if rendered_filter["mode"]=="vf":
+                args += ["-map",rendered_filter["video_map"],"-vf",rendered_filter["filter"]]
+                if audio_graph:
+                    args += ["-filter_complex",audio_graph,"-map","[aout]"]
+                elif narration_path:
+                    args += ["-map","1:a:0"]
+                else:
+                    args += ["-map","0:a?"]
+            else:
+                graph=rendered_filter["filter"]
+                if audio_graph:
+                    graph += ";"+audio_graph
+                args += ["-filter_complex",graph,"-map",rendered_filter["video_map"]]
+                if audio_graph:
+                    args += ["-map","[aout]"]
+                elif narration_path:
+                    args += ["-map","1:a:0"]
+                else:
+                    args += ["-map","0:a?"]
             args += ["-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
             run(args,self.timeout)
             if not output.is_file() or output.stat().st_size <= 0:
@@ -396,7 +457,7 @@ class Worker(threading.Thread):
                 try: thumbnail.unlink(missing_ok=True)
                 except OSError: pass
                 warnings.append("local_thumbnail_generation_failed")
-            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
             c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at,render_profile,thumbnail_path,thumbnail_sha256,thumbnail_width,thumbnail_height)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t,render_profile,thumbnail_path,thumbnail_hash,thumbnail_width,thumbnail_height))
@@ -1153,6 +1214,74 @@ class Worker(threading.Thread):
                 "score_calibrated":False,"automatic_approval":False,"sampled_frame_times_seconds":frame_times}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","vision.assessment_completed","Local vision assessment saved as a review aid; candidate remains human-review-only.",{"job_id":job["id"],**summary})
+            c.commit()
+        finally:
+            c.close()
+
+    def synthesize_narration(self, job):
+        if os.getenv("GCF_ENABLE_NARRATION","").lower()!="true":
+            raise PermissionError("Local narration is disabled by configuration.")
+        payload=json.loads(job["payload_json"] or "{}")
+        candidate_id=payload.get("candidate_id")
+        plan_id=payload.get("content_plan_id")
+        expected_script_sha=payload.get("script_sha256")
+        if not candidate_id or not plan_id or not expected_script_sha:
+            raise ValueError("Narration job is missing candidate, content-plan, or script identity.")
+        c=connect(self.db)
+        try:
+            row=c.execute("""SELECT cp.id AS plan_id,cp.narration_text,cp.narration_audio_status,
+                cm.id AS candidate_id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at
+                FROM content_plans cp
+                JOIN candidate_moments cm ON cm.id=cp.candidate_id
+                JOIN media_assets m ON m.id=cm.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                WHERE cp.id=? AND cm.id=?""",(plan_id,candidate_id)).fetchone()
+            if not row: raise FileNotFoundError("Content plan or candidate no longer exists.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked narration: current AUTHORIZED permission is required.")
+            if row["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
+                raise PermissionError(f"Narration generation is not allowed for candidate state {row['state']}.")
+            script=validate_script(row["narration_text"] or "")
+            current_sha=hashlib.sha256(script.encode("utf-8")).hexdigest()
+            if current_sha!=expected_script_sha:
+                raise PermissionError("Narration script changed after this job was queued; save and queue the current script again.")
+            c.execute("UPDATE content_plans SET narration_audio_status='SYNTHESIZING',narration_audio_error='',updated_at=? WHERE id=?",(now(),plan_id))
+            c.commit()
+            outdir=self.db.parent/"outputs"
+            outdir.mkdir(parents=True,exist_ok=True)
+            target=outdir/(candidate_id+"_"+uuid4().hex[:12]+"_narration.wav")
+            media_id=row["media_id"]
+        finally:
+            c.close()
+        generated=synthesize_piper(script,target)
+        c=connect(self.db)
+        try:
+            latest=c.execute("""SELECT cp.narration_text,cm.state,p.status AS rights_status,p.expires_at
+                FROM content_plans cp JOIN candidate_moments cm ON cm.id=cp.candidate_id
+                JOIN media_assets m ON m.id=cm.media_id JOIN source_permissions p ON p.source_id=m.source_id
+                WHERE cp.id=? AND cm.id=?""",(plan_id,candidate_id)).fetchone()
+            if not latest:
+                target.unlink(missing_ok=True)
+                raise FileNotFoundError("Narration plan disappeared during synthesis.")
+            latest_script=validate_script(latest["narration_text"] or "")
+            latest_sha=hashlib.sha256(latest_script.encode("utf-8")).hexdigest()
+            if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                target.unlink(missing_ok=True)
+                raise PermissionError("Rights were expired or revoked during narration synthesis; audio was discarded.")
+            if latest_sha!=expected_script_sha:
+                target.unlink(missing_ok=True)
+                raise PermissionError("Narration script changed during synthesis; audio was discarded.")
+            t=now()
+            c.execute("""UPDATE content_plans SET narration_audio_path=?,narration_audio_sha256=?,
+                narration_audio_duration_seconds=?,narration_audio_status='READY',narration_audio_error='',
+                narration_audio_generated_at=?,updated_at=? WHERE id=?""",
+                (generated["path"],generated["sha256"],generated["duration_seconds"],t,t,plan_id))
+            summary={"candidate_id":candidate_id,"content_plan_id":plan_id,"narration_audio_path":generated["path"],
+                "sha256":generated["sha256"],"file_size":generated["file_size"],"duration_seconds":generated["duration_seconds"],
+                "sample_rate":generated["sample_rate"],"channels":generated["channels"],"model_name":generated["model_name"]}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                (json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","narration.completed","Local narration audio generated from an owner-reviewed script.",{"job_id":job["id"],**summary})
             c.commit()
         finally:
             c.close()
