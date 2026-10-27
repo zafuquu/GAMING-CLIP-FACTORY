@@ -213,7 +213,7 @@ def test_scheduled_public_worker_publishes_only_after_all_live_gates_pass(tmp_pa
     _enable_public_release(tmp_path,monkeypatch,cfg)
     scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
     with sqlite3.connect(cfg.database_path) as db:
-        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),pub_id))
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
     payload={"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]}
     fake=_MutationYouTubeService(payload)
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
