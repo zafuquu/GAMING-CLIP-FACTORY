@@ -2175,9 +2175,9 @@ class Worker(threading.Thread):
                              "human_final_review_required":True,"vision_gate_passed":True})
             summary={"candidate_id":cid,"assessment_id":assessment_id,"model_name":result["model_name"],"event_type":result["event_type"],
                 "highlight_score":result["highlight_score"],"confidence":confidence,"combined_ranking_score":combined,
-                "score_calibrated":False,"automatic_approval":False,"auto_render_queued":auto_render_queued,"vision_render_gate_passed":is_render_worthy_vision_assessment(result),"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
+                "score_calibrated":False,"automatic_approval":auto_render_queued,"auto_render_queued":auto_render_queued,"vision_render_gate_passed":is_render_worthy_vision_assessment(result),"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","vision.assessment_completed","Local vision assessment saved as a review aid; candidate remains human-review-only.",{"job_id":job["id"],**summary})
+            event(c,"INFO","vision.assessment_completed","Local vision assessment saved; unattended rendering occurs only when the explicit folder-watch and strict semantic quality gates pass.",{"job_id":job["id"],**summary})
             c.commit()
         finally:
             c.close()
