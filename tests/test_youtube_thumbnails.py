@@ -119,6 +119,80 @@ def test_set_thumbnail_worker_upload_success_marks_only_thumbnail_status(tmp_pat
     assert task["status"]=="COMPLETED"
 
 
+def test_set_thumbnail_rechecks_owner_upload_gate_before_provider_call(tmp_path,monkeypatch):
+    """A gate disabled during local validation cancels the remote mutation and keeps the cover."""
+    client,cfg,ids=fixture(tmp_path,monkeypatch,thumbnail_status="SET_PENDING",has_thumbnail=True)
+    with sqlite3.connect(ids["db"]) as db:
+        thumbnail_path=db.execute(
+            "SELECT custom_thumbnail_path FROM published_videos WHERE id=?",
+            (ids["published_id"],),
+        ).fetchone()[0]
+    thumbnail=Path(thumbnail_path).resolve()
+    original_read_bytes=Path.read_bytes
+    observed_reads=0
+
+    def disable_uploads_on_final_thumbnail_hash(path_obj):
+        nonlocal observed_reads
+        result=original_read_bytes(path_obj)
+        if path_obj.resolve()==thumbnail:
+            observed_reads+=1
+            if observed_reads==2:
+                # The worker's second byte read is the final integrity check immediately
+                # before its provider call. Simulate the owner toggling uploads off in
+                # another UI request during that preparation step.
+                stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
+                with sqlite3.connect(ids["db"]) as db:
+                    db.execute(
+                        "UPDATE settings SET value='false',updated_at=? WHERE key='youtube_uploads_enabled'",
+                        (stamp,),
+                    )
+        return result
+
+    monkeypatch.setattr(Path,"read_bytes",disable_uploads_on_final_thumbnail_hash)
+    provider_calls=[]
+    monkeypatch.setattr(
+        worker_module,"set_custom_thumbnail",
+        lambda *args,**kwargs: provider_calls.append((args,kwargs)) or {"items":[]},
+    )
+    job_id="set-thumb-gate-race"
+    stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with sqlite3.connect(ids["db"]) as db:
+        db.execute(
+            """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (job_id,"SET_YOUTUBE_THUMBNAIL","RUNNING",ids["source_id"],ids["media_id"],
+             json.dumps({"published_video_id":ids["published_id"]}),stamp,stamp),
+        )
+
+    Worker(cfg.database_path,None,None,10).set_youtube_thumbnail(
+        {"id":job_id,"payload_json":json.dumps({"published_video_id":ids["published_id"]})}
+    )
+
+    with sqlite3.connect(ids["db"]) as db:
+        db.row_factory=sqlite3.Row
+        pub=db.execute(
+            """SELECT custom_thumbnail_path,custom_thumbnail_sha256,custom_thumbnail_status,
+                      custom_thumbnail_error,publishing_status,youtube_video_id
+               FROM published_videos WHERE id=?""",
+            (ids["published_id"],),
+        ).fetchone()
+        task=db.execute("SELECT status,error FROM jobs WHERE id=?",(job_id,)).fetchone()
+        gate=db.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()[0]
+
+    assert observed_reads==2, "The test must disable the gate during the final local thumbnail hash check."
+    assert gate=="false"
+    assert Path(pub["custom_thumbnail_path"]).is_file()
+    assert hashlib.sha256(Path(pub["custom_thumbnail_path"]).read_bytes()).hexdigest()==pub["custom_thumbnail_sha256"]
+    assert pub["custom_thumbnail_status"]=="GENERATED"
+    assert "disabled" in pub["custom_thumbnail_error"].lower()
+    assert pub["publishing_status"]=="READY_PRIVATE"
+    assert pub["youtube_video_id"]=="youtube-video-123"
+    assert task["status"]=="CANCELLED"
+    assert "disabled" in task["error"].lower()
+    assert provider_calls==[], "No custom-thumbnail provider request may start after uploads are disabled."
+    client.__exit__(None,None,None)
+
+
 def test_thumbnail_failure_does_not_change_video_publication_status(tmp_path,monkeypatch):
     from app.integrations.youtube import ThumbnailUploadError
     client,cfg,ids=fixture(tmp_path,monkeypatch,thumbnail_status="SET_PENDING",has_thumbnail=True)
