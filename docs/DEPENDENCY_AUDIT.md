@@ -19,6 +19,7 @@
 - YouTube Data API v3: public search can use GCF_YOUTUBE_API_KEY; this does not authenticate channel ownership or grant reuse rights.
 - YouTube upload/privacy changes/Analytics/custom thumbnail upload: require Google Cloud project, OAuth Desktop client, owner authentication, scopes and current quota/account-policy review. Custom thumbnail upload is implemented via the official YouTube Data API; account eligibility for custom thumbnails is an external prerequisite.
 - Faster-Whisper: optional local speech recognition from backend/requirements-ml.txt; weights are not bundled and model downloads are disabled unless explicitly opted in.
+- Piper CLI: optional separately installed local text-to-speech executable plus an ONNX voice model and matching JSON config. The app does not download or bundle either. Review the current engine license and the specific voice model/dataset card independently; voice licenses differ.
 - Remotion: not integrated; compatibility and licensing review required before adoption.
 
 An integration is not operational until real credentials/setup and end-to-end acceptance checks are completed.
