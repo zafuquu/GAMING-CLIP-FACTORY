@@ -30,6 +30,21 @@ def test_health_and_empty_dashboard(tmp_path):
     d=c.get("/api/dashboard").json()
     assert d["counts"]["sources_total"]==0 and d["counts"]["published_videos"]==0
     c.__exit__(None,None,None)
+def test_readiness_reports_missing_media_toolchain(tmp_path):
+    c,_=setup_client(tmp_path)
+    response=c.get("/api/readiness")
+    assert response.status_code==200,response.text
+    payload=response.json()
+    assert payload["ready"] is False
+    assert payload["status"]=="degraded"
+    assert payload["checks"]["database"]["ready"] is True
+    assert payload["checks"]["ffmpeg"]["ready"] is False
+    assert payload["checks"]["ffprobe"]["ready"] is False
+    assert payload["checks"]["database_directory"]["ready"] is True
+    assert payload["checks"]["media_root"]["ready"] is True
+    assert payload["checks"]["output_directory"]["ready"] is True
+    c.__exit__(None,None,None)
+
 def test_new_source_starts_unknown_and_duplicate_blocked(tmp_path):
     c,_=setup_client(tmp_path); sid=add_source(c)
     assert c.get("/api/sources").json()[0]["rights_status"]=="UNKNOWN"
