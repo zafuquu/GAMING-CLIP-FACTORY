@@ -35,13 +35,14 @@ def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approv
             db.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",(cid,mid,0.25,4.75,"test_fixture","Test only","NEEDS_REVIEW",stamp))
             db.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(jid,"ANALYZE_CANDIDATE_VISION","RUNNING",sid,mid,json.dumps({"candidate_id":cid}),stamp,stamp))
         captured={}
-        def fake_assessment(images,game,source_title,transcript_excerpt=""):
-            captured.update({"frame_count":len(images),"image_sizes":[len(x) for x in images],"game":game,"title":source_title})
+        def fake_assessment(images,game,source_title,transcript_excerpt="",frame_times_seconds=None):
+            captured.update({"frame_count":len(images),"image_sizes":[len(x) for x in images],"game":game,"title":source_title,"relative_frame_times_seconds":frame_times_seconds})
             return {"model_name":"fake-local-vision","gameplay_context":"FPS practice footage","event_type":"unknown","visible_event":"No specific event is established by the sampled still frames.","is_actionable_highlight":False,"highlight_score":0.12,"confidence":0.88,"evidence":["The sampled frames do not establish a distinct event."],"quality_issues":["Sparse screenshots cannot prove event timing."],"score_calibrated":False}
         monkeypatch.setattr(worker_module,"assess_candidate_images",fake_assessment)
         worker=Worker(cfg.database_path,ffmpeg,None,60)
         worker.analyze_candidate_vision({"id":jid,"payload_json":json.dumps({"candidate_id":cid})})
-        assert captured["frame_count"]==3
+        assert captured["frame_count"]==5
+        assert captured["relative_frame_times_seconds"]==[0.45,1.35,2.25,3.15,4.05]
         assert all(size>0 for size in captured["image_sizes"])
         assert captured["game"]=="Valorant"
         with sqlite3.connect(cfg.database_path) as db:
@@ -52,6 +53,8 @@ def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approv
         assert 0<=ranking[0]<=1
         assert ranking[1]=="NEEDS_REVIEW"
         assert json.loads(ranking[2])["vision_score_calibrated"] is False
+        assert json.loads(ranking[2])["vision_sample_count"]==5
+        assert json.loads(ranking[2])["vision_relative_frame_times_seconds"]==[0.45,1.35,2.25,3.15,4.05]
         assert job[0]=="COMPLETED"
         listed=client.get("/api/candidates").json()
         candidate=next(x for x in listed if x["id"]==cid)
