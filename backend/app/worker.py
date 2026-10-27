@@ -363,10 +363,25 @@ class Worker(threading.Thread):
                     and watch["rights_status"]=="AUTHORIZED"
                     and not expiry_passed(watch["expires_at"])
                     and not (paused and paused["value"]=="true")):
+                    # Count every previous supervised auto-render job for this media,
+                    # including failed/completed jobs. Re-analysis or restart cannot consume
+                    # another batch and silently exceed the per-file cap.
+                    historical_auto_render_jobs=c.execute(
+                        "SELECT payload_json FROM jobs WHERE media_id=? AND job_type='RENDER_CANDIDATE'",
+                        (m["id"],),
+                    ).fetchall()
+                    already_auto_rendered=0
+                    for historical in historical_auto_render_jobs:
+                        try:
+                            if json.loads(historical["payload_json"] or "{}").get("auto_render_reason")=="authorized_folder_watch":
+                                already_auto_rendered+=1
+                        except (ValueError,TypeError):
+                            continue
+                    remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
                     eligible=c.execute("""SELECT id FROM candidate_moments
                         WHERE media_id=? AND state='NEEDS_REVIEW'
                         ORDER BY start_seconds ASC,created_at ASC
-                        LIMIT ?""",(m["id"],AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA)).fetchall()
+                        LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
                     for candidate in eligible:
                         updated=c.execute("UPDATE candidate_moments SET state='APPROVED' WHERE id=? AND state='NEEDS_REVIEW'",(candidate["id"],))
                         if updated.rowcount!=1:
@@ -391,6 +406,8 @@ class Worker(threading.Thread):
             summary={"duration_seconds":duration,"candidate_count":added,
                 "auto_render_queued":auto_render_queued,
                 "auto_render_cap_per_media":AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,
+                "auto_rendered_historically":already_auto_rendered if folder_watch_id else 0,
+                "auto_render_slots_remaining":max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-(already_auto_rendered if folder_watch_id else 0)),
                 "note":"Scene changes are not semantic highlight detection; rendered outputs require human review."}; t=now()
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","media.analysis_completed",f"Created {added} scene-change review candidates; queued {auto_render_queued} supervised auto-render jobs.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
