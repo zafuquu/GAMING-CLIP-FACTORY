@@ -48,14 +48,34 @@ class Worker(threading.Thread):
         super().__init__(daemon=True,name="gcf-worker"); self.db=Path(db).resolve(); self.ffmpeg=ffmpeg; self.ffprobe=ffprobe; self.timeout=timeout; self.media_root=Path(media_root or (self.db.parent/"media")).expanduser().resolve(); self.stop_event=threading.Event()
     def stop(self): self.stop_event.set()
     def run(self):
+        """Run one worker loop and survive transient failures in both work and error logging."""
         while not self.stop_event.is_set():
-            try: worked=self.one()
-            except Exception as e:
-                c=connect(self.db)
-                try: event(c,"ERROR","worker.error",str(e)); c.commit()
-                finally: c.close()
-                worked=False
-            if not worked: self.stop_event.wait(1)
+            try:
+                worked = self.one()
+            except Exception as exc:
+                worked = False
+                try:
+                    c = connect(self.db)
+                    try:
+                        event(c, "ERROR", "worker.error", str(exc)[:3000],
+                              {"error_type": type(exc).__name__})
+                        c.commit()
+                    finally:
+                        c.close()
+                except Exception as log_exc:
+                    # A storage/database outage must not terminate the worker thread just
+                    # because it also prevents writing the failure event. The next loop
+                    # retries storage checks; startup recovery handles any RUNNING job.
+                    print(
+                        "[gcf-worker] operation failed "
+                        f"({type(exc).__name__}: {str(exc)[:500]}); "
+                        "could not persist event "
+                        f"({type(log_exc).__name__}: {str(log_exc)[:500]}).",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            if not worked:
+                self.stop_event.wait(1)
     def check_storage_safety(self):
         """Fail closed on low/unreadable output-volume capacity; recovery never auto-resumes work."""
         enabled=os.getenv("GCF_DISK_SAFETY_ENABLED","true").strip().lower()=="true"
