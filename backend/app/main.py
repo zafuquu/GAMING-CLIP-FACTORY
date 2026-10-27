@@ -1108,9 +1108,13 @@ def create_app(settings=None,start_worker=True):
             present=bool(keyring.get_password("gaming-clip-factory-ai","youtube-oauth-credentials"))
         except Exception:
             present=False
-        return {"credentials_present":present,"upload_environment_gate":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true",
-                "uploads_enabled":bool(row and row["value"]=="true"),"scheduled_public_environment_gate":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true",
-                "default_privacy":"private","public_publishing_enabled":False}
+        upload_environment_gate=os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()=="true"
+        uploads_enabled=bool(row and row["value"]=="true")
+        scheduled_public_environment_gate=os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").strip().lower()=="true"
+        return {"credentials_present":present,"upload_environment_gate":upload_environment_gate,
+                "uploads_enabled":uploads_enabled,"scheduled_public_environment_gate":scheduled_public_environment_gate,
+                "default_privacy":"private",
+                "public_publishing_enabled":bool(uploads_enabled and upload_environment_gate and scheduled_public_environment_gate)}
 
     @app.post("/api/publishing/enable")
     def enable_publishing(data: PublishingEnableIn):

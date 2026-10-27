@@ -942,6 +942,35 @@ class Worker(threading.Thread):
         finally:
             c.close()
 
+    def _defer_upload_until_enabled(self, c, job, published_id, reason):
+        """Keep a known-not-started upload retryable while the owner master gate is off."""
+        t=now()
+        due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(minutes=5)).isoformat(timespec="seconds")
+        updated=c.execute("""UPDATE published_videos
+            SET publishing_status='UPLOAD_PENDING',upload_request_started_at=NULL,updated_at=?
+            WHERE id=? AND youtube_video_id IS NULL
+              AND publishing_status IN ('UPLOAD_PENDING','UPLOADING','FAILED')""",
+            (t,published_id))
+        if updated.rowcount!=1:
+            c.execute("""UPDATE jobs SET status='CANCELLED',
+                error='Upload was not sent because its publication is no longer eligible.',
+                updated_at=?,finished_at=? WHERE id=? AND status='RUNNING'""",
+                (t,t,job["id"]))
+            event(c,"WARNING","youtube.upload_cancelled_before_request",
+                "Upload was not sent because its publication is no longer eligible.",
+                {"job_id":job["id"],"published_video_id":published_id,"provider_request_started":False})
+            c.commit()
+            return False
+        c.execute("""UPDATE jobs SET status='QUEUED',error=?,updated_at=?,finished_at=NULL,next_attempt_at=?
+            WHERE id=? AND status='RUNNING'""",
+            (reason,t,due,job["id"]))
+        event(c,"WARNING","youtube.upload_deferred_by_owner_gate",
+            "YouTube upload remains pending because the master upload gate is disabled; the local render is preserved.",
+            {"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due,
+             "provider_request_started":False,"local_render_preserved":True})
+        c.commit()
+        return True
+
     def upload_youtube(self, job):
         payload=json.loads(job["payload_json"] or "{}")
         published_id=payload.get("published_video_id")
@@ -982,8 +1011,12 @@ class Worker(threading.Thread):
                     c.commit()
                     return
             enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
-            if not enabled or enabled["value"]!="true" or os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true":
-                raise PermissionError("YouTube uploads are disabled. Owner must configure and enable them explicitly.")
+            if not enabled or enabled["value"]!="true" or os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()!="true":
+                self._defer_upload_until_enabled(
+                    c,job,published_id,
+                    "YouTube uploads are disabled; this upload is pending until the owner re-enables the master upload gate."
+                )
+                return
             output=Path(row["output_path"])
             if not output.is_file() or output.stat().st_size != row["render_size"]:
                 raise PermissionError("Upload blocked: output is missing or its size changed since QC.")
@@ -1085,6 +1118,48 @@ class Worker(threading.Thread):
                 c.execute("UPDATE jobs SET status='QUEUED',error='Global pause enabled before upload started; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
                 event(c,"WARNING","youtube.upload_deferred_by_pause","Global pause prevented the remote upload from starting after local cover generation.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
                 c.commit()
+                return
+            # The upload toggle may change while the local cover is being generated.
+            # Recheck the owner-controlled upload gate at the last point before the
+            # non-idempotent provider call; a prior successful check is not sufficient.
+            latest_upload_gate=c.execute(
+                "SELECT value FROM settings WHERE key='youtube_uploads_enabled'"
+            ).fetchone()
+            uploads_enabled_now=bool(
+                latest_upload_gate
+                and latest_upload_gate["value"]=="true"
+                and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()=="true"
+            )
+            latest_publication=c.execute(
+                "SELECT publishing_status,youtube_video_id FROM published_videos WHERE id=?",
+                (published_id,),
+            ).fetchone()
+            if not latest_publication:
+                raise FileNotFoundError("Publication was removed before the YouTube upload request.")
+            if latest_publication["youtube_video_id"]:
+                raise UploadReconciliationRequired(
+                    "A YouTube video ID appeared before upload started; reconcile it rather than creating a possible duplicate."
+                )
+            if latest_publication["publishing_status"]!="UPLOADING":
+                t=now()
+                c.execute(
+                    """UPDATE jobs SET status='CANCELLED',
+                       error='YouTube upload was cancelled before the provider request because the publication state changed.',
+                       updated_at=?,finished_at=? WHERE id=? AND status='RUNNING'""",
+                    (t,t,job["id"]),
+                )
+                event(c,"WARNING","youtube.upload_cancelled_before_request",
+                    "Upload was cancelled at the final gate because publication state changed; no YouTube upload request was sent.",
+                    {"job_id":job["id"],"published_video_id":published_id,
+                     "publication_state":latest_publication["publishing_status"],
+                     "provider_request_started":False})
+                c.commit()
+                return
+            if not uploads_enabled_now:
+                self._defer_upload_until_enabled(
+                    c,job,published_id,
+                    "YouTube uploads were disabled during local preparation; this upload is pending until the owner re-enables the master upload gate."
+                )
                 return
             result=upload_video(output,row["title"],row["description"],[str(x) for x in tags])
             t=now()
@@ -1380,6 +1455,57 @@ class Worker(threading.Thread):
             image_hash=hashlib.sha256(image_path.read_bytes()).hexdigest()
             if image_hash!=row["custom_thumbnail_sha256"]:
                 raise PermissionError("Custom thumbnail changed during preparation.")
+
+            # The owner can disable uploads while this worker validates the image. Re-read
+            # the master setting, global pause and publication identity at the last local
+            # boundary before the non-idempotent thumbnail-upload request.
+            current=c.execute("""SELECT youtube_video_id,custom_thumbnail_sha256,publishing_status
+                FROM published_videos WHERE id=?""",(published_id,)).fetchone()
+            if (not current or current["youtube_video_id"]!=row["youtube_video_id"]
+                or current["custom_thumbnail_sha256"]!=row["custom_thumbnail_sha256"]):
+                t=now()
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Thumbnail upload cancelled because the publication identity or thumbnail changed during preparation.',updated_at=?,finished_at=? WHERE id=?",(t,t,job["id"]))
+                event(c,"WARNING","youtube.thumbnail_upload_cancelled",
+                    "Thumbnail upload cancelled before the provider request because the publication identity or thumbnail changed.",
+                    {"job_id":job["id"],"published_video_id":published_id,"provider_request_started":False})
+                c.commit()
+                return
+
+            uploads_gate=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            uploads_enabled_now=bool(
+                uploads_gate and uploads_gate["value"]=="true"
+                and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()=="true"
+            )
+            if not uploads_enabled_now:
+                t=now()
+                c.execute("""UPDATE published_videos
+                    SET custom_thumbnail_status='GENERATED',
+                        custom_thumbnail_error='Thumbnail upload cancelled before the provider request because YouTube uploads were disabled. The local cover is preserved.',
+                        updated_at=?
+                    WHERE id=? AND youtube_video_id=? AND custom_thumbnail_sha256=?""",
+                    (t,published_id,row["youtube_video_id"],row["custom_thumbnail_sha256"]))
+                c.execute("""UPDATE jobs SET status='CANCELLED',
+                    error='YouTube uploads were disabled during thumbnail preparation; no provider request was sent.',
+                    updated_at=?,finished_at=? WHERE id=?""",(t,t,job["id"]))
+                event(c,"WARNING","youtube.thumbnail_upload_cancelled",
+                    "Thumbnail upload cancelled at the final owner-controlled upload gate; local cover preserved.",
+                    {"job_id":job["id"],"published_video_id":published_id,
+                     "provider_request_started":False,"local_cover_preserved":True})
+                c.commit()
+                return
+
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                t=now()
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+                c.execute("UPDATE jobs SET status='QUEUED',error='Global pause prevented thumbnail upload at the final gate; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
+                c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING',updated_at=? WHERE id=?",(t,published_id))
+                event(c,"WARNING","youtube.thumbnail_deferred_by_pause",
+                    "Global pause prevented the thumbnail provider request at the final gate.",
+                    {"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
+
             video_id=row["youtube_video_id"]
             thumbnail_path=str(image_path)
             thumb_hash=row["custom_thumbnail_sha256"]
