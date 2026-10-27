@@ -44,6 +44,14 @@ def test_ranker_creates_ranked_short_window_around_audio_peak():
     assert "virality" in top["ranking_components"]["score_meaning"]
 
 
+def test_default_candidate_window_is_tight_shorts_length():
+    samples = [(float(t), -20.0) for t in range(60)]
+    samples[29] = (29.0, -3.0)
+    candidates = rank_highlight_windows(60.0, [], samples)
+    assert candidates
+    assert all(14.9 <= item["end_seconds"] - item["start_seconds"] <= 15.0 for item in candidates)
+
+
 def test_scene_only_fallback_is_low_confidence_and_stays_review_only():
     candidates = rank_highlight_windows(90.0, [25.0, 27.0, 68.0], [], max_candidates=10)
     assert candidates
