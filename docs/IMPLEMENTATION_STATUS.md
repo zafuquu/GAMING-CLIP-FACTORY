@@ -4,7 +4,7 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Implemented in code
 
-- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–018, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
+- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–019, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
 - One-click Windows startup through `scripts/start.bat`: checks runtime and dependency health, repairs missing environment dependencies, builds the optimized frontend, starts/reuses the API and opens a same-origin local dashboard. `/api/readiness` reports database, FFmpeg/FFprobe, writable paths and worker liveness. The Windows launch path still requires acceptance on the actual target PC.
 - Source rights registry with evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
 - Local media registration restricted to the configured media root with file checks, SHA-256 and duplicate prevention.
@@ -13,7 +13,8 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 - Optional Faster-Whisper transcription, timed phrase segments, deterministic transcript-grounded content drafts and caption timing.
 - Optional local Ollama-compatible vision assessment sampling configurable 3 or 5 frames with candidate-relative timestamps, saving structured evidence and an uncalibrated score. Local inference is preferred, feature is off by default and never auto-approves.
 - Candidate review/approval, editable candidate-relative captions, H.264/AAC 1080×1920 fit-and-pad or blurred-backdrop rendering, optional SRT subtitle burn-in and output hashes.
-- Opt-in supervised folder auto-production: stable files can be imported/analyzed, and up to three candidates per media file can be automatically rendered locally after current rights/watch/pause checks. The lifetime cap is stored on candidate records so repeated analysis cannot create extra batches. Unselected candidates remain in manual review; rendered outputs still need human inspection. No upload/public release is enabled by this setting.
+- Opt-in supervised folder auto-production: stable files can be imported/analyzed, and up to three candidates per media file can be automatically rendered locally after current rights/watch/pause checks. The lifetime cap is stored on candidate records so repeated analysis cannot create extra batches. Unselected candidates remain in manual review; rendered outputs still need human inspection.
+- Separate opt-in `auto_upload_private` folder-watch setting (migration 019; implementation branch pending CI): requires current documented source rights, connected YouTube OAuth, the environment upload gate and the explicit dashboard/database upload gate. After a render passes QC and rights are rechecked, the worker atomically records the output and queues at most one **private** upload per imported recording. Upload starts only after further rights, pause, file-size/hash and QC checks; no scheduled public-release job is created. Failure paths remain visible in job/publication history.
 - Local portrait poster frame extraction at 720×1280, poster dimensions/hash and browser preview; deterministic title-led Shorts cover generation from the real rendered frame, artifact hash/dimension validation, official YouTube thumbnail upload after processing, owner retry/regeneration and separate thumbnail-specific status/error tracking.
 - QC checks for probe/decode, dimensions, duration, codecs/audio, black-frame and frozen-frame heuristics. Warnings become REVIEW; only PASS is eligible for YouTube.
 - Browser preview for PASS and REVIEW outputs, transcript/content-plan/vision evidence exposed in API/dashboard.
@@ -25,9 +26,9 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Latest verification evidence
 
-The latest verified `main` baseline before the supervised auto-production work is GitHub Actions run #364 on commit `9f4917a92053cd47a939050ec918cae8a71c7ca1`. It passed all six jobs: Python 3.11/3.12 on Windows and Ubuntu, frontend build, and the Windows one-click start/readiness/restart/stop smoke test. [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40478057648).
+The latest verified `main` baseline is GitHub Actions run #381 on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. All six jobs passed: Python 3.11/3.12 on Windows and Ubuntu, frontend build, and the Windows one-click start/readiness/restart/stop smoke test. [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814).
 
-The open supervised auto-production change adds the migration for persistent per-candidate auto-render markers, a repeated-analysis lifetime-cap regression, a long-analysis SQLite-lock/revocation regression, and a synthetic watched-folder workflow through rendering/QC and a mocked private YouTube lifecycle. **Only the latest checks on [PR #6](https://github.com/zafuquu/GAMING-CLIP-FACTORY/pull/6) can validate that unmerged code.** Do not treat the earlier main run as evidence for changes made afterward.
+The private-auto-upload extension is being developed on a separate branch from that baseline. Its new tests extend the synthetic workflow to verify one automatic private upload after QC PASS, no public-release job, and API gates for OAuth/upload configuration and disabled auto-render. The branch is not considered verified until its own full CI run succeeds; the main-branch baseline does not validate changes made afterward.
 
 CI does not verify the user's local Windows configuration, real provider credentials, actual source rights or a live YouTube channel upload. Those remain end-to-end acceptance requirements.
 
