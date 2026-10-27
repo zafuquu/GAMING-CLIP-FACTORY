@@ -4,7 +4,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## What is implemented now
 
-- Local app: FastAPI, SQLite numbered migrations 001–009, React/TypeScript/Vite dashboard, loopback API.
+- Local app: FastAPI, SQLite numbered migrations 001–012, React/TypeScript/Vite dashboard, loopback API.
 - Source discovery: Twitch Helix clip metadata and YouTube Data API public video metadata search, including persisted schedules. These store URLs/metadata only; they do not download platform footage. New sources always start with rights UNKNOWN.
 - Rights registry: documented permission evidence, editing/commercial-use permission, owner review and expiry checks. Expired/revoked rights block processing and publishing.
 - Local media intake: configured media-root containment, file checks, SHA-256 and duplicate protection.
@@ -13,7 +13,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - Optional local vision assessment: Ollama-compatible vision model samples three frames per candidate and returns structured evidence. Scores are uncalibrated and never auto-approve; remote endpoints are blocked by default.
 - Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering.
 - Local rendering: H.264/AAC 1080×1920 MP4. Owner chooses fit-and-pad or blurred-backdrop composition; both preserve the full foreground gameplay frame without forcing a center crop. Timed caption sidecars are saved and may be burned in if the FFmpeg subtitle filter exists.
-- Local poster: a 720×1280 portrait poster frame is extracted from the rendered clip and stored with dimensions/hash. This is a dashboard preview asset, not a custom YouTube thumbnail upload.
+- Local poster and designed cover: the pipeline extracts a 720×1280 poster from the render, creates a title-led 9:16 JPEG Shorts cover from the actual frame, records hash/dimensions and uploads it with the official YouTube thumbnail API after processing succeeds. Cover generation/upload has its own visible status, retry path and failure handling; it does not falsify video-upload success.
 - Automated QC: FFprobe checks dimensions/duration/codecs/audio; FFmpeg decode scan and black/frozen-frame heuristics produce PASS or REVIEW. REVIEW outputs may be previewed but only PASS outputs can be queued for YouTube.
 - YouTube service: OAuth Desktop flow uses the OS keyring; a scope-version marker requires reconnect after scope changes. Private resumable uploads, processing-status polling/recheck, upload history, uncertain-outcome reconciliation and Analytics API snapshots exist behind local configuration.
 - Analytics feedback: exact-window comparisons group observed outcomes by game and content format. A cohort is highlighted only with at least three comparable videos; smaller samples are labeled insufficient and no metrics are fabricated.
@@ -24,7 +24,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 - Public metadata search does not supply legal permission to republish footage. Owner must provide/prove rights or provide authorized local files; source media is not downloaded by current provider integrations.
 - Scene-change and sparse-frame vision estimates do not reliably detect gameplay events across games. Vision scores are subjective and uncalibrated; game-specific accuracy needs labeled, rights-cleared validation clips.
-- Transcript correction workflows beyond candidate-relative captions, high-quality narration, custom YouTube thumbnail upload, richer template/composition systems, safe-area visual checks and advanced repair/quarantine remain incomplete.
+- Transcript correction beyond candidate-relative captions, high-quality narration, richer templates/compositions, automated visual safe-area checks and advanced repair/quarantine remain incomplete. A custom cover is a deterministic title layout, not AI-generated artwork; the actual YouTube account must be eligible for custom thumbnail uploads.
 - Remotion is not integrated; compatibility and licensing need review.
 - No real provider credentials, creator permission evidence or YouTube channel has been validated end-to-end in this repository.
 - The user's Windows installation/FFmpeg build still needs a local acceptance run; hosted CI is not a substitute.
