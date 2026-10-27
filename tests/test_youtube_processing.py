@@ -235,7 +235,7 @@ def test_scheduled_public_worker_does_not_mutate_remote_before_scheduled_time(tm
     _enable_public_release(tmp_path,monkeypatch,cfg)
     scheduled=datetime.now(timezone.utc)+__import__("datetime").timedelta(hours=2)
     with sqlite3.connect(cfg.database_path) as db:
-        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),pub_id))
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
     _public_job(cfg,pub_id,scheduled)
@@ -256,7 +256,7 @@ def test_scheduled_public_worker_defers_if_live_processing_is_pending(tmp_path,m
     _enable_public_release(tmp_path,monkeypatch,cfg)
     scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
     with sqlite3.connect(cfg.database_path) as db:
-        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),pub_id))
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"processing"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
     _public_job(cfg,pub_id,scheduled)
@@ -277,7 +277,7 @@ def test_scheduled_public_worker_rechecks_current_rights_before_remote_update(tm
     _enable_public_release(tmp_path,monkeypatch,cfg)
     scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
     with sqlite3.connect(cfg.database_path) as db:
-        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),pub_id))
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
         db.execute("UPDATE source_permissions SET status='REVOKED' WHERE source_id=?",(sid,))
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
@@ -297,7 +297,7 @@ def test_scheduled_public_worker_refuses_modified_render_hash(tmp_path,monkeypat
     _enable_public_release(tmp_path,monkeypatch,cfg)
     scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
     with sqlite3.connect(cfg.database_path) as db:
-        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),pub_id))
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
     output.write_bytes(b"X"*output.stat().st_size)
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
@@ -314,7 +314,7 @@ def test_scheduled_public_worker_respects_global_pause(tmp_path,monkeypatch):
     _enable_public_release(tmp_path,monkeypatch,cfg)
     scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
     with sqlite3.connect(cfg.database_path) as db:
-        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),pub_id))
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(datetime.now(timezone.utc).isoformat(),))
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
