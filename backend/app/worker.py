@@ -726,9 +726,14 @@ class Worker(threading.Thread):
                         "profile":render_profile,
                         "captions":remotion_captions,
                     }
-                    with remotion_props_path.open("x",encoding="utf-8",newline="\\n") as props_file:
+                    with remotion_props_path.open("x",encoding="utf-8",newline="\n") as props_file:
                         json.dump(remotion_props,props_file,ensure_ascii=False)
-                    run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],self.timeout)
+                    try:
+                        remotion_timeout=max(self.timeout,min(3600,max(30,int(os.getenv("GCF_REMOTION_TIMEOUT_SECONDS","900")))))
+                    except (TypeError,ValueError):
+                        remotion_timeout=max(self.timeout,900)
+                    run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],remotion_timeout)
+                    captions_burned=bool(remotion_captions)
                 else:
                     run(args,self.timeout)
             except Exception:
@@ -794,14 +799,14 @@ class Worker(threading.Thread):
             warnings=list(review_flags)
             if not audio and not source_has_audio: warnings.append("Source had no audio stream.")
             thumbnail=output.with_suffix(".thumbnail.jpg")
+            thumbnail_path=None
+            thumbnail_hash=None
+            thumbnail_width=None
+            thumbnail_height=None
+            thumbnail_error=None
             if render_engine=="ffmpeg":
                 # Create a local portrait poster from the completed render for dashboard/review use.
                 # This image is a local preview asset, not a YouTube custom-thumbnail upload.
-                thumbnail_path=None
-                thumbnail_hash=None
-                thumbnail_width=None
-                thumbnail_height=None
-                thumbnail_error=None
                 try:
                     sample_time=max(0.0,min(max(0.0,duration-0.05),duration/2.0))
                     thumb_filter="scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black"
