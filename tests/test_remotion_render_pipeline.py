@@ -89,6 +89,14 @@ def test_authorized_candidate_renders_through_remotion_without_poster_or_voiceov
                  "Synthetic approved candidate for Remotion render acceptance", "APPROVED", stamp),
             )
             db.execute(
+                """INSERT INTO content_plans(
+                    id,candidate_id,chosen_format,title,narration_text,created_at,updated_at,
+                    narration_audio_status
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                ("remotion-ci-plan", candidate_id, "gameplay_highlight", "Synthetic clip",
+                 "", stamp, stamp, "SYNTHESIZING"),
+            )
+            db.execute(
                 """INSERT INTO caption_segments(
                     id,candidate_id,segment_index,start_seconds,end_seconds,text,confidence,created_at
                 ) VALUES(?,?,?,?,?,?,?,?)""",
