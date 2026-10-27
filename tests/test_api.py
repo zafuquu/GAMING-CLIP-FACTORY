@@ -962,3 +962,49 @@ def test_youtube_processing_success_keeps_video_private_when_public_gate_disable
     assert tuple(video)==("READY_PRIVATE","succeeded",None)
     assert releases==0
     client.__exit__(None,None,None)
+
+
+def test_scheduled_public_worker_waits_until_requested_time(tmp_path,monkeypatch):
+    import app.worker as worker_module
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:(_ for _ in ()).throw(AssertionError("YouTube API must not be called before the scheduled time")))
+    client,media=setup_client(tmp_path)
+    db,job_id,published_id,publish_at=_seed_youtube_processing_publication(client,media,tmp_path,"public-not-due",scheduled=True)
+    with sqlite3.connect(db) as raw:
+        raw.execute("UPDATE jobs SET job_type='PUBLISH_YOUTUBE',payload_json=? WHERE id=?",
+                    (json.dumps({"published_video_id":published_id,"publish_at":publish_at}),job_id))
+    Worker(db,None,None,5).publish_youtube({"id":job_id,"payload_json":json.dumps({"published_video_id":published_id,"publish_at":publish_at})})
+    with sqlite3.connect(db) as raw:
+        status=raw.execute("SELECT status,next_attempt_at FROM jobs WHERE id=?",(job_id,)).fetchone()
+        publication=raw.execute("SELECT publishing_status,scheduled_publish_at FROM published_videos WHERE id=?",(published_id,)).fetchone()
+    assert status[0]=="QUEUED"
+    assert datetime.fromisoformat(status[1].replace("Z","+00:00")) >= datetime.fromisoformat(publish_at.replace("Z","+00:00"))
+    assert tuple(publication)==("PROCESSING",publish_at)
+    client.__exit__(None,None,None)
+
+def test_scheduled_public_worker_defers_while_youtube_still_processing(tmp_path,monkeypatch):
+    import app.worker as worker_module
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    service=_fake_youtube_processing_service("processing","private")
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:service)
+    client,media=setup_client(tmp_path)
+    db,job_id,published_id,_=_seed_youtube_processing_publication(client,media,tmp_path,"public-pending",scheduled=True)
+    past=(datetime.now(timezone.utc)-timedelta(minutes=1)).isoformat(timespec="seconds")
+    payload=json.dumps({"published_video_id":published_id,"publish_at":past})
+    with sqlite3.connect(db) as raw:
+        raw.execute("UPDATE published_videos SET publishing_status='SCHEDULED',scheduled_publish_at=? WHERE id=?",(past,published_id))
+        raw.execute("UPDATE jobs SET job_type='PUBLISH_YOUTUBE',payload_json=? WHERE id=?",(payload,job_id))
+    Worker(db,None,None,5).publish_youtube({"id":job_id,"payload_json":payload})
+    with sqlite3.connect(db) as raw:
+        publication=raw.execute("SELECT publishing_status,remote_processing_status FROM published_videos WHERE id=?",(published_id,)).fetchone()
+        original_job=raw.execute("SELECT status FROM jobs WHERE id=?",(job_id,)).fetchone()
+        recheck=raw.execute("SELECT status,next_attempt_at,payload_json FROM jobs WHERE job_type='CHECK_YOUTUBE_PROCESSING' AND id<>? AND payload_json LIKE ? ORDER BY created_at DESC LIMIT 1",(job_id,"%"+published_id+"%",)).fetchone()
+    assert tuple(publication)==("PROCESSING","processing")
+    assert original_job[0]=="COMPLETED"
+    assert recheck is not None and recheck[0]=="QUEUED"
+    assert json.loads(recheck[2])["published_video_id"]==published_id
+    client.__exit__(None,None,None)
