@@ -599,15 +599,6 @@ class Worker(threading.Thread):
             probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(source)],min(60,self.timeout))
             source_data=json.loads(probe.stdout)
             source_duration=float(source_data.get("format",{}).get("duration",0))
-            source_video=next((stream for stream in source_data.get("streams",[]) if stream.get("codec_type")=="video"),{})
-            fps_value=str(source_video.get("avg_frame_rate") or source_video.get("r_frame_rate") or "30/1")
-            try:
-                fps_num,fps_den=fps_value.split("/",1)
-                source_fps=float(fps_num)/float(fps_den)
-            except (ValueError,ZeroDivisionError):
-                source_fps=30.0
-            if not (1.0 <= source_fps <= 240.0):
-                source_fps=30.0
             if source_duration <= 0 or end > source_duration + 0.05:
                 raise RuntimeError("Candidate interval exceeds verified source duration.")
             source_has_audio=any(x.get("codec_type")=="audio" for x in source_data.get("streams",[]))
@@ -722,7 +713,6 @@ class Worker(threading.Thread):
                         "outputPath":str(output),
                         "startSeconds":start,
                         "durationSeconds":end-start,
-                        "sourceFps":source_fps,
                         "profile":render_profile,
                         "captions":remotion_captions,
                     }
