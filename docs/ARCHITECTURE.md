@@ -38,4 +38,4 @@ Twitch Helix and YouTube Data API return public metadata only; they do not downl
 
 ## Not yet provided
 
-Reliable calibrated game-aware visual event recognition, narration, richer composition/template system, safe-area checks, automatic source-media acquisition, multi-worker scheduling, extensive repair workflows, and live credential/channel acceptance. Custom cover generation/upload code exists but live account eligibility has not been verified. Public URLs never imply permission to reuse footage.
+Reliable calibrated game-aware visual event recognition, high-quality story/narration direction and expression controls, richer composition/template system, safe-area checks, automatic source-media acquisition, multi-worker scheduling, extensive repair workflows, and live credential/channel acceptance. Custom cover generation/upload code exists but live account eligibility has not been verified. Public URLs never imply permission to reuse footage.
