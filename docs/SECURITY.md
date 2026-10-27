@@ -14,3 +14,5 @@
 - Global pause defers queue claims and checks immediately before outbound YouTube operations; it does not instantly kill an already-running FFmpeg process.
 - Key SQLite transitions use immediate write locks. Migrations use unique version numbers and atomic schema/version writes; database uniqueness allows one publication record per rendered output.
 - Back up SQLite, media and outputs independently. Public upload/release are disabled by default.
+
+- Disk safety checks available space on the database/output volume before new work is claimed. Low or unreadable capacity triggers global pause. Recovery does not automatically resume jobs; the owner must explicitly resume.
