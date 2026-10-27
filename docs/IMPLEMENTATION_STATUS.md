@@ -41,7 +41,7 @@ CI does not verify the user's local Windows FFmpeg package, real provider creden
 - Reliably calibrated game-aware highlight classification across games. Scene-change detection and sparse-frame vision models can miss motion/context; scores are not calibrated.
 - Full transcript correction workflow, higher-quality narration direction/pronunciation/emotion controls, owner-editable design templates, richer compositions, safe-area validation and sophisticated repair/quarantine. Local Piper script-to-WAV synthesis and FFmpeg render mixing are implemented but require a suitable local voice, licensing review and listening/quality validation. Designed cover code exists, but real channel eligibility for custom thumbnail upload remains unverified.
 - Automatic source-media acquisition; providers currently search metadata only.
-- Production hardening for multiple workers, quota budgeting, authentication beyond loopback, notifications, low-disk pause and Windows stress tests.
+- Production hardening for multiple workers, quota budgeting, authentication beyond loopback, notifications, storage-quota budgets and Windows stress tests.
 - Unattended autonomous publishing. Public release is disabled by default and must not be described as production-verified before supervised acceptance passes.
 
 Code presence does not prove a live integration works. Continue labeling capabilities IMPLEMENTED, TESTED, NEEDS CONFIGURATION, NOT IMPLEMENTED or BLOCKED.
