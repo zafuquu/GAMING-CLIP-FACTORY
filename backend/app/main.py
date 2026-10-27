@@ -801,17 +801,44 @@ def create_app(settings=None,start_worker=True):
             c.execute("UPDATE jobs SET status='QUEUED',error='',updated_at=?,finished_at=NULL WHERE id=?",(t,jid))
             event(c,"WARNING","job.retry_requested","Failed job returned to queue by owner.",{"job_id":jid})
         return {"id":jid,"status":"QUEUED"}
+    @app.get("/api/operations/storage")
+    def storage_status():
+        enabled=os.getenv("GCF_DISK_SAFETY_ENABLED","true").strip().lower()=="true"
+        try: threshold_gb=max(0.0,min(1024.0,float(os.getenv("GCF_MIN_FREE_DISK_GB","3"))))
+        except (TypeError,ValueError): threshold_gb=3.0
+        with connect(cfg.database_path) as c:
+            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('storage_safety_status','low_disk_pause_active','global_paused','system_pause_reason')")}
+        try:
+            usage=shutil.disk_usage(cfg.database_path.parent)
+            free_gb=usage.free/(1024**3); total_gb=usage.total/(1024**3)
+            disk_state="DISABLED" if not enabled or threshold_gb<=0 else "LOW" if free_gb<threshold_gb else values.get("storage_safety_status","OK")
+            blocked=bool(enabled and threshold_gb>0 and free_gb<threshold_gb)
+            reason=f"Free space is {free_gb:.2f} GB; the configured minimum is {threshold_gb:.2f} GB." if blocked else ""
+        except OSError as exc:
+            free_gb=None; total_gb=None
+            disk_state="DISABLED" if not enabled or threshold_gb<=0 else "ERROR"
+            blocked=bool(enabled and threshold_gb>0)
+            reason=f"Disk capacity check failed ({type(exc).__name__})." if blocked else ""
+        return {"enabled":enabled and threshold_gb>0,"threshold_gb":threshold_gb,
+                "disk_state":disk_state,"free_gb":round(free_gb,3) if free_gb is not None else None,
+                "total_gb":round(total_gb,3) if total_gb is not None else None,
+                "low_disk_pause_active":values.get("low_disk_pause_active")=="true",
+                "global_paused":values.get("global_paused")=="true",
+                "pause_reason":values.get("system_pause_reason",""),"blocked":blocked,"reason":reason}
+
     @app.post("/api/system/pause")
     def pause(data: PauseIn):
         t=now(); v="true" if data.paused else "false"
         with session(cfg.database_path) as c:
             c.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(v,t))
-            event(c,"WARNING" if data.paused else "INFO","system.pause_changed","Global pause changed.",{"paused":data.paused})
+            reason="manual" if data.paused else ""
+            c.execute("INSERT INTO settings(key,value,updated_at) VALUES('system_pause_reason',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(reason,t))
+            event(c,"WARNING" if data.paused else "INFO","system.pause_changed","Global pause changed.",{"paused":data.paused,"reason":reason})
         return {"global_paused":data.paused,"updated_at":t}
     @app.get("/api/settings")
     def get_settings():
         with connect(cfg.database_path) as c: v={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings")}
-        return {"global_paused":v.get("global_paused","false")=="true","operating_mode":v.get("operating_mode","supervised"),"autonomous_public_publishing":False}
+        return {"global_paused":v.get("global_paused","false")=="true","operating_mode":v.get("operating_mode","supervised"),"autonomous_public_publishing":False,"system_pause_reason":v.get("system_pause_reason",""),"low_disk_pause_active":v.get("low_disk_pause_active","false")=="true"}
     @app.put("/api/settings/mode")
     def set_mode(data: ModeIn):
         t=now()
