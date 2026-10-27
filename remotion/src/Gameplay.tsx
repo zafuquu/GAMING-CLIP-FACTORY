@@ -1,5 +1,5 @@
 import React from "react";
-import { AbsoluteFill, OffthreadVideo, staticFile, useCurrentFrame } from "remotion";
+import { AbsoluteFill, OffthreadVideo, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
 
 export type Caption = {
   startFrame: number;
@@ -24,8 +24,10 @@ export const GameplayClip: React.FC<GameplayProps> = ({
   captions,
 }) => {
   const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
   const source = staticFile(sourceFile);
-  const trimBefore = Math.max(0, Math.round(startSeconds * sourceFps));
+  // trimBefore is measured in composition frames, not source-media frames.
+  const trimBefore = Math.max(0, Math.round(startSeconds * fps));
   const activeCaption = captions.find(
     (caption) => frame >= caption.startFrame && frame < caption.endFrame,
   );
