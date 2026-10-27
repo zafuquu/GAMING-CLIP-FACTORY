@@ -15,6 +15,13 @@ The lock matrix has one hash-pinned backend file for each supported runtime: `ba
 - Pillow: deterministic cover-art composition, JPEG integrity checks and dimension validation.
 - Python sqlite3, subprocess, hashlib, tempfile and other standard-library modules: persistence, media commands, hashes and temporary frame extraction.
 
+## Security lock audit result
+
+- The initial hashed lock set pinned Pillow 12.3.0. The scheduled audit correctly failed and reported 37 known advisory records for that version across the base and optional-ML lock variants; the reported fix was Pillow 13.0.0.
+- The source requirement now requires `Pillow>=13.0.0,<14.0.0`. The refresh workflow regenerated all eight Windows/Linux × Python 3.11/3.12 base and optional-ML lock files, each pinning Pillow 13.0.0.
+- The new lock set passed all eight `pip-audit` checks plus `npm audit` in [dependency-security run #7](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40492166354), on commit `08c430b79eeea85567ad9384f4bd2473382d98c5`.
+- Pillow 13.0.0 security fixes and supported Python versions are documented in the [official release notes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html). The repo’s app/test matrix is still required on the exact final PR head; an audit pass is not a substitute for runtime tests.
+
 ## External/local processes
 
 - FFmpeg/FFprobe: media analysis, frame sampling, rendering profiles, subtitle handling, poster extraction and QC. Install separately. Never commit binaries without checking distribution/license obligations. Gyan identifies its static builds as GPLv3.
