@@ -21,8 +21,10 @@ switch ($version) {
     default { Write-Error "Unsupported Python $version."; exit 2 }
 }
 $pythonLock = Join-Path $projectRoot "backend\requirements-lock-win-$pythonKey.txt"
+$pythonManifest = Join-Path $projectRoot "backend\requirements.txt"
+$npmManifest = Join-Path $projectRoot "frontend\package.json"
 
-foreach ($required in @($pythonLock, $npmLock)) {
+foreach ($required in @($pythonLock, $npmLock, $pythonManifest, $npmManifest)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         Write-Error "Required dependency lockfile is missing: $required"
         exit 2
@@ -48,9 +50,16 @@ function Get-GcfSha256 {
 
 # Use the .NET hashing API rather than Get-FileHash so the launcher does not
 # depend on PowerShell module auto-loading in a user's Windows environment.
-$pythonHash = Get-GcfSha256 -LiteralPath $pythonLock
-$npmHash = Get-GcfSha256 -LiteralPath $npmLock
-$expected = "python=$pythonHash" + [Environment]::NewLine + "npm=$npmHash"
+$pythonManifestHash = Get-GcfSha256 -LiteralPath $pythonManifest
+$pythonLockHash = Get-GcfSha256 -LiteralPath $pythonLock
+$npmManifestHash = Get-GcfSha256 -LiteralPath $npmManifest
+$npmLockHash = Get-GcfSha256 -LiteralPath $npmLock
+$expected = @(
+    "python-manifest=$pythonManifestHash"
+    "python-lock=$pythonLockHash"
+    "npm-manifest=$npmManifestHash"
+    "npm-lock=$npmLockHash"
+) -join [Environment]::NewLine
 
 if ($Mode -eq "test") {
     if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { exit 1 }
