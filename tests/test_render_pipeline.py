@@ -242,7 +242,7 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=72",
             "-filter_complex", "[0:v][1:v][2:v][3:v][4:v][5:v]concat=n=6:v=1:a=0[v]",
             "-map", "[v]", "-map", "6:a", "-t", "72",
-            "-af", "volume=eval=frame:volume='if(between(t\\\\,20\\\\,22)\\\\,18\\\\,0.1)'",
+            "-af", "volume=eval=frame:volume='if(between(t\\,20\\,22)\\,18\\,0.1)'",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", str(input_path),
         ]
