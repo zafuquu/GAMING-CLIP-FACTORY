@@ -91,7 +91,7 @@ echo API process is already responding. Checking whether it serves the productio
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8765/; if($r.StatusCode -eq 200 -and $r.Content -match '<div id=.root.'){exit 0}; exit 1 } catch { exit 1 }" >nul 2>nul
 if errorlevel 1 (
   echo ERROR: An older API is running on port 8765 but does not serve the built dashboard.
-  echo Close the older Gaming Clip Factory backend window, then run start.bat again.
+  echo Stop the older Gaming Clip Factory API and run start.bat again.
   goto fail
 )
 echo Reusing the running local API.
@@ -117,7 +117,7 @@ if /I "%GCF_STARTUP_SKIP_BROWSER%"=="true" (
   start "" "http://127.0.0.1:8765"
 )
 echo.
-echo Close the separate backend window to stop the local app.
+echo The backend runs in the background; use scripts\stop.bat to stop it.
 echo This launcher window can now be closed.
 exit /b 0
 
