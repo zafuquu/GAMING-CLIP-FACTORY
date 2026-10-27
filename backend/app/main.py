@@ -5,6 +5,7 @@ from datetime import datetime, timezone, date, timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, AnyHttpUrl, Field, model_validator
 from .config import Settings
 from .db import initialize, connect, session, now, event, recover_interrupted_jobs
@@ -1645,6 +1646,18 @@ def create_app(settings=None,start_worker=True):
     @app.get("/api/events")
     def events():
         with connect(cfg.database_path) as c: return [dict(r) for r in c.execute("SELECT * FROM system_events ORDER BY created_at DESC LIMIT 100")]
+
+    # When the optimized Vite bundle is present, serve it from the same loopback
+    # process as the API. Declaring the mount even before dist exists lets a running
+    # local API see the bundle after the launcher builds it. API routes above take
+    # precedence over this final catch-all mount.
+    frontend_root = cfg.project_root / "frontend"
+    if frontend_root.is_dir():
+        app.mount(
+            "/",
+            StaticFiles(directory=str(frontend_root / "dist"), html=True, check_dir=False),
+            name="frontend",
+        )
     return app
 
 app=create_app()
