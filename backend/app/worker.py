@@ -9,6 +9,7 @@ from .twitch_user_auth import TwitchUserNotConfigured
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, ThumbnailUploadError, set_custom_thumbnail, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
+from .highlight_detector import parse_timed_metric, rank_highlight_windows
 from .render_profiles import build_video_filter, profile_warning
 from .vision import assess_candidate_images, VisionNotConfigured, vision_sampling_fractions
 from .narration import synthesize_piper, NarrationNotConfigured, NarrationError, narration_status as get_narration_status, validate_script
@@ -417,14 +418,42 @@ class Worker(threading.Thread):
         data=json.loads(probe.stdout); fmt=data.get("format",{}); duration=float(fmt.get("duration",0))
         if duration<=0: raise RuntimeError("Could not verify positive media duration")
         meta={"format_name":fmt.get("format_name"),"duration_seconds":duration,"size_bytes":source_stat_before.st_size,"streams":[{"type":s.get("codec_type"),"codec":s.get("codec_name"),"width":s.get("width"),"height":s.get("height"),"fps":s.get("avg_frame_rate")} for s in data.get("streams",[])]}
-        p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),"-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
+        has_audio=any(stream.get("type")=="audio" for stream in meta["streams"])
+        signal_cmd=[self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                    "-vf","select='gt(scene,0.35)',showinfo"]
+        signal_analysis_warning=""
+        if has_audio:
+            # One FFmpeg pass collects scene-change timestamps and one-second
+            # relative audio RMS levels. This remains local and API-free.
+            signal_cmd.extend(["-af","aresample=48000,asetnsamples=n=48000:p=1,astats=metadata=1:reset=1,ametadata=print"])
+        signal_cmd.extend(["-f","null","-"])
+        try:
+            p=run(signal_cmd,self.timeout)
+        except RuntimeError as exc:
+            if not has_audio:
+                raise
+            # Audio filters differ across some third-party FFmpeg builds. Keep
+            # scene-only review working rather than failing the whole analysis.
+            signal_analysis_warning=f"Audio activity extraction unavailable ({type(exc).__name__}); scene-only fallback used."
+            p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                   "-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
         source_stat_after=path.stat()
         if (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns):
             raise RuntimeError("Source media changed during analysis. Let the file finish copying/recording and retry.")
+        # Audio metadata also contains pts_time. Only lines emitted by showinfo
+        # are valid scene-change timestamps; this avoids mistaking audio seconds
+        # for visual scene boundaries.
         ts=[]
-        for hit in SCENE.finditer(p.stderr):
+        for line in p.stderr.splitlines():
+            if "showinfo" not in line.lower():
+                continue
+            hit=SCENE.search(line)
+            if not hit:
+                continue
             t=float(hit.group(1))
-            if 0<t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
+            if 0<=t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
+        audio_samples=parse_timed_metric(p.stderr,"lavfi.astats.Overall.RMS_level")
+        ranked_moments=rank_highlight_windows(duration,ts,audio_samples)
 
         # Reacquire a short write transaction after media processing and recheck permission;
         # revocation/expiry during a long FFmpeg scan must not get ignored.
@@ -440,11 +469,26 @@ class Worker(threading.Thread):
             m=dict(current)
             c.execute("UPDATE media_assets SET probe_json=?,state='PROBED' WHERE id=?",(json.dumps(meta),m["id"]))
             added=0
-            for t in ts:
-                start=round(max(0,t-5),3); end=round(min(duration,t+5),3)
-                if end-start<3: continue
-                cur=c.execute("INSERT OR IGNORE INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,? ,?,'NEEDS_REVIEW',?)",(str(uuid4()),m["id"],start,end,"ffmpeg_scene_change","Scene-change heuristic only; human review required.",now()))
-                added+=cur.rowcount
+            for moment in ranked_moments:
+                candidate_id=str(uuid4())
+                score=float(moment["ranking_score"])
+                components=moment["ranking_components"]
+                explanation=(
+                    f"Local signal rank {score:.2f}/1.00; event={moment['event_type']}; "
+                    "rank uses relative audio activity and scene timing only. "
+                    "It is uncalibrated, does not predict views, and requires human review."
+                )
+                cur=c.execute(
+                    """INSERT OR IGNORE INTO candidate_moments(
+                        id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at
+                    ) VALUES(?,?,?,?,?,?,'NEEDS_REVIEW',?)""",
+                    (candidate_id,m["id"],moment["start_seconds"],moment["end_seconds"],
+                     "local_audio_scene_ranker_v1",explanation,now()))
+                if cur.rowcount:
+                    c.execute(
+                        "UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",
+                        (score,json.dumps(components),candidate_id))
+                    added+=cur.rowcount
 
             # Explicitly enabled folder watches can auto-render a small local batch after
             # rechecking the watch and current source rights. This skips the per-candidate
@@ -479,7 +523,7 @@ class Worker(threading.Thread):
                     remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
                     eligible=c.execute("""SELECT id FROM candidate_moments
                         WHERE media_id=? AND state='NEEDS_REVIEW' AND auto_rendered=0
-                        ORDER BY start_seconds ASC,created_at ASC
+                        ORDER BY COALESCE(ranking_score,0) DESC,start_seconds ASC,created_at ASC
                         LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
                     for candidate in eligible:
                         updated=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(candidate["id"],))
@@ -504,13 +548,18 @@ class Worker(threading.Thread):
                              "rights_rechecked":True,"public_publish_queued":False,
                              "human_final_review_required":True})
             summary={"duration_seconds":duration,"candidate_count":added,
+                "ranked_candidate_count":len(ranked_moments),
+                "audio_signal_sample_count":len(audio_samples),
+                "ranking_method":"local_audio_scene_v1",
+                "ranking_calibrated":False,
+                "signal_analysis_warning":signal_analysis_warning,
                 "auto_render_queued":auto_render_queued,
                 "auto_render_cap_per_media":AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,
                 "auto_rendered_historically":already_auto_rendered if folder_watch_id else 0,
                 "auto_render_slots_remaining":max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-(already_auto_rendered if folder_watch_id else 0)),
-                "note":"Scene changes are not semantic highlight detection; rendered outputs require human review."}; t=now()
+                "note":"Candidates are ranked by relative audio activity and nearby scene changes. This is an uncalibrated review heuristic, not semantic proof or a prediction of views; human review is required."}; t=now()
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","media.analysis_completed",f"Created {added} scene-change review candidates; queued {auto_render_queued} supervised auto-render jobs.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
+            event(c,"INFO","media.analysis_completed",f"Created {added} locally signal-ranked review candidates; queued {auto_render_queued} supervised auto-render jobs.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
         finally: c.close()
         if os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true":
             if importlib.util.find_spec("faster_whisper") is not None:
@@ -533,7 +582,7 @@ class Worker(threading.Thread):
             except (TypeError,ValueError): maximum=25
             c=connect(self.db)
             try:
-                candidates=c.execute("SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY created_at DESC LIMIT ?",(job["media_id"],maximum)).fetchall()
+                candidates=c.execute("SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY COALESCE(ranking_score,0) DESC,created_at DESC LIMIT ?",(job["media_id"],maximum)).fetchall()
                 queued=0; stamp=now()
                 for candidate in candidates:
                     active=c.execute("SELECT id FROM jobs WHERE job_type='ANALYZE_CANDIDATE_VISION' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",("%"+candidate["id"]+"%",)).fetchone()
