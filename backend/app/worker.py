@@ -410,6 +410,7 @@ class Worker(threading.Thread):
                                 "candidate_id":candidate["id"],
                                 "render_profile":"fit_pad",
                                 "auto_render_reason":"authorized_folder_watch",
+                                "folder_watch_id":folder_watch_id,
                                 "human_final_review_required":True,
                             }),render_stamp,render_stamp))
                         auto_render_queued+=1
