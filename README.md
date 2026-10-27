@@ -109,19 +109,22 @@ Voiceover is opt-in and remains local until you approve a clip for rendering. Th
 
 ## Test and CI
 
-From project root:
+The application uses hash-pinned Python dependency locks for each supported platform/runtime and a committed npm lockfile. Choose the lock matching the machine running the tests:
 
-    # Windows Python 3.12 example; choose the lock matching your OS and Python version.
+    # Windows Python 3.12
     python -m pip install --require-hashes -r backend\requirements-lock-win-py312.txt
+    python scripts\validate_dependency_locks.py --os-key win --python-key py312
     python -m pytest -q
 
-Frontend:
+For Windows Python 3.11 use `requirements-lock-win-py311.txt`; for Linux use the matching `requirements-lock-linux-py311.txt` or `requirements-lock-linux-py312.txt`. Install frontend dependencies reproducibly with:
 
     cd frontend
     npm ci
     npm run build
 
-Main’s last verified pre-lock run is [GitHub Actions run #381](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814) on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. The separate dependency-lock PR is validating one hash-locked requirements file per OS/Python pair plus `npm ci`; those changes are not considered verified until the latest PR head passes all six jobs. CI uses mocked YouTube provider calls and does not certify a real credentialed channel.
+To refresh dependencies after editing `backend/requirements.txt`, `backend/requirements-ml.txt`, or `frontend/package.json`, use the GitHub Actions **Refresh dependency locks** workflow. Follow [the lock maintenance guide](docs/DEPENDENCY_LOCK_MAINTENANCE.md), commit the downloaded lock files with the matching manifest change, then let the full CI matrix verify them. Do not hand-edit generated lock files or relax hash verification.
+
+Main’s last verified pre-lock run is [GitHub Actions run #381](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814) on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. Dependency-lock changes are on a separate branch and are not considered production-verified until their latest CI run passes and the change is merged. CI uses mocked YouTube provider calls and does not certify a real credentialed channel.
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
 
