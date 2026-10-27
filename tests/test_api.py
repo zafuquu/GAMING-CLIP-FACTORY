@@ -702,3 +702,84 @@ def test_folder_watch_can_be_disabled_without_deleting_imported_media(tmp_path):
     assert deleted.status_code==200 and deleted.json()["media_retained"] is True
     assert c.get("/api/automation/folder-watches").json()==[]
     c.__exit__(None,None,None)
+
+
+def test_narration_status_is_reported_without_exposing_paths(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_NARRATION","false")
+    monkeypatch.delenv("GCF_PIPER_EXECUTABLE_PATH",raising=False)
+    monkeypatch.delenv("GCF_PIPER_MODEL_PATH",raising=False)
+    monkeypatch.delenv("GCF_PIPER_CONFIG_PATH",raising=False)
+    c,_=setup_client(tmp_path)
+    response=c.get("/api/integrations/status")
+    assert response.status_code==200,response.text
+    narration=response.json()["narration"]
+    assert narration["enabled"] is False
+    assert narration["ready"] is False
+    assert narration["network_calls"] is False
+    assert narration["model_downloads"] is False
+    c.__exit__(None,None,None)
+
+
+def test_content_plan_edit_saves_owner_reviewed_script_and_narration_is_opt_in(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_NARRATION","false")
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"narration-clip.mp4").write_bytes(b"synthetic registry-only media bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"narration-clip.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    cid="narration-content-plan-test"
+    stamp="2026-10-01T00:00:00+00:00"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("""INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at)
+            VALUES(?,?,?,?,?,?,?,?)""",(cid,mid,1.0,8.0,"test","Voiceover script test","NEEDS_REVIEW",stamp))
+    saved=c.put(f"/api/candidates/{cid}/content-plan",json={
+        "title":"Valorant | A clean round",
+        "description":"Owner-reviewed test description.",
+        "tags":["Valorant","shorts"],
+        "narration_text":"Hold the angle. Wait for the sound, then rotate."
+    })
+    assert saved.status_code==200,saved.text
+    assert saved.json()["narration_text"]=="Hold the angle. Wait for the sound, then rotate."
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.row_factory=sqlite3.Row
+        plan=raw.execute("SELECT narration_text,narration_audio_status,narration_audio_path FROM content_plans WHERE candidate_id=?",(cid,)).fetchone()
+    assert plan["narration_text"]=="Hold the angle. Wait for the sound, then rotate."
+    assert plan["narration_audio_status"]=="NOT_GENERATED"
+    assert plan["narration_audio_path"] is None
+    blocked=c.post(f"/api/candidates/{cid}/narration")
+    assert blocked.status_code==503,blocked.text
+    c.__exit__(None,None,None)
+
+
+def test_editing_narration_script_invalidates_previous_audio(tmp_path,monkeypatch):
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"narration-reset.mp4").write_bytes(b"synthetic registry-only media bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"narration-reset.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    cid="narration-invalidates-audio"
+    stamp="2026-10-01T00:00:00+00:00"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("""INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at)
+            VALUES(?,?,?,?,?,?,?,?)""",(cid,mid,0.0,10.0,"test","Narration invalidation test","NEEDS_REVIEW",stamp))
+        raw.execute("""INSERT INTO content_plans(id,candidate_id,chosen_format,title,narration_text,created_at,updated_at,
+            narration_audio_path,narration_audio_sha256,narration_audio_duration_seconds,narration_audio_status,narration_audio_error,narration_audio_generated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",("plan-narration-reset",cid,"gameplay_highlight","Test title","First script line.",stamp,stamp,
+            "data/outputs/old-voice.wav","abc123",1.5,"READY","","2026-10-01T00:00:00+00:00"))
+    saved=c.put(f"/api/candidates/{cid}/content-plan",json={"narration_text":"A new script line."})
+    assert saved.status_code==200,saved.text
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.row_factory=sqlite3.Row
+        plan=raw.execute("SELECT narration_text,narration_audio_status,narration_audio_path,narration_audio_sha256,narration_audio_duration_seconds FROM content_plans WHERE candidate_id=?",(cid,)).fetchone()
+    assert plan["narration_text"]=="A new script line."
+    assert plan["narration_audio_status"]=="NOT_GENERATED"
+    assert plan["narration_audio_path"] is None
+    assert plan["narration_audio_sha256"] is None
+    assert plan["narration_audio_duration_seconds"] is None
+    c.__exit__(None,None,None)
