@@ -1978,6 +1978,8 @@ class Worker(threading.Thread):
                 raise RuntimeError("Media source path changed during transcription; results were not persisted.")
             if current_source["rights_status"]!="AUTHORIZED" or expiry_passed(current_source["expires_at"]):
                 raise PermissionError("Rights expired or were revoked during transcription; results were not persisted.")
+            if current_source["file_size"] is not None and int(current_source["file_size"])!=source_signature[0]:
+                raise RuntimeError("Imported media size metadata changed during transcription; results were not persisted.")
             source_latest=media_path.stat()
             if (source_latest.st_size,source_latest.st_mtime_ns)!=source_signature:
                 raise RuntimeError("Source media changed during transcription. Let the file finish copying and retry.")
