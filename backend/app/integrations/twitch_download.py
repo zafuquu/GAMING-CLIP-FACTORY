@@ -29,7 +29,7 @@ def clip_slug_from_url(value: str) -> str:
     parts = [segment for segment in parsed.path.split("/") if segment]
     slug = ""
     if parsed.hostname == "clips.twitch.tv":
-        slug = parts[0] if parts else ""
+        slug = parts[0] if len(parts) == 1 else ""
     else:
         if len(parts) >= 3 and parts[1].lower() == "clip":
             slug = parts[2]
