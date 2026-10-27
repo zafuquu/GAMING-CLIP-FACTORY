@@ -54,16 +54,7 @@ if errorlevel 1 (
   goto fail
 )
 :dependencies
-".venv\Scripts\python.exe" -m pip install --upgrade pip
-if errorlevel 1 goto fail
-".venv\Scripts\python.exe" -m pip install --require-hashes -r backend\requirements-lock.txt
-if errorlevel 1 goto fail
-pushd frontend
-call npm ci --no-audit --no-fund
-set "NPM_STATUS=%ERRORLEVEL%"
-popd
-if not "%NPM_STATUS%"=="0" goto fail
-powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\lock-state.ps1" -Mode write
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\install-dependencies.ps1"
 if errorlevel 1 goto fail
 echo Setup complete.
 exit /b 0
