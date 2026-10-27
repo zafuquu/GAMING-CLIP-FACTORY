@@ -44,7 +44,7 @@ Do not interpret any rank as a probability of reaching millions of views. Reliab
 
 ## Requirements
 
-- Windows 10/11, Python 3.11 or 3.12, Node.js 20.19+ or 22.12+, and npm.
+- Windows 10/11, Python 3.11 or 3.12, Node.js 20.19+ or 22.13+, and npm.
 - FFmpeg/FFprobe installed separately. The app auto-detects common project-local directories or uses GCF_FFMPEG_PATH/GCF_FFPROBE_PATH.
 - Provider credentials only for integrations you enable.
 
@@ -66,7 +66,7 @@ This Remotion path is local-only: it does not generate a poster/thumbnail or mix
 
 ## Windows quick start
 
-**First run:** install Python 3.11 or 3.12 and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. The launcher creates `.env` from `.env.example` only if missing, repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API, checks local readiness and opens the dashboard. The API runs as a background process; its logs are stored at `data\logs\backend.stdout.log` and `data\logs\backend.stderr.log`. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the readiness panel reports degraded status and media processing remains unavailable until those tools are installed/configured.
+**First run:** install Python 3.11 or 3.12 and Node.js 20.19+ or 22.13+, then double-click `scripts\start.bat`. The launcher creates `.env` from `.env.example` only if missing, repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API, checks local readiness and opens the dashboard. The API runs as a background process; its logs are stored at `data\logs\backend.stdout.log` and `data\logs\backend.stderr.log`. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the readiness panel reports degraded status and media processing remains unavailable until those tools are installed/configured.
 
 **Later runs:** double-click `scripts\start.bat` again. For development only, use `scripts\run-backend.bat` and `scripts\run-dashboard.bat` separately to run the Vite development server. To stop the background app, use `scripts\stop.bat`.
 
