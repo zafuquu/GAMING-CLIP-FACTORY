@@ -47,6 +47,10 @@ No API credentials, OAuth files, model weights or FFmpeg binaries are committed.
 
 Defaults: data\gaming_clip_factory.sqlite3, media in data\media, render outputs and posters in data\outputs. Keep .env, media/output files, OAuth client JSON and model caches out of Git.
 
+## Storage safety
+
+The worker checks free space on the database/output volume before folder scans or claiming another job. By default it pauses the global queue if free space falls below 3 GB, or if disk capacity cannot be checked. Configure `GCF_DISK_SAFETY_ENABLED` and `GCF_MIN_FREE_DISK_GB` in the local `.env`. When space recovers, the disk-specific alert clears but the global pause remains set until you explicitly resume in Operations. This protects local renders/model caches from filling the drive and avoids a silent restart loop.
+
 ## Source and rights workflow
 
 1. Use Automation Setup to search Twitch/YouTube after configuring a provider. Search results enter the registry as UNKNOWN.
@@ -130,7 +134,7 @@ Hosted CI does not verify real credentials, actual source rights or the target W
 - Public upload/release gates are disabled by default.
 - Global pause defers new queue claims and checks before outbound YouTube mutations, but it does not instantly kill an already-running FFmpeg process.
 - No general user authentication is implemented; do not expose the API/dashboard to LAN/internet.
-- Single local worker only. Multi-worker deployment, quota budgets, notifications, disk-pressure pause and extensive Windows stress testing remain future work.
+- Single local worker only. Multi-worker deployment, quota budgets, notifications, quota budgets, notifications, and extensive Windows stress testing remain future work.
 
 ## Documentation
 
