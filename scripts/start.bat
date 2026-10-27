@@ -84,11 +84,11 @@ if not exist "frontend\dist\index.html" (
 
 echo.
 echo Checking whether the local API is already running...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/api/health; if($r.StatusCode -eq 200){exit 0}; exit 1 } catch { exit 1 }" >nul 2>nul
+".venv\Scripts\python.exe" scripts\local_http.py health >nul 2>nul
 if errorlevel 1 goto launch_backend
 
 echo API process is already responding. Checking whether it serves the production dashboard...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8765/; if($r.StatusCode -eq 200 -and $r.Content -match '<div id=.root.'){exit 0}; exit 1 } catch { exit 1 }" >nul 2>nul
+".venv\Scripts\python.exe" scripts\local_http.py dashboard >nul 2>nul
 if errorlevel 1 (
   echo ERROR: An older API is running on port 8765 but does not serve the built dashboard.
   echo Stop the older Gaming Clip Factory API and run start.bat again.
@@ -98,12 +98,12 @@ echo Reusing the running local API.
 
 :wait_backend
 echo Waiting for the local app...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0;$i -lt 45;$i++){ try { $h=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/api/health; $home=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/; if($h.StatusCode -eq 200 -and $home.StatusCode -eq 200){$ok=$true;break} } catch {}; Start-Sleep -Seconds 1 }; if(-not $ok){Write-Error 'The API and production dashboard did not both become ready within 45 seconds. Inspect data\\logs\\backend.stdout.log and backend.stderr.log.'; exit 1 }"
+".venv\Scripts\python.exe" scripts\local_http.py wait
 if errorlevel 1 goto fail
 
 echo.
 echo Checking media pipeline readiness...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-RestMethod -TimeoutSec 5 http://127.0.0.1:8765/api/readiness; $r.checks.PSObject.Properties | ForEach-Object { if($_.Value.ready){Write-Host ('  OK    '+$_.Name)} else {Write-Host ('  CHECK '+$_.Name+' - '+$_.Value.reason)} }; if(-not $r.ready){Write-Host 'Media production is DEGRADED until all required tools and paths are valid.'} } catch { Write-Warning ('Readiness report unavailable: '+$_.Exception.Message) }"
+".venv\Scripts\python.exe" scripts\local_http.py readiness
 
 echo.
 echo Gaming Clip Factory AI is open.
