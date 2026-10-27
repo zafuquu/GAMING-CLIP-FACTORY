@@ -107,7 +107,7 @@ def rank_highlight_windows(
 ) -> list[dict]:
     """Propose diverse Shorts-ready windows around scene changes/audio peaks.
 
-    Window size defaults to 24 seconds, with 40% of the window before the event
+    Window size defaults to 15 seconds, with 40% of the window before the event
     and 60% after it. The score is a heuristic for relative review priority,
     not a calibrated probability of a highlight or a prediction of reach.
     """
