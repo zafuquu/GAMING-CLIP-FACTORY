@@ -476,10 +476,13 @@ class Worker(threading.Thread):
         try:
             row=c.execute("""SELECT cm.*,m.original_path,m.file_name,m.source_id,p.status AS rights_status,p.expires_at,
                 cp.narration_text,cp.narration_audio_path,cp.narration_audio_sha256,
-                cp.narration_audio_duration_seconds,cp.narration_audio_status
+                cp.narration_audio_duration_seconds,cp.narration_audio_status,
+                cp.title AS content_title,cp.description AS content_description,cp.tags_json AS content_tags_json,
+                s.title AS source_title,s.game
                 FROM candidate_moments cm
                 JOIN media_assets m ON m.id=cm.media_id
                 JOIN source_permissions p ON p.source_id=m.source_id
+                JOIN sources s ON s.id=m.source_id
                 LEFT JOIN content_plans cp ON cp.candidate_id=cm.id
                 WHERE cm.id=?""",(cid,)).fetchone()
             if not row:
@@ -488,9 +491,16 @@ class Worker(threading.Thread):
                 raise PermissionError("Rights gate blocked rendering: current AUTHORIZED permission is required.")
             if row["state"] not in {"APPROVED","RENDER_FAILED"}:
                 raise RuntimeError(f"Candidate is not approved for rendering (state={row['state']}).")
-            source=Path(row["original_path"])
+            source=Path(row["original_path"]).resolve()
+            try:
+                source.relative_to(self.media_root)
+            except ValueError:
+                raise PermissionError("Source media path is outside the configured media root.")
             if not source.is_file():
                 raise FileNotFoundError("Source media file is missing.")
+            source_stat_before=source.stat()
+            if source_stat_before.st_size<=0 or source_stat_before.st_size!=int(row["file_size"]):
+                raise PermissionError("Source media size no longer matches the registered source record.")
             start=float(row["start_seconds"]); end=float(row["end_seconds"])
             if start < 0 or end <= start:
                 raise RuntimeError("Candidate has invalid time boundaries.")
@@ -597,6 +607,9 @@ class Worker(threading.Thread):
                     args += ["-map","0:a?"]
             args += ["-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
             run(args,self.timeout)
+            source_stat_after=source.stat()
+            if (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns):
+                raise RuntimeError("Source media changed during rendering. The output will not be registered; let the source file finish copying and retry.")
             if not output.is_file() or output.stat().st_size <= 0:
                 raise RuntimeError("FFmpeg reported success but produced no nonempty file.")
             rendered_probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(output)],min(60,self.timeout))
@@ -674,13 +687,87 @@ class Worker(threading.Thread):
                 warnings.append("local_thumbnail_generation_failed")
             report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
+            # Serialize the final authorization check with permission revocation and record
+            # the render plus any automated private-upload intent in the same SQLite transaction.
+            c.execute("BEGIN IMMEDIATE")
+            latest=c.execute("""SELECT p.status AS rights_status,p.expires_at,m.original_path,m.file_size
+                FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id
+                WHERE m.id=?""",(row["media_id"],)).fetchone()
+            if (not latest or latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"])):
+                try: output.unlink(missing_ok=True)
+                except OSError: pass
+                try: thumbnail.unlink(missing_ok=True)
+                except OSError: pass
+                raise PermissionError("Rights gate blocked render persistence: source permission was revoked or expired while rendering.")
+            if Path(latest["original_path"]).resolve()!=source or int(latest["file_size"])!=source.stat().st_size:
+                try: output.unlink(missing_ok=True)
+                except OSError: pass
+                try: thumbnail.unlink(missing_ok=True)
+                except OSError: pass
+                raise PermissionError("Source media identity changed during rendering; the output was not registered.")
             c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at,render_profile,thumbnail_path,thumbnail_sha256,thumbnail_width,thumbnail_height)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t,render_profile,thumbnail_path,thumbnail_hash,thumbnail_width,thumbnail_height))
             candidate_state="RENDERED_QC_PASSED" if qc_status=="PASS" else "RENDERED_QC_REVIEW"
             c.execute("UPDATE candidate_moments SET state=? WHERE id=?",(candidate_state,cid))
-            summary={"rendered_output_id":out_id,"output_path":str(output),"file_size":output.stat().st_size,"sha256":h.hexdigest(),"qc_status":qc_status,"qc_report":report}
+            auto_private_upload_queued=False
+            folder_watch_id=payload.get("folder_watch_id")
+            if qc_status=="PASS" and folder_watch_id:
+                watch=c.execute("""SELECT w.enabled,w.auto_analyze,w.auto_render,w.auto_upload_private,
+                    p.status AS rights_status,p.expires_at
+                    FROM media_folder_watches w
+                    JOIN watched_media_files f ON f.watch_id=w.id AND f.media_id=?
+                    JOIN source_permissions p ON p.source_id=w.source_id
+                    WHERE w.id=? AND w.source_id=?""",(row["media_id"],folder_watch_id,row["source_id"])).fetchone()
+                uploads=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+                paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+                private_upload_allowed=bool(
+                    watch and bool(watch["enabled"]) and bool(watch["auto_analyze"])
+                    and bool(watch["auto_render"]) and bool(watch["auto_upload_private"])
+                    and watch["rights_status"]=="AUTHORIZED" and not expiry_passed(watch["expires_at"])
+                    and uploads and uploads["value"]=="true"
+                    and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()=="true"
+                    and not (paused and paused["value"]=="true")
+                )
+                # Never generate a batch of channel uploads from a long recording. Only the
+                # first QC-PASS render per source media can create an automatic private upload.
+                existing_media_upload=c.execute(
+                    "SELECT id FROM published_videos WHERE media_id=? LIMIT 1",(row["media_id"],)
+                ).fetchone()
+                if private_upload_allowed and not existing_media_upload:
+                    content_title=str(row["content_title"] or "").strip()
+                    base_title=str(row["source_title"] or Path(row["file_name"]).stem or "Gameplay Highlight").strip()
+                    upload_title=(content_title or f"{base_title} | Gameplay Highlight")[:100].strip()
+                    upload_description=str(row["content_description"] or "").strip()[:5000]
+                    try:
+                        upload_tags=json.loads(row["content_tags_json"] or "[]")
+                        if not isinstance(upload_tags,list): upload_tags=[]
+                    except (ValueError,TypeError):
+                        upload_tags=[]
+                    upload_tags=[str(tag).strip()[:100] for tag in upload_tags if str(tag).strip()][:30]
+                    published_id=str(uuid4()); upload_job_id=str(uuid4())
+                    c.execute("""INSERT INTO published_videos(
+                        id,source_id,media_id,candidate_id,output_path,title,description,template_id,qc_status,
+                        publishing_status,youtube_video_id,created_at,updated_at,rendered_output_id,scheduled_publish_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,'UPLOAD_PENDING',NULL,?,?,?,NULL)""",(
+                        published_id,row["source_id"],row["media_id"],cid,str(output),upload_title,upload_description,
+                        "portrait_"+str(render_profile),"PASS",t,t,out_id
+                    ))
+                    upload_payload={"published_video_id":published_id,"publish_at":None,"tags":upload_tags,
+                        "publication_mode":"private","automatic_private_upload":True,"folder_watch_id":folder_watch_id}
+                    c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                        VALUES(?,'UPLOAD_YOUTUBE','QUEUED',?,?, ?,?,?)""",(
+                        upload_job_id,row["source_id"],row["media_id"],json.dumps(upload_payload),t,t
+                    ))
+                    auto_private_upload_queued=True
+                    event(c,"INFO","folder_watch.auto_private_upload_queued",
+                        "Queued one QC-passed render for private YouTube upload; public release was not scheduled.",
+                        {"folder_watch_id":folder_watch_id,"media_id":row["media_id"],"candidate_id":cid,
+                         "rendered_output_id":out_id,"published_video_id":published_id,"upload_job_id":upload_job_id,
+                         "privacy_status":"private","public_release_scheduled":False,"per_media_upload_cap":1})
+            summary={"rendered_output_id":out_id,"output_path":str(output),"file_size":output.stat().st_size,"sha256":h.hexdigest(),"qc_status":qc_status,"qc_report":report,
+                "automatic_private_upload_queued":auto_private_upload_queued}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO" if qc_status=="PASS" else "WARNING","render.qc_passed" if qc_status=="PASS" else "render.qc_review_required","Candidate rendered; deterministic QC status is "+qc_status+".",{"job_id":job["id"],"candidate_id":cid,"output_id":out_id,"duration_seconds":duration,"warnings":warnings})
+            event(c,"INFO" if qc_status=="PASS" else "WARNING","render.qc_passed" if qc_status=="PASS" else "render.qc_review_required","Candidate rendered; deterministic QC status is "+qc_status+".",{"job_id":job["id"],"candidate_id":cid,"output_id":out_id,"duration_seconds":duration,"warnings":warnings,"automatic_private_upload_queued":auto_private_upload_queued})
             c.commit()
         finally:
             c.close()
