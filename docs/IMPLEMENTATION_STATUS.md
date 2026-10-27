@@ -4,13 +4,13 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Implemented in code
 
-- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–013, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
+- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–016, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
 - Source rights registry with evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
 - Local media registration restricted to the configured media root with file checks, SHA-256 and duplicate prevention.
 - Twitch Helix and YouTube Data API metadata-only discovery with schedules/history. No source media is downloaded and public metadata never grants reuse rights.
 - FFprobe metadata and FFmpeg scene-change candidates; still a heuristic detector rather than semantic game-event understanding.
 - Optional Faster-Whisper transcription, timed phrase segments, deterministic transcript-grounded content drafts and caption timing.
-- Optional local Ollama-compatible vision assessment sampling three frames, saving structured evidence and an uncalibrated score. Local inference is preferred, feature is off by default and never auto-approves.
+- Optional local Ollama-compatible vision assessment sampling configurable 3 or 5 frames with candidate-relative timestamps, saving structured evidence and an uncalibrated score. Local inference is preferred, feature is off by default and never auto-approves.
 - Candidate review/approval, editable candidate-relative captions, H.264/AAC 1080×1920 fit-and-pad or blurred-backdrop rendering, optional SRT subtitle burn-in and output hashes.
 - Local portrait poster frame extraction at 720×1280, poster dimensions/hash and browser preview; deterministic title-led Shorts cover generation from the real rendered frame, artifact hash/dimension validation, official YouTube thumbnail upload after processing, owner retry/regeneration and separate thumbnail-specific status/error tracking.
 - QC checks for probe/decode, dimensions, duration, codecs/audio, black-frame and frozen-frame heuristics. Warnings become REVIEW; only PASS is eligible for YouTube.
