@@ -5,6 +5,7 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 ## Implemented in code
 
 - FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–016, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
+- One-click Windows startup through `scripts/start.bat`: checks runtime and dependency health, repairs missing environment dependencies, builds the optimized frontend, starts/reuses the API and opens a same-origin local dashboard. `/api/readiness` reports database, FFmpeg/FFprobe, writable paths and worker liveness. The Windows launch path still requires acceptance on the actual target PC.
 - Source rights registry with evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
 - Local media registration restricted to the configured media root with file checks, SHA-256 and duplicate prevention.
 - Twitch Helix and YouTube Data API metadata-only discovery with schedules/history. No source media is downloaded and public metadata never grants reuse rights.
@@ -23,7 +24,7 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Latest verification evidence
 
-GitHub Actions run **40437190729** on commit `bdcab795` completed successfully across all five jobs: Windows and Ubuntu with Python 3.11/3.12, plus the frontend typecheck/production build. The Ubuntu/Python 3.12 job reported **130 passed, 1 warning**; Ubuntu/Python 3.11 reported **130 passed, 2 warnings**. Both Linux jobs installed FFmpeg and ran the media integration tests. Run: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40437190729.
+Pre-hardening baseline: GitHub Actions run **40437498235** on commit `0df6b1d` completed successfully across all five jobs (Windows/Linux Python 3.11/3.12 and frontend build). This is not a validation result for changes on the current production-hardening PR. Track the current branch's exact test run through PR #1 before treating the added startup/readiness/public-release changes as verified. Run: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40437498235.
 
 The current CI suite covers the added 3/5-frame timestamped vision sampling, scheduler fairness and error isolation, along with the existing API/rights, YouTube processing/reconciliation, storage-safety, narration, render and frontend tests.
 

@@ -93,6 +93,20 @@ def test_readiness_reports_missing_media_toolchain(tmp_path):
     assert payload["checks"]["output_directory"]["ready"] is True
     c.__exit__(None,None,None)
 
+def test_readiness_reports_live_background_worker(tmp_path):
+    root=tmp_path/"worker-ready-project"
+    data=root/"data"
+    cfg=Settings(root,data,data/"media",data/"test.sqlite3",None,None,5)
+    with TestClient(create_app(settings=cfg,start_worker=True)) as c:
+        response=c.get("/api/readiness")
+        assert response.status_code==200,response.text
+        payload=response.json()
+        assert payload["ready"] is False  # Missing FFmpeg/FFprobe still block full readiness.
+        assert payload["checks"]["worker"]["enabled"] is True
+        assert payload["checks"]["worker"]["required"] is True
+        assert payload["checks"]["worker"]["ready"] is True
+
+
 def test_readiness_reports_healthy_media_toolchain(tmp_path,monkeypatch):
     from types import SimpleNamespace
     root=tmp_path/"ready-project"; data=root/"data"; media=data/"media"
