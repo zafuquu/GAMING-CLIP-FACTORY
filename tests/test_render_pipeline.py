@@ -349,13 +349,13 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert repeat_job["status"] == "COMPLETED", repeat_job.get("error")
         repeat_summary = json.loads(repeat_job["payload_json"])
         assert repeat_summary["auto_render_queued"] == 0, repeat_summary
-        all_render_jobs = [
-            job for job in client.get("/api/jobs").json()
-            if job["media_id"] == media_id
-            and job["job_type"] == "RENDER_CANDIDATE"
-            and json.loads(job["payload_json"] or "{}").get("auto_render_reason") == "authorized_folder_watch"
-        ]
-        assert len(all_render_jobs) == 3, "Repeated analysis must respect the lifetime per-media cap."
+        assert repeat_summary["auto_rendered_historically"] == 3, repeat_summary
+        with sqlite3.connect(cfg.database_path) as db:
+            auto_rendered_count = db.execute(
+                "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
+                (media_id,),
+            ).fetchone()[0]
+        assert auto_rendered_count == 3, "Persistent candidate markers must enforce the lifetime per-media cap."
         remaining = [
             candidate for candidate in client.get("/api/candidates").json()
             if candidate["media_id"] == media_id and candidate["state"] == "NEEDS_REVIEW"
