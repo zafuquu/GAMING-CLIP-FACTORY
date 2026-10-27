@@ -113,6 +113,7 @@ From project root:
 
     # Choose the matching OS/Python lock file (example: Windows + Python 3.12).
     python -m pip install --require-hashes -r backend\requirements-lock-win-py312.txt
+    python scripts\validate_dependency_locks.py --os-key win --python-key py312
     python -m pytest -q
 
 The supported lock names are `requirements-lock-{win,linux}-{py311,py312}.txt`. The optional transcription installer selects the matching `requirements-ml-lock-*` file; do not install optional ML packages with the unpinned source requirements file on a production machine.
