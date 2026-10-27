@@ -11,7 +11,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - Analysis: FFprobe metadata and FFmpeg scene-change candidates. These are heuristics, not a semantic gameplay-event detector.
 - Optional local speech recognition: Faster-Whisper produces transcript/timed segments. A deterministic transcript-grounded content director drafts format/title/description/tags and caption timing. Owners can also write an exact script and explicitly synthesize it through a configured local Piper CLI/voice model; generated WAVs are hashed, previewed and mixed into renders with gameplay-audio ducking. The app does not invent or auto-synthesize scripts.
 - Optional local vision assessment: Ollama-compatible vision model samples a configurable 3 or 5 frames per candidate, passes candidate-relative timestamps to the model, and returns structured evidence. Scores are uncalibrated and never auto-approve; remote endpoints are blocked by default.
-- Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering.
+- Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering. **Opt-in supervised auto-production** on an explicitly configured authorized folder can automatically render up to three scene-change candidates per stable media file. The local QC-passed clips land in the review queue; you still inspect the finished video and decide whether to upload. This does not auto-upload or publish, and manual candidate approval remains the default.
 - Local rendering: H.264/AAC 1080×1920 MP4. Owner chooses fit-and-pad or blurred-backdrop composition; both preserve the full foreground gameplay frame without forcing a center crop. Timed caption sidecars are saved and may be burned in if the FFmpeg subtitle filter exists.
 - Local poster and designed cover: the pipeline extracts a 720×1280 poster from the render, creates a title-led 9:16 JPEG Shorts cover from the actual frame, records hash/dimensions and uploads it with the official YouTube thumbnail API after processing succeeds. Cover generation/upload has its own visible status, retry path and failure handling; it does not falsify video-upload success.
 - Automated QC: FFprobe checks dimensions/duration/codecs/audio; FFmpeg decode scan and black/frozen-frame heuristics produce PASS or REVIEW. REVIEW outputs may be previewed but only PASS outputs can be queued for YouTube.
@@ -56,8 +56,8 @@ The worker checks free space on the database/output volume before folder scans o
 3. Only mark AUTHORIZED after evidence, editing/commercial flags and owner review are complete. Expired permissions fail closed.
 4. Place authorized files within the media root and register their relative path.
 5. Analyze the source; optionally run local transcription/vision. Scene-change and model-based results are estimates.
-6. Review candidates and caption timing, then approve/reject.
-7. Choose fit-and-pad or blurred-backdrop render, inspect QC, and preview the MP4/poster. REVIEW outputs cannot be uploaded; only PASS qualifies.
+6. By default, review candidates/captions and approve or reject them individually. For a watched folder, you may explicitly enable supervised auto-production to render a capped batch (maximum three scene-change candidates per file) without per-candidate clicks.
+7. Inspect the finished MP4/poster and QC result in the dashboard. Supervised auto-production stops at local rendering; it never uploads/publishes automatically. REVIEW outputs cannot be uploaded; only PASS qualifies.
 8. For YouTube, connect the intended channel and test private upload, processing status and reconciliation. Uploads start private. Public releases require a separate environment gate and current-rights/QC/hash checks at release time.
 
 ## Provider setup
