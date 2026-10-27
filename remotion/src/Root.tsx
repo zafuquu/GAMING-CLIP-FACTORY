@@ -3,7 +3,7 @@ import { Composition } from "remotion";
 import { GameplayClip, type GameplayProps } from "./Gameplay";
 
 const defaults: GameplayProps = {
-  sourceFile: "clip.asset",
+  sourceFile: "clip.mp4",
   sourceFps: 30,
   startSeconds: 0,
   durationSeconds: 2,
