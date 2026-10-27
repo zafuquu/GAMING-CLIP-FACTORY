@@ -55,8 +55,9 @@ def script_drafting_status() -> dict:
     valid=parsed.scheme=="http" and bool(parsed.hostname) and parsed.path.endswith("/api/chat")
     local=(parsed.hostname or "").lower() in {"127.0.0.1","localhost","::1"}
     remote_allowed=os.getenv("GCF_SCRIPT_DRAFTER_ALLOW_REMOTE","").strip().lower()=="true"
-    try: model=os.getenv("GCF_SCRIPT_DRAFTER_MODEL","llama3.1:8b").strip()
-    except Exception: model=""
+    model=os.getenv("GCF_SCRIPT_DRAFTER_MODEL","llama3.1:8b").strip()
+    try: timeout=max(15,min(300,int(os.getenv("GCF_SCRIPT_DRAFTER_TIMEOUT_SECONDS","120") or "120")))
+    except (TypeError,ValueError): timeout=120
     ready=enabled and valid and (local or remote_allowed) and bool(model)
     reason=None
     if not enabled: reason="Set GCF_ENABLE_SCRIPT_DRAFTING=true to enable local narration drafting."
@@ -64,7 +65,7 @@ def script_drafting_status() -> dict:
     elif not local and not remote_allowed: reason="Remote inference is disabled; use a local endpoint or explicitly allow it after privacy review."
     elif not model: reason="A model name is required."
     return {"enabled":enabled,"ready":ready,"model":model or "unknown","endpoint_local":local,
-            "remote_allowed":remote_allowed,"timeout_seconds":max(15,min(300,int(os.getenv("GCF_SCRIPT_DRAFTER_TIMEOUT_SECONDS","120") or "120"))),
+            "remote_allowed":remote_allowed,"timeout_seconds":timeout,
             "automatic_synthesis":False,"owner_review_required":True,"reason":reason}
 
 def generate_narration_draft(*, game: str, source_title: str, candidate_duration: float,
