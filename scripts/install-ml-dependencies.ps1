@@ -15,6 +15,11 @@ $lock = Join-Path $projectRoot "backend\requirements-ml-lock-win-$pythonKey.txt"
 if (-not (Test-Path -LiteralPath $lock -PathType Leaf)) {
     throw "Optional ML lock for Windows/Python $version not found: $lock"
 }
+$validator = Join-Path $projectRoot "scripts\validate_dependency_locks.py"
+& $pythonPath $validator --os-key win --python-key $pythonKey
+if ($LASTEXITCODE -ne 0) {
+    throw "Dependency manifests and lock files disagree. Refresh the complete lock matrix before installing optional ML packages."
+}
 Write-Output "Installing optional ML dependencies from $lock"
 & $pythonPath -m pip install --require-hashes -r $lock
 if ($LASTEXITCODE -ne 0) { throw "Hash-verified optional ML dependency installation failed." }
