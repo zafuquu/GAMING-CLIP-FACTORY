@@ -110,7 +110,7 @@ async function main() {
       : [];
 
     const inputProps = {
-      sourceFile: "clip.asset",
+      sourceFile: path.basename(sourceAlias),
       sourceFps,
       startSeconds,
       durationSeconds,
