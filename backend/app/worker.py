@@ -158,6 +158,14 @@ class Worker(threading.Thread):
                                       (plan_state,str(e)[:1500],t,plan_id))
                     except (ValueError,TypeError,sqlite3.Error):
                         pass
+                if status == "FAILED" and job["job_type"] == "DRAFT_NARRATION_SCRIPT":
+                    try:
+                        candidate_id=json.loads(job["payload_json"] or "{}").get("candidate_id")
+                        if candidate_id:
+                            c.execute("""UPDATE content_plans SET narration_draft_status='FAILED',narration_draft_error=?,updated_at=?
+                                WHERE candidate_id=? AND narration_draft_status='GENERATING'""",(str(e)[:1500],t,candidate_id))
+                    except (ValueError,TypeError,sqlite3.Error):
+                        pass
                 if status == "FAILED" and job["job_type"] == "ANALYZE_CANDIDATE_VISION":
                     try:
                         cid=json.loads(job["payload_json"] or "{}").get("candidate_id")
@@ -1361,7 +1369,7 @@ class Worker(threading.Thread):
             raise ValueError("Narration job is missing candidate, content-plan, or script identity.")
         c=connect(self.db)
         try:
-            row=c.execute("""SELECT cp.id AS plan_id,cp.narration_text,cp.narration_audio_status,
+            row=c.execute("""SELECT cp.id AS plan_id,cp.narration_text,cp.narration_script_reviewed,cp.narration_audio_status,
                 cm.id AS candidate_id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at
                 FROM content_plans cp
                 JOIN candidate_moments cm ON cm.id=cp.candidate_id
@@ -1371,6 +1379,8 @@ class Worker(threading.Thread):
             if not row: raise FileNotFoundError("Content plan or candidate no longer exists.")
             if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
                 raise PermissionError("Rights gate blocked narration: current AUTHORIZED permission is required.")
+            if not bool(row["narration_script_reviewed"]):
+                raise PermissionError("Narration script has not been explicitly reviewed by the owner.")
             if row["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
                 raise PermissionError(f"Narration generation is not allowed for candidate state {row['state']}.")
             script=validate_script(row["narration_text"] or "")
@@ -1388,7 +1398,7 @@ class Worker(threading.Thread):
         generated=synthesize_piper(script,target)
         c=connect(self.db)
         try:
-            latest=c.execute("""SELECT cp.narration_text,cm.state,p.status AS rights_status,p.expires_at
+            latest=c.execute("""SELECT cp.narration_text,cp.narration_script_reviewed,cm.state,p.status AS rights_status,p.expires_at
                 FROM content_plans cp JOIN candidate_moments cm ON cm.id=cp.candidate_id
                 JOIN media_assets m ON m.id=cm.media_id JOIN source_permissions p ON p.source_id=m.source_id
                 WHERE cp.id=? AND cm.id=?""",(plan_id,candidate_id)).fetchone()
@@ -1397,6 +1407,9 @@ class Worker(threading.Thread):
                 raise FileNotFoundError("Narration plan disappeared during synthesis.")
             latest_script=validate_script(latest["narration_text"] or "")
             latest_sha=hashlib.sha256(latest_script.encode("utf-8")).hexdigest()
+            if not bool(latest["narration_script_reviewed"]):
+                target.unlink(missing_ok=True)
+                raise PermissionError("Narration review was withdrawn during synthesis; generated audio was discarded.")
             if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
                 target.unlink(missing_ok=True)
                 raise PermissionError("Rights were expired or revoked during narration synthesis; audio was discarded.")
