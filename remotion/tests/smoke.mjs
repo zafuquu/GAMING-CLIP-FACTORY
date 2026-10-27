@@ -47,7 +47,6 @@ try {
     outputPath,
     startSeconds: 0.5,
     durationSeconds: 2,
-    sourceFps: 24,
     profile: "fit_pad",
     captions: [{ startFrame: 5, endFrame: 25, text: "Synthetic render test" }],
   }), "utf8");
