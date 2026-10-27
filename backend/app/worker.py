@@ -1179,6 +1179,62 @@ class Worker(threading.Thread):
             if row["remote_processing_status"]!="succeeded":
                 # Keep remote processing state as a recorded precondition; the live query above is authoritative.
                 c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,updated_at=? WHERE id=?",(now(),now(),published_id))
+                c.commit()
+
+            # Remote reads take time. Re-query every mutable local safety gate after that
+            # network round-trip and immediately before the non-idempotent public mutation.
+            latest=c.execute("""SELECT pv.publishing_status,pv.scheduled_publish_at,pv.qc_status AS publication_qc,
+                pv.output_path AS publication_path,ro.output_path AS render_path,ro.qc_status AS render_qc,
+                ro.sha256 AS render_sha,ro.file_size AS render_size,p.status AS rights_status,p.expires_at
+                FROM published_videos pv
+                JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
+                JOIN media_assets m ON m.id=ro.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                WHERE pv.id=?""",(published_id,)).fetchone()
+            if not latest:
+                raise FileNotFoundError("Publication, render or rights record disappeared before public release.")
+            if latest["publishing_status"] not in {"SCHEDULED","PROCESSING"} or not latest["scheduled_publish_at"]:
+                raise PermissionError("Scheduled public release was cancelled or disabled before the remote state change.")
+            if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_RIGHTS',scheduled_publish_at=NULL,processing_failure_reason='Rights were revoked or expired before public release.',updated_at=? WHERE id=?",(stamp,published_id))
+                event(c,"ERROR","youtube.publication_blocked_rights","Final pre-mutation check blocked public release because source rights are no longer current.",{"job_id":job["id"],"published_video_id":published_id})
+                c.commit()
+                raise PermissionError("Scheduled publication blocked: source rights were revoked or expired during the remote status check.")
+            if latest["publication_qc"]!="PASS" or latest["render_qc"]!="PASS" or latest["publication_path"]!=latest["render_path"]:
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason='Render/QC linkage changed before public release.',updated_at=? WHERE id=?",(stamp,published_id))
+                event(c,"ERROR","youtube.publication_blocked_qc","Final pre-mutation check blocked public release because render/QC linkage is no longer valid.",{"job_id":job["id"],"published_video_id":published_id})
+                c.commit()
+                raise PermissionError("Scheduled publication blocked: the render/QC linkage changed during the remote status check.")
+            try:
+                final_size=output.stat().st_size
+                if final_size!=latest["render_size"]:
+                    raise PermissionError("Scheduled publication blocked: render size changed immediately before public release.")
+                final_sha=hashlib.sha256()
+                with output.open("rb") as final_stream:
+                    for block in iter(lambda:final_stream.read(1024*1024),b""): final_sha.update(block)
+                if final_sha.hexdigest()!=latest["render_sha"]:
+                    raise PermissionError("Scheduled publication blocked: render hash changed immediately before public release.")
+            except OSError as exc:
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason='Render could not be verified immediately before public release.',updated_at=? WHERE id=?",(stamp,published_id))
+                c.commit()
+                raise PermissionError("Scheduled publication blocked: rendered output could not be verified immediately before release.") from exc
+            except PermissionError as exc:
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason=?,updated_at=? WHERE id=?",(str(exc)[:1000],stamp,published_id))
+                event(c,"ERROR","youtube.publication_blocked_qc","Final pre-mutation artifact integrity check blocked public release.",{"job_id":job["id"],"published_video_id":published_id,"reason":str(exc)[:300]})
+                c.commit()
+                raise
+            enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not enabled or enabled["value"]!="true" or os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()!="true":
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='UPLOADED_PRIVATE',scheduled_publish_at=NULL,updated_at=? WHERE id=?",(stamp,published_id))
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Publishing policy was disabled before the remote state change.',updated_at=?,finished_at=? WHERE id=?",(stamp,stamp,job["id"]))
+                event(c,"WARNING","youtube.publication_disabled_before_mutation","Public release was not attempted because publishing policy was disabled before the remote mutation.",{"job_id":job["id"],"published_video_id":published_id})
+                c.commit()
+                return
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if pause and pause["value"]=="true":
                 t=now()
