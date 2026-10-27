@@ -111,9 +111,11 @@ Voiceover is opt-in and remains local until you approve a clip for rendering. Th
 
 From project root:
 
-    # Windows Python 3.12 example; choose the lock matching your OS and Python version.
+    # Choose the matching OS/Python lock file (example: Windows + Python 3.12).
     python -m pip install --require-hashes -r backend\requirements-lock-win-py312.txt
     python -m pytest -q
+
+The supported lock names are `requirements-lock-{win,linux}-{py311,py312}.txt`. The optional transcription installer selects the matching `requirements-ml-lock-*` file; do not install optional ML packages with the unpinned source requirements file on a production machine.
 
 Frontend:
 
@@ -121,9 +123,11 @@ Frontend:
     npm ci
     npm run build
 
-Platform-specific hash-pinned backend/optional-ML locks, `frontend/package-lock.json`, `npm ci`, and Windows dependency-fingerprint checks are merged on `main` as `2946cba2ef683c61f0b61678c8fd83c97b349b3d`. The exact dependency-lock branch passed all six jobs in [run #411](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40485109430), including the real one-click Windows startup/readiness/restart/stop smoke. The private-auto-upload feature is being validated on a separate branch based on this updated baseline. CI uses synthetic media and a mocked YouTube provider; it does not certify a real credentialed channel.
+Platform-specific hash-pinned backend/optional-ML locks, `frontend/package-lock.json`, `npm ci`, and Windows dependency-fingerprint checks are merged to `main`. The private-auto-upload workflow and render-artifact cleanup are also merged, after each exact PR head passed all six CI jobs. See [dependency-lock CI #411](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40485109430), [private-upload CI #413](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40486137865), and [render-cleanup CI #415](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40489491330). The post-merge CI for the newest main commit is being checked separately. These tests use synthetic media and a mocked YouTube provider; they do not certify a real credentialed channel.
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
+
+The locked Pillow dependency was upgraded from the audited-vulnerable 12.3.0 to 13.0.0; all eight platform/Python base and optional-ML lock variants passed `pip-audit`, and `npm audit` passed in [security audit run #7](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40492166354). The new lock-refresh workflow now audits generated locks before publishing them; its updated workflow definitions and the rest of PR #11 still require their exact-head CI to finish.
 
 ## Important limitations
 

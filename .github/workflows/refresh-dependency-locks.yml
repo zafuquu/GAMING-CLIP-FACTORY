@@ -1,0 +1,388 @@
+name: refresh-dependency-locks
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [docs-security-maintenance]
+    paths:
+      - "backend/requirements.txt"
+      - "backend/requirements-ml.txt"
+      - "frontend/package.json"
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: refresh-dependency-locks
+  cancel-in-progress: false
+
+jobs:
+  generate-python-locks:
+    name: "Generate locks ${{ matrix.os_key }} ${{ matrix.python_key }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_key: linux
+            python_version: "3.11"
+            python_key: py311
+          - runner: ubuntu-latest
+            os_key: linux
+            python_version: "3.12"
+            python_key: py312
+          - runner: windows-latest
+            os_key: win
+            python_version: "3.11"
+            python_key: py311
+          - runner: windows-latest
+            os_key: win
+            python_version: "3.12"
+            python_key: py312
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python_version }}
+      - name: Resolve standard and optional ML locks for this OS/Python pair
+        run: |
+          python -m pip install --upgrade pip pip-tools
+          pip-compile --resolver=backtracking --generate-hashes --strip-extras --output-file=backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt backend/requirements.txt
+          pip-compile --resolver=backtracking --generate-hashes --strip-extras --output-file=backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt backend/requirements-ml.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dependency-locks-${{ matrix.os_key }}-${{ matrix.python_key }}
+          path: |
+            backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+            backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+          if-no-files-found: error
+          retention-days: 5
+
+  generate-frontend-lock:
+    name: Generate frontend lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package.json
+      - name: Refresh package lock from the manifest
+        working-directory: frontend
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dependency-locks-frontend
+          path: frontend/package-lock.json
+          if-no-files-found: error
+          retention-days: 5
+
+  validate-generated-locks:
+    name: "Test generated locks ${{ matrix.os_key }} ${{ matrix.python_key }}"
+    needs: [generate-python-locks, generate-frontend-lock]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os_key: linux
+            python_version: "3.11"
+            python_key: py311
+          - runner: ubuntu-latest
+            os_key: linux
+            python_version: "3.12"
+            python_key: py312
+          - runner: windows-latest
+            os_key: win
+            python_version: "3.11"
+            python_key: py311
+          - runner: windows-latest
+            os_key: win
+            python_version: "3.12"
+            python_key: py312
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      GCF_TEST_LOCK_OS: ${{ matrix.os_key }}
+      GCF_TEST_LOCK_PY: ${{ matrix.python_key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python_version }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dependency-locks-*
+          path: lock-artifacts
+          merge-multiple: true
+      - name: Use generated lock files
+        run: |
+          python -c "from pathlib import Path; import shutil,os; a=Path('lock-artifacts'); o=os.environ['GCF_TEST_LOCK_OS']; p=os.environ['GCF_TEST_LOCK_PY']; names=[f'requirements-lock-{o}-{p}.txt',f'requirements-ml-lock-{o}-{p}.txt']; [shutil.copyfile(a/n,Path('backend')/n) for n in names]; shutil.copyfile(a/'package-lock.json',Path('frontend')/'package-lock.json')"
+      - name: Install FFmpeg for media integration tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg for media integration tests (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
+          $env:Path = "$chocoBin;$env:Path"
+          $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          & (Join-Path $chocoBin "ffmpeg.exe") -version
+          & (Join-Path $chocoBin "ffprobe.exe") -version
+      - name: Install exact generated Python lock
+        run: python -m pip install --require-hashes -r backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+      - name: Audit generated base and optional-ML locks before publication
+        timeout-minutes: 8
+        run: |
+          python -m pip install --upgrade pip-audit
+          python -m pip_audit --require-hashes --disable-pip -r backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt --strict
+          python -m pip_audit --require-hashes --disable-pip -r backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt --strict
+      - name: Run tests against generated lock
+        timeout-minutes: 20
+        run: python -m pytest -q
+
+  frontend-build:
+    needs: [generate-python-locks, generate-frontend-lock]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package.json
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dependency-locks-*
+          path: lock-artifacts
+          merge-multiple: true
+      - name: Use generated npm lock
+        run: cp lock-artifacts/package-lock.json frontend/package-lock.json
+      - name: Install and build
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+  windows-startup-smoke:
+    needs: [generate-python-locks, generate-frontend-lock]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dependency-locks-*
+          path: lock-artifacts
+          merge-multiple: true
+      - name: Use generated Windows/Python 3.12 lock files
+        shell: pwsh
+        run: |
+          Copy-Item "lock-artifacts\requirements-lock-win-py312.txt" "backend\requirements-lock-win-py312.txt" -Force
+          Copy-Item "lock-artifacts\requirements-ml-lock-win-py312.txt" "backend\requirements-ml-lock-win-py312.txt" -Force
+          Copy-Item "lock-artifacts\package-lock.json" "frontend\package-lock.json" -Force
+      - name: Install FFmpeg for full local readiness
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
+          $env:Path = "$chocoBin;$env:Path"
+          $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          & (Join-Path $chocoBin "ffmpeg.exe") -version
+          & (Join-Path $chocoBin "ffprobe.exe") -version
+      - name: Exercise the actual one-click launcher
+        shell: pwsh
+        env:
+          GCF_STARTUP_SKIP_BROWSER: "true"
+          GCF_STARTUP_NO_PAUSE: "true"
+        run: |
+          $repoRoot = (Get-Location).Path
+          $pythonPath = Join-Path $repoRoot ".venv\Scripts\python.exe"
+          $stdout = Join-Path $env:RUNNER_TEMP "gcf-start.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "gcf-start.stderr.log"
+          $launcher = $null
+          try {
+            $launcher = Start-Process -FilePath (Join-Path $env:WINDIR "System32\cmd.exe") -ArgumentList @("/c","scripts\start.bat") -WorkingDirectory $repoRoot -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if (-not $launcher.WaitForExit(180000)) {
+              Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue
+              if (Test-Path $stdout) { Get-Content -Tail 160 $stdout }
+              if (Test-Path $stderr) { Get-Content -Tail 160 $stderr }
+              throw "scripts/start.bat did not exit within three minutes."
+            }
+            if (Test-Path $stdout) { Get-Content $stdout }
+            if (Test-Path $stderr) { Get-Content $stderr }
+            $launcher.Refresh()
+            if ($launcher.ExitCode -ne 0) { throw "scripts/start.bat exited with code $($launcher.ExitCode)." }
+
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -ne 0) { throw "The local API health probe failed." }
+            & $pythonPath "scripts\local_http.py" dashboard
+            if ($LASTEXITCODE -ne 0) { throw "The production dashboard probe failed." }
+            & $pythonPath "scripts\local_http.py" readiness --require-ready
+            if ($LASTEXITCODE -ne 0) { throw "One-click startup returned degraded local readiness." }
+
+            $secondStdout = Join-Path $env:RUNNER_TEMP "gcf-restart.stdout.log"
+            $secondStderr = Join-Path $env:RUNNER_TEMP "gcf-restart.stderr.log"
+            $secondLauncher = Start-Process -FilePath (Join-Path $env:WINDIR "System32\cmd.exe") -ArgumentList @("/c","scripts\start.bat") -WorkingDirectory $repoRoot -PassThru -RedirectStandardOutput $secondStdout -RedirectStandardError $secondStderr
+            if (-not $secondLauncher.WaitForExit(180000)) {
+              Stop-Process -Id $secondLauncher.Id -Force -ErrorAction SilentlyContinue
+              if (Test-Path $secondStdout) { Get-Content -Tail 100 $secondStdout }
+              if (Test-Path $secondStderr) { Get-Content -Tail 100 $secondStderr }
+              throw "Second scripts/start.bat invocation timed out."
+            }
+            $secondLauncher.Refresh()
+            if ($secondLauncher.ExitCode -ne 0) {
+              if (Test-Path $secondStdout) { Get-Content $secondStdout }
+              if (Test-Path $secondStderr) { Get-Content $secondStderr }
+              throw "Second scripts/start.bat invocation exited with code $($secondLauncher.ExitCode)."
+            }
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -ne 0) { throw "API health failed after a repeated launch." }
+            $runningBackends = @(Get-CimInstance Win32_Process | Where-Object {
+              $_.ExecutablePath -and
+              ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq [System.IO.Path]::GetFullPath($pythonPath)) -and
+              $_.CommandLine -match '(?:^|\s)-m\s+app(?:\s|$)'
+            })
+            if ($runningBackends.Count -ne 1) { throw "Repeated startup should leave exactly one backend process; found $($runningBackends.Count)." }
+
+            & cmd.exe /c "scripts\stop.bat"
+            if ($LASTEXITCODE -ne 0) { throw "scripts\stop.bat failed." }
+            Start-Sleep -Seconds 2
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -eq 0) { throw "The API still responds after scripts\stop.bat." }
+            $LASTEXITCODE = 0
+            Write-Host "PASS: one-click start, dashboard/readiness validation, repeated start and clean stop succeeded."
+          }
+          finally {
+            $pythonProcesses = Get-CimInstance Win32_Process | Where-Object {
+              $_.ExecutablePath -and
+              ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq [System.IO.Path]::GetFullPath($pythonPath)) -and
+              $_.CommandLine -match '(?:^|\s)-m\s+app(?:\s|$)'
+            }
+            foreach ($proc in $pythonProcesses) {
+              & (Join-Path $env:WINDIR "System32\taskkill.exe") /PID $proc.ProcessId /T /F | Out-Null
+            }
+          }
+
+  create-lock-refresh-pr:
+    needs: [validate-generated-locks, frontend-build, windows-startup-smoke]
+    if: success() && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dependency-locks-*
+          path: lock-artifacts
+          merge-multiple: true
+      - name: Copy generated locks into the repository
+        run: |
+          cp lock-artifacts/requirements-lock-linux-py311.txt backend/
+          cp lock-artifacts/requirements-lock-linux-py312.txt backend/
+          cp lock-artifacts/requirements-lock-win-py311.txt backend/
+          cp lock-artifacts/requirements-lock-win-py312.txt backend/
+          cp lock-artifacts/requirements-ml-lock-linux-py311.txt backend/
+          cp lock-artifacts/requirements-ml-lock-linux-py312.txt backend/
+          cp lock-artifacts/requirements-ml-lock-win-py311.txt backend/
+          cp lock-artifacts/requirements-ml-lock-win-py312.txt backend/
+          cp lock-artifacts/package-lock.json frontend/
+      - name: Create reviewable dependency update pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if git diff --quiet -- backend/requirements-lock-*.txt backend/requirements-ml-lock-*.txt frontend/package-lock.json; then
+            echo "All generated dependency locks are already current."
+            exit 0
+          fi
+          branch="automation/dependency-lock-refresh-${GITHUB_RUN_ID}"
+          git switch -c "$branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/requirements-lock-*.txt backend/requirements-ml-lock-*.txt frontend/package-lock.json
+          git commit -m "build: refresh verified dependency locks"
+          git push origin "$branch"
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+            --title "build: refresh verified dependency locks" \
+            --body "Automated weekly/manual lock refresh. Generated on matching Windows/Linux and Python 3.11/3.12 runners; all four Python test jobs, the frontend build, and the Windows start/readiness/restart/stop smoke passed against the generated lock artifacts. Review the exact lock diffs and latest PR checks before merge. No dependency update is automatically merged."
+          if ! gh workflow run backend-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"; then
+            echo "::warning::Could not dispatch the ordinary PR workflow. The lock-generation matrix still passed; trigger backend-tests.yml manually on the created PR branch."
+          fi
+
+  update-locks-on-source-branch:
+    needs: [validate-generated-locks, frontend-build, windows-startup-smoke]
+    if: success() && github.event_name == 'push' && github.ref_name == 'docs-security-maintenance'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dependency-locks-*
+          path: lock-artifacts
+          merge-multiple: true
+      - name: Copy generated locks into the source-change branch
+        run: |
+          cp lock-artifacts/requirements-lock-linux-py311.txt backend/
+          cp lock-artifacts/requirements-lock-linux-py312.txt backend/
+          cp lock-artifacts/requirements-lock-win-py311.txt backend/
+          cp lock-artifacts/requirements-lock-win-py312.txt backend/
+          cp lock-artifacts/requirements-ml-lock-linux-py311.txt backend/
+          cp lock-artifacts/requirements-ml-lock-linux-py312.txt backend/
+          cp lock-artifacts/requirements-ml-lock-win-py311.txt backend/
+          cp lock-artifacts/requirements-ml-lock-win-py312.txt backend/
+          cp lock-artifacts/package-lock.json frontend/
+      - name: Commit lock files to the current PR branch and re-run normal CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if git diff --quiet -- backend/requirements-lock-*.txt backend/requirements-ml-lock-*.txt frontend/package-lock.json; then
+            echo "Lockfiles are already current; no commit is necessary."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/requirements-lock-*.txt backend/requirements-ml-lock-*.txt frontend/package-lock.json
+          git commit -m "build: refresh dependency locks after manifest change"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          if ! gh workflow run backend-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"; then
+            echo "::warning::Could not manually dispatch the regular CI on the updated branch; use the workflow_dispatch menu to run backend-tests.yml on this branch."
+          fi
