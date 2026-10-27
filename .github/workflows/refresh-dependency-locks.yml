@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:
+  push:
+    branches: [docs-security-maintenance]
+    paths:
+      - "backend/requirements.txt"
+      - "backend/requirements-ml.txt"
+      - "frontend/package.json"
 
 permissions:
   contents: write
@@ -42,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python_version }}
@@ -67,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
@@ -114,7 +120,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python_version }}
@@ -153,7 +159,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: "22"
@@ -179,7 +185,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -282,12 +288,12 @@ jobs:
 
   create-lock-refresh-pr:
     needs: [validate-generated-locks, frontend-build, windows-startup-smoke]
-    if: success()
+    if: success() && github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
           persist-credentials: true
       - uses: actions/download-artifact@v8
         with:
@@ -326,4 +332,50 @@ jobs:
             --body "Automated weekly/manual lock refresh. Generated on matching Windows/Linux and Python 3.11/3.12 runners; all four Python test jobs, the frontend build, and the Windows start/readiness/restart/stop smoke passed against the generated lock artifacts. Review the exact lock diffs and latest PR checks before merge. No dependency update is automatically merged."
           if ! gh workflow run backend-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"; then
             echo "::warning::Could not dispatch the ordinary PR workflow. The lock-generation matrix still passed; trigger backend-tests.yml manually on the created PR branch."
+          fi
+
+  update-locks-on-source-branch:
+    needs: [validate-generated-locks, frontend-build, windows-startup-smoke]
+    if: success() && github.event_name == 'push' && github.ref_name == 'docs-security-maintenance'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dependency-locks-*
+          path: lock-artifacts
+          merge-multiple: true
+      - name: Copy generated locks into the source-change branch
+        run: |
+          cp lock-artifacts/requirements-lock-linux-py311.txt backend/
+          cp lock-artifacts/requirements-lock-linux-py312.txt backend/
+          cp lock-artifacts/requirements-lock-win-py311.txt backend/
+          cp lock-artifacts/requirements-lock-win-py312.txt backend/
+          cp lock-artifacts/requirements-ml-lock-linux-py311.txt backend/
+          cp lock-artifacts/requirements-ml-lock-linux-py312.txt backend/
+          cp lock-artifacts/requirements-ml-lock-win-py311.txt backend/
+          cp lock-artifacts/requirements-ml-lock-win-py312.txt backend/
+          cp lock-artifacts/package-lock.json frontend/
+      - name: Commit lock files to the current PR branch and re-run normal CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if git diff --quiet -- backend/requirements-lock-*.txt backend/requirements-ml-lock-*.txt frontend/package-lock.json; then
+            echo "Lockfiles are already current; no commit is necessary."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/requirements-lock-*.txt backend/requirements-ml-lock-*.txt frontend/package-lock.json
+          git commit -m "build: refresh dependency locks after manifest change"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          if ! gh workflow run backend-tests.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"; then
+            echo "::warning::Could not manually dispatch the regular CI on the updated branch; use the workflow_dispatch menu to run backend-tests.yml on this branch."
           fi
