@@ -72,9 +72,22 @@ jobs:
           $repoRoot = (Get-Location).Path
           $pythonPath = Join-Path $repoRoot ".venv\Scripts\python.exe"
           $backendBatch = Join-Path $repoRoot "scripts\run-backend.bat"
+          $stdout = Join-Path $env:RUNNER_TEMP "gcf-start.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "gcf-start.stderr.log"
+          $launcher = $null
           try {
-            & cmd.exe /c "scripts\start.bat"
-            if ($LASTEXITCODE -ne 0) { throw "scripts/start.bat exited with code $LASTEXITCODE" }
+            $launcher = Start-Process -FilePath (Join-Path $env:WINDIR "System32\cmd.exe") -ArgumentList @("/c","scripts\start.bat") -WorkingDirectory $repoRoot -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if (-not $launcher.WaitForExit(600000)) {
+              Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue
+              if (Test-Path $stdout) { Get-Content $stdout }
+              if (Test-Path $stderr) { Get-Content $stderr }
+              throw "scripts/start.bat did not exit within ten minutes."
+            }
+
+            if (Test-Path $stdout) { Get-Content $stdout }
+            if (Test-Path $stderr) { Get-Content $stderr }
+            $launcher.Refresh()
+            if ($launcher.ExitCode -ne 0) { throw "scripts/start.bat exited with code $($launcher.ExitCode)." }
 
             $health = Invoke-RestMethod -TimeoutSec 10 "http://127.0.0.1:8765/api/health"
             if ($health.status -ne "ok") { throw "Health endpoint did not report status=ok." }
