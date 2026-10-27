@@ -1064,6 +1064,35 @@ def _fake_youtube_processing_service(processing_status, privacy_status="private"
             return Videos()
     return Service()
 
+def test_publishing_status_reports_effective_public_gate(tmp_path,monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":True})
+    c,_=setup_client(tmp_path)
+
+    # Public publishing is effective only when both environment gates and the owner
+    # controlled uploads setting are enabled; environment configuration alone is not enough.
+    before=c.get("/api/publishing/status").json()
+    assert before["upload_environment_gate"] is True
+    assert before["scheduled_public_environment_gate"] is True
+    assert before["uploads_enabled"] is False
+    assert before["public_publishing_enabled"] is False
+
+    enabled=c.post("/api/publishing/enable",json={"enabled":True})
+    assert enabled.status_code==200,enabled.text
+    active=c.get("/api/publishing/status").json()
+    assert active["uploads_enabled"] is True
+    assert active["public_publishing_enabled"] is True
+
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","false")
+    disabled=c.get("/api/publishing/status").json()
+    assert disabled["uploads_enabled"] is True
+    assert disabled["public_publishing_enabled"] is False
+    c.__exit__(None,None,None)
+
+
 def test_youtube_processing_success_queues_gated_publication(tmp_path,monkeypatch):
     import app.worker as worker_module
     from app.worker import Worker
