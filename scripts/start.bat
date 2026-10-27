@@ -29,7 +29,7 @@ if errorlevel 1 (
 )
 node -e "const v=process.versions.node.split('.').map(Number); process.exit((v[0]===20 && v[1]>=19) || (v[0]>=22 && (v[0]>22 || v[1]>=12)) ? 0 : 1)" >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Install Node.js 20.19+ or 22.12+.
+  echo ERROR: Install Node.js 20.19+ or 22.13+.
   goto fail
 )
 
