@@ -138,7 +138,7 @@ echo.
 echo Startup could not safely complete. See the message above.
 if exist "data\logs\backend.stderr.log" (
   echo.
-  echo Last backend error log lines (data\logs\backend.stderr.log):
+  echo Last backend error log lines - data\logs\backend.stderr.log:
   powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 60 -ErrorAction SilentlyContinue 'data\logs\backend.stderr.log'"
 )
 if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 1
