@@ -153,8 +153,10 @@ def _attach_qc_render(db_path: Path, output_path: Path, state="UPLOAD_PENDING", 
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             ("render-1","candidate-1","media-1",str(output_path),output_path.stat().st_size,sha,5.0,1080,1920,"h264","aac","PASS",'{"passed":true}',stamp))
         db.execute("""UPDATE published_videos SET output_path=?,rendered_output_id='render-1',qc_status='PASS',
-            publishing_status=?,scheduled_publish_at=?,remote_processing_status='succeeded' WHERE id='publication-1'""",
-            (str(output_path),state,scheduled_at))
+            publishing_status=?,scheduled_publish_at=?,remote_processing_status='succeeded',
+            youtube_video_id=CASE WHEN ?='UPLOAD_PENDING' THEN NULL ELSE youtube_video_id END
+            WHERE id='publication-1'""",
+            (str(output_path),state,scheduled_at,state))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_uploads_enabled','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
         db.execute("UPDATE jobs SET status='FAILED' WHERE id='processing-check'")
