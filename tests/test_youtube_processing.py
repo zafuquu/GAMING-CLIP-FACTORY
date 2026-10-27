@@ -181,9 +181,16 @@ def _attach_render_for_public_release(tmp_path,cfg,pub_id,sid,mid):
 
 class _MutationVideos(_Videos):
     def __init__(self,payload):
-        super().__init__(payload); self.updates=[]
+        super().__init__(payload)
+        self.updates=[]
+        self.update_response=None
+        self.payload_after_update=None
     def update(self,**kwargs):
         self.updates.append(kwargs)
+        if self.payload_after_update is not None:
+            self.payload=self.payload_after_update
+        if self.update_response is not None:
+            return _Request(self.update_response)
         return _Request({"id":kwargs.get("body",{}).get("id"),"status":{"privacyStatus":kwargs.get("body",{}).get("status",{}).get("privacyStatus")}})
 
 class _MutationYouTubeService(_YouTubeService):
@@ -327,4 +334,45 @@ def test_scheduled_public_worker_respects_global_pause(tmp_path,monkeypatch):
     assert state=="SCHEDULED"
     assert fake.video_api.updates==[]
     assert fake.video_api.calls==[]
+    client.__exit__(None,None,None)
+
+
+def test_scheduled_public_worker_does_not_claim_published_when_remote_stays_private(tmp_path,monkeypatch):
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    _attach_render_for_public_release(tmp_path,cfg,pub_id,sid,mid)
+    _enable_public_release(tmp_path,monkeypatch,cfg)
+    scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
+    fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
+    fake.video_api.update_response={"id":"youtube-id-123","status":{"privacyStatus":"private"}}
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
+    _public_job(cfg,pub_id,scheduled)
+    with pytest.raises(RuntimeError,match="still reports the video as private"):
+        Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":scheduled.isoformat()})})
+    with sqlite3.connect(cfg.database_path) as db:
+        status=db.execute("SELECT publishing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()[0]
+    assert status=="SCHEDULED"
+    assert len(fake.video_api.updates)==1
+    assert len(fake.video_api.calls)==2
+    client.__exit__(None,None,None)
+
+def test_scheduled_public_worker_verifies_ambiguous_update_by_reading_remote_state(tmp_path,monkeypatch):
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    _attach_render_for_public_release(tmp_path,cfg,pub_id,sid,mid)
+    _enable_public_release(tmp_path,monkeypatch,cfg)
+    scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
+    fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
+    fake.video_api.update_response={}
+    fake.video_api.payload_after_update={"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"public"}}]}
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
+    _public_job(cfg,pub_id,scheduled)
+    Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":scheduled.isoformat()})})
+    with sqlite3.connect(cfg.database_path) as db:
+        state=db.execute("SELECT publishing_status,remote_processing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()
+    assert tuple(state)==("PUBLISHED","succeeded")
+    assert len(fake.video_api.updates)==1
+    assert len(fake.video_api.calls)==2
     client.__exit__(None,None,None)
