@@ -109,11 +109,37 @@ class Worker(threading.Thread):
                 "total_gb":round(total_bytes/(1024**3),3) if total_bytes is not None else None,
                 "blocked":disk_state in {"LOW","ERROR"},"reason":reason}
 
+    def _run_due_schedulers(self):
+        """Evaluate opt-in schedules on every worker cycle so a busy queue cannot starve them."""
+        schedulers=(
+            ("twitch_discovery",self.schedule_due_discovery),
+            ("youtube_discovery",self.schedule_due_youtube_discovery),
+            ("youtube_analytics",self.schedule_due_analytics),
+        )
+        for name,scheduler in schedulers:
+            try:
+                scheduler()
+            except Exception as exc:
+                # Provider scheduler failures must not block already-authorized local production jobs.
+                try:
+                    c=connect(self.db)
+                    try:
+                        event(c,"ERROR","scheduler.evaluation_failed",
+                              f"{name} schedule evaluation failed ({type(exc).__name__}): {str(exc)[:700]}",
+                              {"scheduler":name,"error_type":type(exc).__name__})
+                        c.commit()
+                    finally:
+                        c.close()
+                except Exception:
+                    # Preserve worker availability if the audit database itself is temporarily unavailable.
+                    pass
+
     def one(self):
         storage=self.check_storage_safety()
         if storage["blocked"]:
             return False
         self.scan_due_folder_watches()
+        self._run_due_schedulers()
         c=connect(self.db); job=None
         try:
             c.execute("BEGIN IMMEDIATE")
@@ -126,9 +152,6 @@ class Worker(threading.Thread):
                 c.rollback()
         finally: c.close()
         if not job:
-            self.schedule_due_discovery()
-            self.schedule_due_youtube_discovery()
-            self.schedule_due_analytics()
             return False
         try:
             if job["job_type"] == "ANALYZE_MEDIA":
