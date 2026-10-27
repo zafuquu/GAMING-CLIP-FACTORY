@@ -52,16 +52,12 @@ async function main() {
   }
   const durationSeconds = Number(raw.durationSeconds);
   const startSeconds = Number(raw.startSeconds);
-  const sourceFps = Number(raw.sourceFps);
   const profile = raw.profile === "blur_fill" ? "blur_fill" : raw.profile === "fit_pad" ? "fit_pad" : null;
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 600) {
     fail("Remotion duration must be greater than 0 and no more than 600 seconds.");
   }
   if (!Number.isFinite(startSeconds) || startSeconds < 0) {
     fail("Remotion startSeconds must be a finite non-negative number.");
-  }
-  if (!Number.isFinite(sourceFps) || sourceFps < 1 || sourceFps > 240) {
-    fail("Remotion sourceFps must be between 1 and 240.");
   }
   if (!profile) {
     fail("Unsupported Remotion profile. Expected fit_pad or blur_fill.");
@@ -110,7 +106,6 @@ async function main() {
 
     const inputProps = {
       sourceFile: path.basename(sourceAlias),
-      sourceFps,
       startSeconds,
       durationSeconds,
       profile,
