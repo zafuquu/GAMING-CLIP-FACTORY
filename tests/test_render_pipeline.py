@@ -91,7 +91,7 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         voice_sha=hashlib.sha256(voice_path.read_bytes()).hexdigest()
         with sqlite3.connect(cfg.database_path) as db:
             db.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                       (voice_cid,mid,1.0,5.0,"test_fixture","Narration mixer CI candidate","APPROVED",stamp))
+                       (voice_cid,mid,1.0,5.0,"test_fixture_narration","Narration mixer CI candidate","APPROVED",stamp))
             db.execute("""INSERT INTO content_plans(id,candidate_id,chosen_format,title,narration_text,created_at,updated_at,
                 narration_audio_path,narration_audio_sha256,narration_audio_duration_seconds,narration_audio_status)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
