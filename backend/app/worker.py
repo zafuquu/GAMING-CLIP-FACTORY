@@ -344,6 +344,7 @@ class Worker(threading.Thread):
             # rechecking the watch and current source rights. This skips the per-candidate
             # click but never publishes: QC-passed renders still require owner inspection.
             auto_render_queued=0
+            already_auto_rendered=0
             try:
                 analysis_payload=json.loads(job["payload_json"] or "{}")
                 folder_watch_id=analysis_payload.get("folder_watch_id")
