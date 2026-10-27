@@ -557,7 +557,7 @@ def create_app(settings=None,start_worker=True):
             paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if paused and paused["value"]=="true":
                 raise HTTPException(423,detail="Global pause is enabled.")
-            row=c.execute("""SELECT cm.id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at
+            row=c.execute("""SELECT cm.id,cm.media_id,cm.state,cm.start_seconds,cm.end_seconds,m.source_id,p.status AS rights_status,p.expires_at
                 FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
                 JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
             if not row:
@@ -567,7 +567,7 @@ def create_app(settings=None,start_worker=True):
             if row["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
                 raise HTTPException(409,detail=f"Narration drafting is not allowed for candidate state {row['state']}.")
             has_transcript=c.execute("""SELECT 1 FROM transcript_segments ts JOIN transcripts tr ON tr.id=ts.transcript_id
-                WHERE tr.media_id=? AND ts.end_seconds>? AND ts.start_seconds<? LIMIT 1""",(row["media_id"],0,1e12)).fetchone()
+                WHERE tr.media_id=? AND ts.end_seconds>? AND ts.start_seconds<? LIMIT 1""",(row["media_id"],row["start_seconds"],row["end_seconds"])).fetchone()
             has_vision=c.execute("SELECT 1 FROM candidate_vision_assessments WHERE candidate_id=? AND status='COMPLETED' LIMIT 1",(cid,)).fetchone()
             if not has_transcript and not has_vision:
                 raise HTTPException(409,detail="Narration drafting requires a stored transcript or completed vision assessment; run analysis first.")
