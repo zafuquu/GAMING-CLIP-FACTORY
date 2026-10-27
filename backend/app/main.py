@@ -248,8 +248,75 @@ def create_app(settings=None,start_worker=True):
     app.state.settings=cfg
     @app.get("/api/health")
     def health():
+        # Liveness only: detailed production prerequisites are reported by /api/readiness.
         with connect(cfg.database_path) as c: c.execute("SELECT 1")
         return {"status":"ok","database":"available","ffmpeg_available":bool(cfg.ffmpeg_path),"ffprobe_available":bool(cfg.ffprobe_path),"publishing":"credential-gated","youtube_credentials_required":True}
+
+    @app.get("/api/readiness")
+    def readiness():
+        """Report whether local media production prerequisites are actually usable."""
+        checks = {}
+        try:
+            with connect(cfg.database_path) as c:
+                c.execute("SELECT 1")
+            checks["database"] = {"ready": True}
+        except Exception as exc:
+            checks["database"] = {"ready": False, "reason": f"database_check_failed:{type(exc).__name__}"}
+
+        for name, executable in (("ffmpeg", cfg.ffmpeg_path), ("ffprobe", cfg.ffprobe_path)):
+            if not executable:
+                checks[name] = {"ready": False, "reason": "not_configured_or_not_found"}
+                continue
+            try:
+                result = subprocess.run(
+                    [executable, "-version"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                    shell=False,
+                )
+                first_line = (result.stdout or result.stderr).splitlines()
+                checks[name] = {
+                    "ready": result.returncode == 0,
+                    "version": first_line[0][:180] if first_line else None,
+                    **({"reason": f"version_check_exit_{result.returncode}"} if result.returncode else {}),
+                }
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                checks[name] = {"ready": False, "reason": f"executable_check_failed:{type(exc).__name__}"}
+
+        for name, directory in (
+            ("database_directory", cfg.database_path.parent),
+            ("media_root", cfg.media_root),
+            ("output_directory", cfg.database_path.parent / "outputs"),
+        ):
+            probe = None
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                probe = directory / (".gcf-readiness-" + uuid4().hex)
+                with probe.open("x", encoding="utf-8") as handle:
+                    handle.write("readiness")
+                probe.unlink()
+                checks[name] = {"ready": True}
+            except OSError as exc:
+                if probe is not None:
+                    try:
+                        probe.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                checks[name] = {"ready": False, "reason": f"directory_check_failed:{type(exc).__name__}"}
+
+        required = ("database", "ffmpeg", "ffprobe", "database_directory", "media_root", "output_directory")
+        ready = all(checks.get(name, {}).get("ready", False) for name in required)
+        return {
+            "ready": ready,
+            "status": "ready" if ready else "degraded",
+            "checks": checks,
+            "mode": "supervised",
+            "public_publishing": "enabled_by_explicit_policy" if os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING", "").strip().lower() == "true" else "disabled_by_default",
+        }
+
     @app.get("/api/config")
     def config():
         return {"project_root":str(cfg.project_root),"media_root":str(cfg.media_root),"ffmpeg_available":bool(cfg.ffmpeg_path),"ffprobe_available":bool(cfg.ffprobe_path),"publishing_configured":bool(os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true"),"mode":"supervised"}
