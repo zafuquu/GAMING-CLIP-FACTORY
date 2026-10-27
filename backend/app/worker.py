@@ -142,8 +142,14 @@ class Worker(threading.Thread):
                         pass
                 if job["job_type"] == "SYNTHESIZE_NARRATION":
                     try:
-                        plan_id=json.loads(job["payload_json"] or "{}").get("content_plan_id")
-                        if plan_id:
+                        payload=json.loads(job["payload_json"] or "{}")
+                        plan_id=payload.get("content_plan_id")
+                        expected_script_sha=payload.get("script_sha256")
+                        plan=c.execute("SELECT narration_text FROM content_plans WHERE id=?",(plan_id,)).fetchone() if plan_id else None
+                        current_script=validate_script(plan["narration_text"] or "") if plan else ""
+                        current_sha=hashlib.sha256(current_script.encode("utf-8")).hexdigest() if current_script else ""
+                        # A stale job must not mark a newer, owner-edited script as failed.
+                        if plan_id and expected_script_sha==current_sha:
                             plan_state="FAILED" if status=="FAILED" else "QUEUED" if status=="QUEUED" else "FAILED"
                             c.execute("UPDATE content_plans SET narration_audio_status=?,narration_audio_error=?,updated_at=? WHERE id=? AND narration_audio_status<>'READY'",
                                       (plan_state,str(e)[:1500],t,plan_id))
