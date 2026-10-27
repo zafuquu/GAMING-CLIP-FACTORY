@@ -1,5 +1,9 @@
 # Dependency audit
 
+## Dependency reproducibility
+
+The required local install path uses `backend/requirements-lock.txt` with `pip install --require-hashes` and `frontend/package-lock.json` with `npm ci`. Optional speech recognition uses a separate `backend/requirements-ml-lock.txt`, since Faster-Whisper/CTranslate2 adds platform-specific wheels and dependencies. Lock changes must be validated on Python 3.11/3.12, Windows/Ubuntu, and Node 22 before merge. Locking does not replace license, security-advisory or runtime-compatibility review.
+
 ## Required Python runtime
 
 - FastAPI, Pydantic v2, Uvicorn: API and request validation.
