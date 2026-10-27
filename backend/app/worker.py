@@ -1086,6 +1086,50 @@ class Worker(threading.Thread):
                 event(c,"WARNING","youtube.upload_deferred_by_pause","Global pause prevented the remote upload from starting after local cover generation.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
                 c.commit()
                 return
+            # The upload toggle may change while the local cover is being generated.
+            # Recheck the owner-controlled upload gate at the last point before the
+            # non-idempotent provider call; a prior successful check is not sufficient.
+            latest_upload_gate=c.execute(
+                "SELECT value FROM settings WHERE key='youtube_uploads_enabled'"
+            ).fetchone()
+            uploads_enabled_now=bool(
+                latest_upload_gate
+                and latest_upload_gate["value"]=="true"
+                and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()=="true"
+            )
+            latest_publication=c.execute(
+                "SELECT publishing_status,youtube_video_id FROM published_videos WHERE id=?",
+                (published_id,),
+            ).fetchone()
+            if not latest_publication:
+                raise FileNotFoundError("Publication was removed before the YouTube upload request.")
+            if latest_publication["youtube_video_id"]:
+                raise UploadReconciliationRequired(
+                    "A YouTube video ID appeared before upload started; reconcile it rather than creating a possible duplicate."
+                )
+            if not uploads_enabled_now or latest_publication["publishing_status"]!="UPLOADING":
+                t=now()
+                if latest_publication["publishing_status"]=="UPLOADING":
+                    c.execute(
+                        """UPDATE published_videos SET publishing_status='CANCELLED',
+                           upload_request_started_at=NULL,updated_at=?
+                           WHERE id=? AND youtube_video_id IS NULL AND publishing_status='UPLOADING'""",
+                        (t,published_id),
+                    )
+                c.execute(
+                    """UPDATE jobs SET status='CANCELLED',
+                       error='YouTube upload was cancelled before the provider request because the owner disabled uploads or cancelled the publication.',
+                       updated_at=?,finished_at=? WHERE id=? AND status='RUNNING'""",
+                    (t,t,job["id"]),
+                )
+                event(c,"WARNING","youtube.upload_cancelled_before_request",
+                    "Upload was cancelled at the final gate; no YouTube upload request was sent.",
+                    {"job_id":job["id"],"published_video_id":published_id,
+                     "uploads_enabled":uploads_enabled_now,
+                     "publication_state":latest_publication["publishing_status"],
+                     "provider_request_started":False})
+                c.commit()
+                return
             result=upload_video(output,row["title"],row["description"],[str(x) for x in tags])
             t=now()
             c.execute("""UPDATE published_videos SET youtube_video_id=?,publishing_status='PROCESSING',
