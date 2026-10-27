@@ -705,11 +705,34 @@ def test_folder_watch_automatically_imports_stable_authorized_media(tmp_path,mon
     assert second["imported"]==1
     with sqlite3.connect(c.app.state.settings.database_path) as raw:
         media_row=raw.execute("SELECT id,source_id,original_path,state FROM media_assets").fetchone()
-        job=raw.execute("SELECT job_type,status,media_id FROM jobs WHERE media_id=?",(media_row[0],)).fetchone()
+        job=raw.execute("SELECT job_type,status,media_id,payload_json FROM jobs WHERE media_id=?",(media_row[0],)).fetchone()
         watch_file=raw.execute("SELECT status,media_id FROM watched_media_files WHERE watch_id=?",(watch_id,)).fetchone()
     assert media_row[1]==sid and Path(media_row[2])==video.resolve() and media_row[3]=="IMPORTED"
-    assert tuple(job)==("ANALYZE_MEDIA","QUEUED",media_row[0])
+    assert tuple(job[:3])==("ANALYZE_MEDIA","QUEUED",media_row[0])
+    assert json.loads(job[3])["folder_watch_id"]==watch_id
     assert watch_file[0]=="IMPORTED" and watch_file[1]==media_row[0]
+    c.__exit__(None,None,None)
+
+def test_folder_watch_auto_render_requires_auto_analyze(tmp_path):
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    invalid=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","auto_analyze":False,"auto_render":True})
+    assert invalid.status_code==422,invalid.text
+
+    watch=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","auto_analyze":True,"auto_render":True})
+    assert watch.status_code==201,watch.text
+    watch_id=watch.json()["id"]
+    assert watch.json()["auto_render"] is True
+    invalid_update=c.put(f"/api/automation/folder-watches/{watch_id}",json={"auto_analyze":False})
+    assert invalid_update.status_code==422,invalid_update.text
+    saved=c.get("/api/automation/folder-watches").json()[0]
+    assert saved["auto_analyze"] is True and saved["auto_render"] is True
+    disabled=c.put(f"/api/automation/folder-watches/{watch_id}",json={"auto_render":False})
+    assert disabled.status_code==200,disabled.text
+    assert c.get("/api/automation/folder-watches").json()[0]["auto_render"] is False
     c.__exit__(None,None,None)
 
 def test_folder_watch_rechecks_rights_after_file_becomes_stable(tmp_path):
