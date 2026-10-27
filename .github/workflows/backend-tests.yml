@@ -52,6 +52,8 @@ jobs:
           $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
           & (Join-Path $chocoBin "ffmpeg.exe") -version
           & (Join-Path $chocoBin "ffprobe.exe") -version
+      - name: Validate direct requirements and lock matrix
+        run: python scripts/validate_dependency_locks.py --os-key ${{ matrix.os_key }} --python-key ${{ matrix.python_key }}
       - name: Install backend dependencies
         run: python -m pip install --require-hashes -r backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
       - name: Run API tests
