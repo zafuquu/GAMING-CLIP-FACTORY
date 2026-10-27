@@ -129,5 +129,6 @@ goto wait_backend
 :fail
 echo.
 echo Startup could not safely complete. See the message above and the backend window.
+if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 1
 pause
 exit /b 1
