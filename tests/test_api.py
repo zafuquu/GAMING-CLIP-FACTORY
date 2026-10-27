@@ -735,6 +735,46 @@ def test_folder_watch_auto_render_requires_auto_analyze(tmp_path):
     assert c.get("/api/automation/folder-watches").json()[0]["auto_render"] is False
     c.__exit__(None,None,None)
 
+def test_folder_watch_private_auto_upload_is_opt_in_and_dependent_on_auto_render(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.delenv("GCF_ENABLE_YOUTUBE_UPLOADS",raising=False)
+    c,_=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+
+    invalid=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","auto_analyze":True,
+        "auto_render":False,"auto_upload_private":True})
+    assert invalid.status_code==422,invalid.text
+
+    # The environment gate alone is insufficient; the dashboard/database toggle must
+    # also be enabled, and first-time OAuth readiness is checked before auto-upload can arm.
+    gated=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","auto_analyze":True,
+        "auto_render":True,"auto_upload_private":True})
+    assert gated.status_code==403,gated.text
+
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setattr(main_module,"connected_status",lambda:{"connected":True})
+    enable=c.post("/api/publishing/enable",json={"enabled":True})
+    assert enable.status_code==200,enable.text
+    watch=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","auto_analyze":True,
+        "auto_render":True,"auto_upload_private":True})
+    assert watch.status_code==201,watch.text
+    wid=watch.json()["id"]
+    assert watch.json()["auto_upload_private"] is True
+
+    # Turning off the upstream render feature must automatically turn off private uploads.
+    disabled=c.put(f"/api/automation/folder-watches/{wid}",json={"auto_render":False})
+    assert disabled.status_code==200,disabled.text
+    saved=next(row for row in c.get("/api/automation/folder-watches").json() if row["id"]==wid)
+    assert saved["auto_render"] is False and saved["auto_upload_private"] is False
+    invalid_update=c.put(f"/api/automation/folder-watches/{wid}",json={"auto_upload_private":True})
+    assert invalid_update.status_code==422,invalid_update.text
+    c.__exit__(None,None,None)
+
+
 def test_folder_watch_rechecks_rights_after_file_becomes_stable(tmp_path):
     from app.worker import Worker
     c,media=setup_client(tmp_path)
