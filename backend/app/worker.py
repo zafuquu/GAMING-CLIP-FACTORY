@@ -10,6 +10,7 @@ from .content_director import plan_candidate
 from .render_profiles import build_video_filter, profile_warning
 from .vision import assess_candidate_images, VisionNotConfigured
 from .narration import synthesize_piper, NarrationNotConfigured, NarrationError, narration_status as get_narration_status, validate_script
+from .script_writer import generate_narration_draft, script_drafting_status as get_script_drafting_status
 
 def expiry_passed(value):
     if not value:
@@ -80,6 +81,8 @@ class Worker(threading.Thread):
                 self.render_candidate(job)
             elif job["job_type"] == "TRANSCRIBE_MEDIA":
                 self.transcribe_media(job)
+            elif job["job_type"] == "DRAFT_NARRATION_SCRIPT":
+                self.draft_narration_script(job)
             elif job["job_type"] == "SYNTHESIZE_NARRATION":
                 self.synthesize_narration(job)
             elif job["job_type"] == "ANALYZE_CANDIDATE_VISION":
@@ -1249,6 +1252,100 @@ class Worker(threading.Thread):
                 "score_calibrated":False,"automatic_approval":False,"sampled_frame_times_seconds":frame_times}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","vision.assessment_completed","Local vision assessment saved as a review aid; candidate remains human-review-only.",{"job_id":job["id"],**summary})
+            c.commit()
+        finally:
+            c.close()
+
+
+    def draft_narration_script(self, job):
+        if os.getenv("GCF_ENABLE_SCRIPT_DRAFTING","").lower()!="true":
+            raise PermissionError("Local AI narration drafting is disabled by configuration.")
+        payload=json.loads(job["payload_json"] or "{}")
+        cid=payload.get("candidate_id")
+        if not cid:
+            raise ValueError("Narration-drafting job is missing candidate_id.")
+        c=connect(self.db)
+        try:
+            row=c.execute("""SELECT cm.id,cm.media_id,cm.start_seconds,cm.end_seconds,cm.state,m.source_id,
+                s.title AS source_title,s.game,p.status AS rights_status,p.expires_at
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=m.source_id
+                WHERE cm.id=?""",(cid,)).fetchone()
+            if not row:
+                raise FileNotFoundError("Candidate for narration drafting not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked narration drafting: current AUTHORIZED permission is required.")
+            if row["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
+                raise PermissionError(f"Narration drafting is not allowed for candidate state {row['state']}.")
+            transcript_rows=c.execute("""SELECT ts.segment_index,ts.start_seconds,ts.end_seconds,ts.text,ts.confidence
+                FROM transcript_segments ts JOIN transcripts tr ON tr.id=ts.transcript_id
+                WHERE tr.media_id=? AND ts.end_seconds>? AND ts.start_seconds<?
+                ORDER BY ts.start_seconds LIMIT 80""",(row["media_id"],row["start_seconds"],row["end_seconds"])).fetchall()
+            vision=c.execute("SELECT * FROM candidate_vision_assessments WHERE candidate_id=? AND status='COMPLETED'",(cid,)).fetchone()
+            if not transcript_rows and not vision:
+                raise ValueError("Narration drafting needs a stored transcript or a completed vision assessment.")
+            cp=c.execute("SELECT * FROM content_plans WHERE candidate_id=?",(cid,)).fetchone()
+            t=now()
+            if not cp:
+                draft=plan_candidate(row["game"],row["source_title"],float(row["start_seconds"]),float(row["end_seconds"]),[dict(x) for x in transcript_rows])
+                plan_id=str(uuid4())
+                c.execute("""INSERT INTO content_plans(id,candidate_id,chosen_format,hook_text,title,description,tags_json,narration_text,
+                    evidence_json,confidence,strategy_version,status,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,'DRAFT',?,?)""",
+                    (plan_id,cid,draft["chosen_format"],draft["hook_text"],draft["title"],draft["description"],json.dumps(draft["tags"]),
+                     "",json.dumps(draft["evidence"]),draft["confidence"],draft["strategy_version"],t,t))
+                cp=c.execute("SELECT * FROM content_plans WHERE id=?",(plan_id,)).fetchone()
+            else:
+                plan_id=cp["id"]
+            # This is a separate draft: never overwrite an owner's current script or synthesize audio implicitly.
+            c.execute("UPDATE content_plans SET narration_draft_status='GENERATING',narration_draft_error='',updated_at=? WHERE id=?",(t,plan_id))
+            c.commit()
+            vision_data=dict(vision) if vision else None
+            segments=[dict(x) for x in transcript_rows]
+            candidate_duration=float(row["end_seconds"])-float(row["start_seconds"])
+            game=str(row["game"] or "")
+            title=str(row["source_title"] or "")
+        finally:
+            c.close()
+        generated=generate_narration_draft(
+            game=game,
+            source_title=title,
+            candidate_duration=candidate_duration,
+            transcript_segments=segments,
+            vision=vision_data,
+        )
+        c=connect(self.db)
+        try:
+            latest=c.execute("""SELECT cm.state,p.status AS rights_status,p.expires_at,cp.id AS content_plan_id
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                JOIN content_plans cp ON cp.candidate_id=cm.id WHERE cm.id=?""",(cid,)).fetchone()
+            if not latest:
+                raise FileNotFoundError("Candidate/content plan disappeared during narration drafting.")
+            if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights expired or were revoked during narration drafting; generated text was discarded.")
+            if latest["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
+                raise PermissionError("Candidate state changed during narration drafting; generated text was discarded.")
+            if latest["content_plan_id"]!=plan_id:
+                raise RuntimeError("Content plan identity changed during narration drafting.")
+            t=now()
+            c.execute("""UPDATE content_plans SET narration_draft_text=?,narration_draft_status='GENERATED_UNREVIEWED',
+                narration_draft_model=?,narration_draft_evidence_json=?,narration_draft_generated_at=?,
+                narration_draft_error='',narration_script_reviewed=0,updated_at=? WHERE id=?""",
+                (generated["script"],generated["model_name"],json.dumps({
+                    "hook":generated["hook"],
+                    "evidence_used":generated["evidence_used"],
+                    "unsupported_claims":generated["unsupported_claims"],
+                    "owner_review_required":True,
+                    "automatic_synthesis":False,
+                    "strategy_version":generated["strategy_version"],
+                }),t,t,plan_id))
+            summary={"candidate_id":cid,"content_plan_id":plan_id,"model_name":generated["model_name"],
+                     "draft_characters":len(generated["script"]),"evidence_references":len(generated["evidence_used"]),
+                     "unsupported_claims":generated["unsupported_claims"],"status":"GENERATED_UNREVIEWED",
+                     "owner_review_required":True,"automatic_synthesis":False}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
+            event(c,"INFO","narration.draft_generated","Local AI created an evidence-linked narration draft; owner review is required before synthesis.",{"job_id":job["id"],**summary})
             c.commit()
         finally:
             c.close()
