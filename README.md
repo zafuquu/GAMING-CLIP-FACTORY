@@ -5,7 +5,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 ## What is implemented now
 
 - Local app: FastAPI, SQLite numbered migrations 001–020, React/TypeScript/Vite dashboard, loopback API.
-- Source discovery: Twitch Helix clip metadata and YouTube Data API public video metadata search, including persisted schedules. These store URLs/metadata only; they do not download platform footage. New sources always start with rights UNKNOWN.
+- Source discovery: Twitch Helix clip metadata and YouTube Data API public video metadata search, including persisted schedules. New sources start with rights UNKNOWN. An official Twitch Clips download path is included for clips the connected Twitch broadcaster/editor is authorized to download, after the source's editing/commercial rights are explicitly authorized. YouTube discovery remains metadata-only; the official YouTube Data API does not supply video-file downloads.
 - Rights registry: documented permission evidence, editing/commercial-use permission, owner review and expiry checks. Expired/revoked rights block processing and publishing.
 - Local media intake: configured media-root containment, file checks, SHA-256 and duplicate protection.
 - Analysis: FFprobe metadata and FFmpeg scene-change candidates. These are heuristics, not a semantic gameplay-event detector.
@@ -22,7 +22,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## Still not complete
 
-- Public metadata search does not supply legal permission to republish footage. Owner must provide/prove rights or provide authorized local files; source media is not downloaded by current provider integrations.
+- Public metadata search does not supply permission to republish footage. The official Twitch clip download API only downloads clips where the connected account has broadcaster/editor permissions and the source passes the rights gate. Full Twitch VOD downloads and YouTube watch-page downloads are not implemented; use an authorized local/original file supplied through a permitted workflow.
 - Scene-change and sparse-frame vision estimates do not reliably detect gameplay events across games. Vision scores are subjective and uncalibrated; game-specific accuracy needs labeled, rights-cleared validation clips.
 - Transcript correction beyond candidate-relative captions, narration pronunciation/emotion/timing controls, richer templates/compositions, automated visual safe-area checks and advanced repair/quarantine remain incomplete. Local script-to-WAV synthesis is implemented but requires a configured Piper executable and voice. A custom cover is a deterministic title layout, not AI-generated artwork; the actual YouTube account must be eligible for custom thumbnail uploads.
 - An optional Remotion render engine is available; keep FFmpeg as the default until the Remotion smoke and worker acceptance tests pass for your environment.
@@ -49,7 +49,7 @@ The default render engine remains FFmpeg. To test the optional Remotion engine o
 
 This Remotion path is local-only: it does not generate a poster/thumbnail or mix narration. It renders the vertical gameplay composition and timed captions; FFmpeg/FFprobe remain required for source analysis and final QC. Browser codec support varies, so H.264/AAC MP4 sources are recommended. Other containers should use the FFmpeg engine.
 
-**Licensing:** Remotion's license terms depend on who uses it and how the application is distributed. Individuals and organizations of up to three people may qualify for the free license, while larger teams and some automated-rendering product use cases require a paid license. Review the current [Remotion license and pricing](https://www.remotion.dev/docs/license/pricing) and [license FAQ](https://convert.remotion.dev/docs/license/faq) before commercial distribution.
+**No-subscription target:** The app's normal pipeline is local FFmpeg/FFprobe + local Python + the local Remotion runtime; it does not require cloud rendering, paid AI APIs, a YouTube subscription, or a paid downloader. Remotion's official terms currently describe a free license for eligible individuals/small teams, but they also list a paid "Remotion for Automators" tier for automated video-creation tools. As this project is an automated clip factory, confirm that your personal/local use qualifies for the free license before enabling Remotion for anything beyond your own individual workflow. If you must guarantee zero licensing cost in all circumstances, leave GCF_RENDER_ENGINE=ffmpeg; FFmpeg remains a free, supported renderer. Review the current [Remotion license and pricing](https://www.remotion.dev/docs/license/pricing) and [license FAQ](https://convert.remotion.dev/docs/license/faq).
 
 ## Windows quick start
 
@@ -68,7 +68,7 @@ The worker checks free space on the database/output volume before folder scans o
 1. Use Automation Setup to search Twitch/YouTube after configuring a provider. Search results enter the registry as UNKNOWN.
 2. Record a license, contract or creator grant that allows the intended editing and commercial use. A public URL or API search result is not permission.
 3. Only mark AUTHORIZED after evidence, editing/commercial flags and owner review are complete. Expired permissions fail closed.
-4. Place authorized files within the media root and register their relative path.
+4. Place authorized files within the media root and register their relative path. For an existing Twitch clip on a channel where your connected Twitch account is the broadcaster or an authorized editor, you can instead use Media Library → Fetch selected authorized Twitch clip after completing the Twitch OAuth setup below.
 5. Analyze the source; optionally run local transcription/vision. Scene-change and model-based results are estimates.
 6. By default, review candidates/captions and approve or reject them individually. A watched folder can explicitly opt in to supervised auto-render (up to three scene-change candidates per stable file). A separate private-auto-upload option is disabled by default and requires connected YouTube OAuth plus both the environment and dashboard/database upload gates.
 7. When private auto-upload is enabled, the first QC-PASS render from a source recording can be queued for private YouTube upload. The cap is one automatic upload per imported recording, rights and artifact integrity are rechecked, and no public-release job is created. QC REVIEW/failed renders remain local.
@@ -78,7 +78,15 @@ The worker checks free space on the database/output volume before folder scans o
 
 ### Twitch Helix discovery
 
-Create a Twitch developer app. Set GCF_TWITCH_CLIENT_ID and GCF_TWITCH_CLIENT_SECRET in .env, restart backend and use Automation Setup → Twitch Helix. It discovers metadata only and does not change rights status.
+Create a Twitch developer app. Set GCF_TWITCH_CLIENT_ID, GCF_TWITCH_CLIENT_SECRET, and GCF_TWITCH_REDIRECT_URI=http://localhost:8766/callback in .env. Register that exact redirect URI in the developer console, then restart the app. The standard discovery feature uses a free app access token and returns metadata only; it never changes source rights.
+
+To authorize official clip downloads from channels where your account is the broadcaster or editor, run this command from the repository's backend directory:
+
+    python -m app.twitch_user_auth
+
+A browser opens Twitch's OAuth consent screen. The user access token and refresh token are stored in the operating-system keyring; they are not written to the repository or printed. In Sources & Rights, register or select the Twitch clip URL and document editing/commercial permission. Then, in Media Library, choose that authorized source and click **Fetch selected authorized Twitch clip**. The official Twitch API creates a short-lived download URL, which the worker streams to disk, validates with FFprobe, hashes, and registers as local media. Only then can you queue analysis.
+
+The connected account must be the broadcaster or a channel editor with channel:manage:clips or editor:manage:clips. A successful public search does not grant those permissions or reuse rights. YouTube API search remains metadata-only: for YouTube footage, use the original video file or a file the rights holder has supplied through a permitted download workflow; this project does not bypass YouTube's download restrictions.
 
 ### YouTube public metadata discovery
 
