@@ -81,6 +81,15 @@ Enable YouTube Data API v3 in Google Cloud and set GCF_YOUTUBE_API_KEY for publi
 
 Never put keys, OAuth JSON or tokens in GitHub issues, commits or chat. Quotas, channel/account restrictions, platform policy and source rights still apply.
 
+## Optional local narration / voiceover
+
+1. Install a local Piper CLI executable separately. Configure `GCF_PIPER_EXECUTABLE_PATH`, `GCF_PIPER_MODEL_PATH` (.onnx voice model), and optionally `GCF_PIPER_CONFIG_PATH` (matching .onnx.json) in your local .env.
+2. Review the engine’s license and the individual voice model card/dataset license. Voice models have different terms, so verify commercial use/attribution before publishing. This repository does not bundle or download a voice or runtime.
+3. Set `GCF_ENABLE_NARRATION=true` and restart the backend. In Candidate Review, edit and save an exact owner-reviewed script, generate the local voiceover, preview the resulting WAV, and then approve/render the candidate.
+4. Editing the script invalidates earlier audio. The renderer checks the audio hash and will refuse to silently cut off voiceover longer than the candidate.
+
+Voiceover is opt-in and remains local until you approve a clip for rendering. The system does not invent a narration script or silently add speech to a render.
+
 ## Optional local transcription
 
 1. Run scripts\setup-ml-windows.bat.
