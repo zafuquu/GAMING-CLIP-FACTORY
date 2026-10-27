@@ -4,7 +4,6 @@ import { GameplayClip, type GameplayProps } from "./Gameplay";
 
 const defaults: GameplayProps = {
   sourceFile: "clip.mp4",
-  sourceFps: 30,
   startSeconds: 0,
   durationSeconds: 2,
   profile: "fit_pad",
