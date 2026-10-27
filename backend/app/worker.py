@@ -368,7 +368,10 @@ class Worker(threading.Thread):
             # rechecking the watch and current source rights. This skips the per-candidate
             # click but never publishes: QC-passed renders still require owner inspection.
             auto_render_queued=0
-            already_auto_rendered=0
+            already_auto_rendered=int(c.execute(
+                "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
+                (m["id"],),
+            ).fetchone()[0])
             try:
                 analysis_payload=json.loads(job["payload_json"] or "{}")
                 folder_watch_id=analysis_payload.get("folder_watch_id")
@@ -391,10 +394,6 @@ class Worker(threading.Thread):
                     # Count every previous supervised auto-render job for this media,
                     # including failed/completed jobs. Re-analysis or restart cannot consume
                     # another batch and silently exceed the per-file cap.
-                    already_auto_rendered=int(c.execute(
-                        "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
-                        (m["id"],),
-                    ).fetchone()[0])
                     remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
                     eligible=c.execute("""SELECT id FROM candidate_moments
                         WHERE media_id=? AND state='NEEDS_REVIEW' AND auto_rendered=0
