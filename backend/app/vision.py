@@ -2,6 +2,7 @@
 from __future__ import annotations
 import base64
 import json
+import math
 import os
 from urllib.parse import urlparse
 import requests
@@ -47,11 +48,40 @@ def _settings():
         timeout=180
     return endpoint,model,timeout
 
-def assess_candidate_images(images: list[bytes], game: str, source_title: str, transcript_excerpt: str="", http_post=None) -> dict:
+def vision_sampling_fractions() -> list[float]:
+    """Choose a small, auditable temporal sample count; valid settings are 3 or 5 frames."""
+    try:
+        count=int(os.getenv("GCF_VISION_SAMPLE_FRAMES","5"))
+    except (TypeError,ValueError):
+        count=5
+    if count not in {3,5}:
+        count=5
+    return [0.2,0.5,0.8] if count==3 else [0.1,0.3,0.5,0.7,0.9]
+
+
+def assess_candidate_images(images: list[bytes], game: str, source_title: str, transcript_excerpt: str="", http_post=None, frame_times_seconds: list[float] | None=None) -> dict:
     endpoint,model,timeout=_settings()
     if not images or len(images)>5 or any(not isinstance(x,bytes) or not x for x in images):
         raise ValueError("Vision assessment requires 1–5 nonempty sampled frame images.")
+    if frame_times_seconds is not None:
+        if len(frame_times_seconds)!=len(images):
+            raise ValueError("Frame timestamps must match the number of sampled images.")
+        normalized_times=[]
+        for value in frame_times_seconds:
+            if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(float(value)) or float(value)<0:
+                raise ValueError("Frame timestamps must be finite, nonnegative seconds.")
+            normalized_times.append(round(float(value),3))
+    else:
+        normalized_times=None
     encoded=[base64.b64encode(x).decode("ascii") for x in images]
+    if normalized_times is None:
+        ordered_timeline="Images are in temporal order, but exact timestamps were not supplied. Still images cannot prove motion between frames."
+    else:
+        ordered_timeline=(
+            "Temporal sample mapping (each image is shown in this order): "
+            + "; ".join(f"image {idx+1} ~= {value:.3f}s after candidate start" for idx,value in enumerate(normalized_times))
+            + ". Refer to evidence with image number and timestamp where possible. Still images cannot prove motion between frames."
+        )
     user_text=(
         "Assess these sequential gameplay screenshots from one short candidate clip. "
         "They are sparse still frames; do not claim motion or an event unless visible evidence supports it. "
@@ -59,9 +89,9 @@ def assess_candidate_images(images: list[bytes], game: str, source_title: str, t
         "Do not infer a kill, clutch, win, reaction, or strategy merely from an exciting-looking frame. "
         "Evidence must refer to visible HUD/scene cues or directly quoted transcript words. "
         "The scores are subjective model estimates, not calibrated probabilities. "
+        f"{ordered_timeline} "
         f"Game metadata: {game or 'unknown'}. Source title: {source_title or 'unknown'}. "
-        f"Optional transcript excerpt (may be inaccurate): {transcript_excerpt[:1200] or '[none]'}."
-    )
+        f"Optional transcript excerpt (may be inaccurate): {transcript_excerpt[:1200] or '[none]'}.")
     body={
         "model":model,
         "stream":False,
@@ -114,6 +144,7 @@ def assess_candidate_images(images: list[bytes], game: str, source_title: str, t
     result["model_name"]=model
     result["assessment_method"]="local-vision-model-estimate"
     result["score_calibrated"]=False
+    result["sample_frame_times_seconds"]=normalized_times
     return result
 
 def vision_status() -> dict:
@@ -134,6 +165,8 @@ def vision_status() -> dict:
         "remote_allowed":remote_allowed,
         "ready":bool(enabled and valid and (loopback or remote_allowed)),
         "max_candidates_per_media":max_candidates,
+        "sample_frames":len(vision_sampling_fractions()),
+        "sample_frame_fractions":vision_sampling_fractions(),
         "score_calibrated":False,
         "automatic_approval":False,
     }
