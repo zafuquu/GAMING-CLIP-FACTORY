@@ -11,14 +11,17 @@ echo.
 
 where py >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Python 3.11+ is required. Install Python and enable the py launcher.
+  echo ERROR: Python Launcher is required. Install Python 3.11 or 3.12 and enable the py launcher.
   goto fail
 )
-py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>nul
+py -3.12 -c "import sys" >nul 2>nul
+if not errorlevel 1 goto python_ok
+py -3.11 -c "import sys" >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Python 3.11 or newer is required.
+  echo ERROR: Python 3.11 or 3.12 is required. Install one of these supported versions and retry.
   goto fail
 )
+:python_ok
 where node >nul 2>nul
 if errorlevel 1 (
   echo ERROR: Node.js is required for the dashboard build.
@@ -44,6 +47,8 @@ if not exist ".env" (
 )
 
 if not exist ".venv\Scripts\python.exe" goto setup
+".venv\Scripts\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
+if errorlevel 1 goto setup
 if not exist "frontend\node_modules\vite\bin\vite.js" goto setup
 ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL" >nul 2>nul
 if errorlevel 1 goto setup
@@ -60,9 +65,9 @@ goto build_dashboard
 echo Installing or repairing application dependencies...
 call scripts\setup-windows.bat
 if errorlevel 1 goto fail
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL" >nul 2>nul
+".venv\Scripts\python.exe" -c "import sys,fastapi,uvicorn,pydantic,dotenv,requests,googleapiclient,google_auth_oauthlib,google_auth_httplib2,keyring,PIL; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Required Python packages are still unavailable after setup.
+  echo ERROR: Supported Python or required packages are still unavailable after setup.
   goto fail
 )
 
@@ -88,7 +93,7 @@ echo Checking whether the local API is already running...
 if errorlevel 1 goto launch_backend
 
 echo API process is already responding. Checking whether it serves the production dashboard...
-".venv\Scripts\python.exe" scripts\local_http.py dashboard >nul 2>nul
+".venv\Scripts\python.exe" scripts\local_http.py dashboard
 if errorlevel 1 (
   echo ERROR: An older API is running on port 8765 but does not serve the built dashboard.
   echo Stop the older Gaming Clip Factory API and run start.bat again.
@@ -123,14 +128,8 @@ exit /b 0
 
 :launch_backend
 echo Starting local API and production dashboard...
-rem Detach the backend with persistent logs instead of nested START/CMD quoting.
-rem The API process inherits the explicit repository root and uses backend/ as cwd.
-set "GCF_PROJECT_ROOT=%CD%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$root=(Get-Location).Path; $logs=Join-Path $root 'data\logs'; New-Item -ItemType Directory -Force -Path $logs | Out-Null; $python=Join-Path $root '.venv\Scripts\python.exe'; $stdout=Join-Path $logs 'backend.stdout.log'; $stderr=Join-Path $logs 'backend.stderr.log'; $pidFile=Join-Path $logs 'backend.pid'; $p=Start-Process -FilePath $python -ArgumentList '-m app' -WorkingDirectory (Join-Path $root 'backend') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru; Set-Content -Path $pidFile -Value $p.Id -Encoding ascii; Write-Output ('Started backend PID '+$p.Id)"
-if errorlevel 1 (
-  echo ERROR: Could not launch the backend. See data\logs\backend.stderr.log.
-  goto fail
-)
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\launch-backend.ps1"
+if errorlevel 1 goto fail
 goto wait_backend
 
 :fail
