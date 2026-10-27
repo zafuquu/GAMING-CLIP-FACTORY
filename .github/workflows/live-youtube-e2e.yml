@@ -1,0 +1,60 @@
+name: Live YouTube to Shorts acceptance (one-off)
+
+on:
+  push:
+    branches: ["feat/youtube-highlight-intelligence"]
+    paths:
+      - "scripts/live_youtube_e2e.py"
+      - ".github/workflows/live-youtube-e2e.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-youtube-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  live-youtube-e2e-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.1"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install FFmpeg
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress --execution-timeout=300
+          $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
+          $env:Path = "$chocoBin;$env:Path"
+          $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          & (Join-Path $chocoBin "ffmpeg.exe") -version
+          & (Join-Path $chocoBin "ffprobe.exe") -version
+      - name: Install hashed backend dependencies
+        run: python -m pip install --require-hashes -r backend/requirements-lock-win-py312.txt
+      - name: Install Remotion dependencies
+        working-directory: remotion
+        run: npm install --no-audit --no-fund
+      - name: Download actual owner-provided YouTube video, analyze it, and render a Short
+        shell: pwsh
+        env:
+          GCF_E2E_REPORT_PATH: ${{ github.workspace }}\live-youtube-e2e-report.json
+        run: |
+          $env:GCF_E2E_YOUTUBE_URL = "https://www.youtube.com/watch?v=W8bIC5C8FgU"
+          python scripts/live_youtube_e2e.py
+      - name: Upload only the JSON acceptance report (never the source or rendered video)
+        if: always() && hashFiles('live-youtube-e2e-report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-youtube-e2e-report
+          path: live-youtube-e2e-report.json
+          if-no-files-found: warn
+          retention-days: 7
