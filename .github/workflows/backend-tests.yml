@@ -103,6 +103,8 @@ jobs:
             Start-Sleep -Seconds 2
             & $pythonPath "scripts\local_http.py" health
             if ($LASTEXITCODE -eq 0) { throw "The API still responds after scripts/stop.bat." }
+            # The nonzero probe is expected after shutdown; reset it so PowerShell does not fail the whole step.
+            $LASTEXITCODE = 0
             Write-Host "PASS: one-click start, dashboard/readiness validation and clean stop all succeeded."
           }
           finally {
