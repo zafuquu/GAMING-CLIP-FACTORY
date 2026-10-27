@@ -1079,13 +1079,33 @@ class Worker(threading.Thread):
                 return
             t=now()
             try:
-                service.videos().update(part="status",body={"id":row["youtube_video_id"],"status":{"privacyStatus":"public"}}).execute()
+                update_result=service.videos().update(part="status",body={"id":row["youtube_video_id"],"status":{"privacyStatus":"public"}}).execute()
             except Exception as exc:
                 status=getattr(getattr(exc,"resp",None),"status",None)
                 if status in {400,401,403,404,409,422}:
-                    raise RuntimeError(f"YouTube rejected scheduled publication with HTTP {status}; video remains private.") from exc
+                    raise RuntimeError(f"YouTube rejected scheduled publication with HTTP {status}; inspect remote status before retrying.") from exc
                 raise UploadReconciliationRequired(f"Public update outcome is uncertain ({type(exc).__name__}); check the channel before retrying.") from exc
-            c.execute("UPDATE published_videos SET publishing_status='PUBLISHED',updated_at=? WHERE id=?",(t,published_id))
+            confirmed_privacy=str(((update_result or {}).get("status") or {}).get("privacyStatus","")).lower() if isinstance(update_result,dict) else ""
+            if confirmed_privacy!="public":
+                # Never mark a video PUBLISHED solely because the update call returned. Some
+                # responses omit status fields; read the authoritative resource before recording success.
+                try:
+                    verification=service.videos().list(part="processingDetails,status",id=row["youtube_video_id"]).execute()
+                except Exception as exc:
+                    raise UploadReconciliationRequired(f"YouTube public-state confirmation failed ({type(exc).__name__}); reconcile remote status before retrying.") from exc
+                verified_items=(verification or {}).get("items",[]) if isinstance(verification,dict) else []
+                if not verified_items:
+                    raise UploadReconciliationRequired("YouTube returned no video during public-state confirmation; reconcile before retrying.")
+                verified=verified_items[0]
+                confirmed_privacy=str((verified.get("status") or {}).get("privacyStatus","unknown")).lower()
+                confirmed_processing=str((verified.get("processingDetails") or {}).get("processingStatus","unknown")).lower()
+                if confirmed_privacy!="public":
+                    if confirmed_privacy=="private":
+                        raise RuntimeError("YouTube still reports the video as private after the public update; publication was not recorded as successful.")
+                    raise UploadReconciliationRequired(f"YouTube returned unexpected privacy state '{confirmed_privacy}'; reconcile before retrying.")
+                if confirmed_processing!="succeeded":
+                    raise UploadReconciliationRequired(f"YouTube reports public visibility but processing state '{confirmed_processing}'; reconcile before recording success.")
+            c.execute("UPDATE published_videos SET publishing_status='PUBLISHED',remote_processing_status='succeeded',processing_checked_at=?,processing_failure_reason='',updated_at=? WHERE id=?",(t,t,published_id))
             summary={"published_video_id":published_id,"youtube_video_id":row["youtube_video_id"],"publishing_status":"PUBLISHED"}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","youtube.scheduled_video_published","Scheduled video made public after just-in-time rights/QC checks.",{"job_id":job["id"],**summary})
