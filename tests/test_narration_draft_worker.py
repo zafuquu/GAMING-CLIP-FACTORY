@@ -96,3 +96,23 @@ def test_worker_discards_script_draft_if_rights_change_during_inference(tmp_path
     assert job["status"]=="FAILED"
     assert "Rights expired or were revoked" in job["error"]
     client.__exit__(None,None,None)
+
+
+def test_worker_keeps_existing_owner_script_and_review_state(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_SCRIPT_DRAFTING","true")
+    client,cfg,sid,mid,cid=_fixture(tmp_path,with_transcript=True)
+    stamp=datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("""INSERT INTO content_plans(id,candidate_id,chosen_format,title,narration_text,narration_script_reviewed,
+            created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)""",
+            ("existing-owner-plan",cid,"gameplay_highlight","Owner title","Existing owner-approved script.",1,stamp,stamp))
+    monkeypatch.setattr(worker_module,"generate_narration_draft",lambda **kwargs:_fake_result())
+    assert Worker(cfg.database_path,None,None,5).one() is True
+    with sqlite3.connect(cfg.database_path) as db:
+        db.row_factory=sqlite3.Row
+        plan=db.execute("SELECT narration_text,narration_script_reviewed,narration_draft_text,narration_draft_status FROM content_plans WHERE candidate_id=?",(cid,)).fetchone()
+    assert plan["narration_text"]=="Existing owner-approved script."
+    assert plan["narration_script_reviewed"]==1
+    assert plan["narration_draft_text"]=="Watch this angle, then reset."
+    assert plan["narration_draft_status"]=="GENERATED_UNREVIEWED"
+    client.__exit__(None,None,None)
