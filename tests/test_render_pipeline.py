@@ -485,6 +485,9 @@ def test_failed_render_qc_removes_unregistered_output_and_preserves_source(tmp_p
                 "INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                 (job_id,"RENDER_CANDIDATE","QUEUED",source_id,media_id,json.dumps({"candidate_id":candidate_id}),stamp,stamp),
             )
+            # Make this injected failure terminal on the first attempt so the test can
+            # assert both job/candidate failure state as well as artifact cleanup.
+            db.execute("UPDATE jobs SET max_attempts=1 WHERE id=?",(job_id,))
 
         def fake_media_command(args, timeout, cwd=None):
             executable=Path(args[0]).name.lower()
