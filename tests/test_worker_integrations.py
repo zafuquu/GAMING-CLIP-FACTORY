@@ -219,10 +219,8 @@ def test_auto_private_upload_rechecks_render_hash_after_thumbnail_preparation(tm
     cover.write_bytes(b"mock cover")
     with sqlite3.connect(db_path) as db:
         db.execute("UPDATE rendered_outputs SET thumbnail_path=? WHERE id='render-1'",(str(poster),))
-    payload={"published_video_id":"publication-1","publish_at":None,"tags:":[],
+    payload={"published_video_id":"publication-1","publish_at":None,"tags":[],
              "publication_mode":"private","automatic_private_upload":True,"folder_watch_id":"watch-1"}
-    # Keep the payload valid while intentionally mutating the file after its first hash check.
-    payload["tags"]=[]
     _queue_mock_upload(db_path,payload)
     monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
     calls=[]
