@@ -391,24 +391,17 @@ class Worker(threading.Thread):
                     # Count every previous supervised auto-render job for this media,
                     # including failed/completed jobs. Re-analysis or restart cannot consume
                     # another batch and silently exceed the per-file cap.
-                    historical_auto_render_jobs=c.execute(
-                        "SELECT payload_json FROM jobs WHERE media_id=? AND job_type='RENDER_CANDIDATE'",
+                    already_auto_rendered=int(c.execute(
+                        "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
                         (m["id"],),
-                    ).fetchall()
-                    already_auto_rendered=0
-                    for historical in historical_auto_render_jobs:
-                        try:
-                            if json.loads(historical["payload_json"] or "{}").get("auto_render_reason")=="authorized_folder_watch":
-                                already_auto_rendered+=1
-                        except (ValueError,TypeError):
-                            continue
+                    ).fetchone()[0])
                     remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
                     eligible=c.execute("""SELECT id FROM candidate_moments
-                        WHERE media_id=? AND state='NEEDS_REVIEW'
+                        WHERE media_id=? AND state='NEEDS_REVIEW' AND auto_rendered=0
                         ORDER BY start_seconds ASC,created_at ASC
                         LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
                     for candidate in eligible:
-                        updated=c.execute("UPDATE candidate_moments SET state='APPROVED' WHERE id=? AND state='NEEDS_REVIEW'",(candidate["id"],))
+                        updated=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(candidate["id"],))
                         if updated.rowcount!=1:
                             continue
                         render_job_id=str(uuid4()); render_stamp=now()
