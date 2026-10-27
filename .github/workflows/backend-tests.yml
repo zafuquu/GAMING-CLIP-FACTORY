@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
 jobs:
   pytest:
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -39,22 +40,26 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install FFmpeg for media integration tests (Linux)
         if: runner.os == 'Linux'
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg
       - name: Install FFmpeg for media integration tests (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 8
         shell: pwsh
         run: |
-          choco install ffmpeg --yes --no-progress
+          choco install ffmpeg --yes --no-progress --execution-timeout=300
           $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
           $env:Path = "$chocoBin;$env:Path"
           $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
           & (Join-Path $chocoBin "ffmpeg.exe") -version
           & (Join-Path $chocoBin "ffprobe.exe") -version
       - name: Install backend dependencies
+        timeout-minutes: 10
         run: python -m pip install --require-hashes -r backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
       - name: Run API tests
+        timeout-minutes: 20
         run: python -m pytest -q
 
 
@@ -70,9 +75,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install FFmpeg for full local readiness
+        timeout-minutes: 8
         shell: pwsh
         run: |
-          choco install ffmpeg --yes --no-progress
+          choco install ffmpeg --yes --no-progress --execution-timeout=300
           $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
           $env:Path = "$chocoBin;$env:Path"
           $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
