@@ -111,7 +111,11 @@ echo Dashboard: http://127.0.0.1:8765
 echo API docs: http://127.0.0.1:8765/docs
 echo Readiness: http://127.0.0.1:8765/api/readiness
 echo Public YouTube publishing remains disabled unless explicitly configured.
-start "" "http://127.0.0.1:8765"
+if /I "%GCF_STARTUP_SKIP_BROWSER%"=="true" (
+  echo Browser launch skipped because GCF_STARTUP_SKIP_BROWSER=true.
+) else (
+  start "" "http://127.0.0.1:8765"
+)
 echo.
 echo Close the separate backend window to stop the local app.
 echo This launcher window can now be closed.
