@@ -27,3 +27,8 @@ The lock matrix has one hash-pinned backend file for each supported runtime: `ba
 - Remotion: not integrated; compatibility and licensing review required before adoption.
 
 An integration is not operational until real credentials/setup and end-to-end acceptance checks are completed.
+
+
+## Update and vulnerability review
+
+`.github/dependabot.yml` monitors GitHub Actions and frontend npm dependencies. `.github/workflows/refresh-dependency-locks.yml` (scheduled and manually triggerable) regenerates the four OS/Python backend locks and four optional-ML locks on matching runners, refreshes `frontend/package-lock.json`, and opens a reviewable PR instead of pushing changes directly to `main`. The separate scheduled security workflow audits locked Python base/optional-ML dependency sets and the npm lock. Every generated update still requires the normal six-job acceptance workflow before merge; automatic merging is deliberately disabled.
