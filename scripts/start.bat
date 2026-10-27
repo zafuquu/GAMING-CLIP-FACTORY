@@ -123,7 +123,10 @@ exit /b 0
 
 :launch_backend
 echo Starting local API and production dashboard...
-start "Gaming Clip Factory AI - Backend" /D "%CD%" cmd /k ""%CD%\scripts\run-backend.bat""
+rem Keep the configured project root in the child environment, and launch Python
+rem directly from backend/ to avoid nested cmd/start quoting differences on Windows.
+set "GCF_PROJECT_ROOT=%CD%"
+start "Gaming Clip Factory AI - Backend" /D "%CD%\backend" "%CD%\.venv\Scripts\python.exe" -m app
 goto wait_backend
 
 :fail
