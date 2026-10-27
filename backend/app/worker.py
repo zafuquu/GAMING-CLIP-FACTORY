@@ -1105,6 +1105,14 @@ class Worker(threading.Thread):
                 max_duration_seconds=int(os.getenv("GCF_YTDLP_MAX_DURATION_SECONDS","14400")),
             )
             details=downloader.download(source_url,destination)
+            downloaded_path=Path(details.get("file_path") or destination).expanduser().resolve()
+            try:
+                downloaded_path.relative_to(destination_dir.resolve())
+            except ValueError:
+                raise PermissionError("yt-dlp output path escaped the managed download directory.")
+            if downloaded_path.suffix.lower() not in {".mp4",".mkv",".webm",".mov",".m4v"}:
+                raise RuntimeError("yt-dlp produced an unsupported media container.")
+            destination=downloaded_path
             if not destination.is_file() or destination.stat().st_size<=0:
                 raise RuntimeError("yt-dlp did not create a nonempty local video.")
             probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(destination)],min(60,self.timeout))
