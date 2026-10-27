@@ -105,9 +105,9 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         voice_render=next(x for x in client.get("/api/renders").json() if x["candidate_id"]==voice_cid)
         assert voice_render["qc_status"]=="PASS",voice_render["qc_report"]
         assert voice_render["audio_codec"]=="aac"
-        assert voice_render["qc_report"]["narration_mixed"] is True
-        assert voice_render["qc_report"]["narration_audio_sha256"]==voice_sha
-        assert 1.0<=voice_render["qc_report"]["narration_audio_duration_seconds"]<=2.0
+        assert voice_render["qc_report"]["checks"]["narration_mixed"] is True
+        assert voice_render["qc_report"]["checks"]["narration_audio_sha256"]==voice_sha
+        assert 1.0<=voice_render["qc_report"]["checks"]["narration_audio_duration_seconds"]<=2.0
         assert Path(voice_render["output_path"]).is_file()
 
         blur_cid="ci-candidate-blur-fill"
