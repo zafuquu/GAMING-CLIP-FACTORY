@@ -1,4 +1,4 @@
-import json, sqlite3, hashlib, subprocess, re, os, importlib.util
+import json, sqlite3, hashlib, subprocess, re, os, importlib.util, shutil
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 from datetime import datetime, timezone, date, timedelta
