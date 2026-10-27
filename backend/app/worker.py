@@ -1283,6 +1283,9 @@ class Worker(threading.Thread):
             if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
                 target.unlink(missing_ok=True)
                 raise PermissionError("Rights were expired or revoked during narration synthesis; audio was discarded.")
+            if latest["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
+                target.unlink(missing_ok=True)
+                raise PermissionError("Candidate was rejected or finalized during narration synthesis; audio was discarded.")
             if latest_sha!=expected_script_sha:
                 target.unlink(missing_ok=True)
                 raise PermissionError("Narration script changed during synthesis; audio was discarded.")
