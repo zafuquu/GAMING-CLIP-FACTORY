@@ -123,15 +123,24 @@ exit /b 0
 
 :launch_backend
 echo Starting local API and production dashboard...
-rem Keep the configured project root in the child environment, and launch Python
-rem directly from backend/ to avoid nested cmd/start quoting differences on Windows.
+rem Detach the backend with persistent logs instead of nested START/CMD quoting.
+rem The API process inherits the explicit repository root and uses backend/ as cwd.
 set "GCF_PROJECT_ROOT=%CD%"
-start "Gaming Clip Factory AI - Backend" /D "%CD%\backend" "%CD%\.venv\Scripts\python.exe" -m app
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$root=(Get-Location).Path; $logs=Join-Path $root 'data\logs'; New-Item -ItemType Directory -Force -Path $logs | Out-Null; $python=Join-Path $root '.venv\Scripts\python.exe'; $stdout=Join-Path $logs 'backend.stdout.log'; $stderr=Join-Path $logs 'backend.stderr.log'; $p=Start-Process -FilePath $python -ArgumentList '-m app' -WorkingDirectory (Join-Path $root 'backend') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru; Write-Output ('Started backend PID '+$p.Id)"
+if errorlevel 1 (
+  echo ERROR: Could not launch the backend. See data\logs\backend.stderr.log.
+  goto fail
+)
 goto wait_backend
 
 :fail
 echo.
-echo Startup could not safely complete. See the message above and the backend window.
+echo Startup could not safely complete. See the message above.
+if exist "data\logs\backend.stderr.log" (
+  echo.
+  echo Last backend error log lines (data\logs\backend.stderr.log):
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 60 -ErrorAction SilentlyContinue 'data\logs\backend.stderr.log'"
+)
 if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 1
 pause
 exit /b 1
