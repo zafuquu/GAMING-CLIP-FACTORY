@@ -9,7 +9,6 @@ export type Caption = {
 
 export type GameplayProps = {
   sourceFile: string;
-  sourceFps: number;
   startSeconds: number;
   durationSeconds: number;
   profile: "fit_pad" | "blur_fill";
@@ -18,7 +17,6 @@ export type GameplayProps = {
 
 export const GameplayClip: React.FC<GameplayProps> = ({
   sourceFile,
-  sourceFps,
   startSeconds,
   profile,
   captions,
