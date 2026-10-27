@@ -50,8 +50,8 @@ def main() -> int:
     video_url = os.environ.get("GCF_E2E_YOUTUBE_URL", "").strip()
     require(video_url.startswith("https://"), "GCF_E2E_YOUTUBE_URL must be an HTTPS URL.")
     require(
-        parse_qs(urlparse(video_url).query).get("v", [""])[0] == "W8bIC5C8FgU",
-        "This one-off acceptance workflow is restricted to the owner-provided video ID.",
+        os.environ.get("GCF_E2E_OWNER_CONFIRMED", "").strip().lower() == "true",
+        "Explicit owner authorization is required; set GCF_E2E_OWNER_CONFIRMED=true only for content you own or are authorized to edit.",
     )
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
@@ -76,11 +76,11 @@ def main() -> int:
 
     report: dict = {
         "test": "live_youtube_download_analysis_remotion_render",
-        "video_id": "W8bIC5C8FgU",
+        "video_id": parse_qs(urlparse(video_url).query).get("v", ["unknown"])[0],
         "upload_or_publication_attempted": False,
         "steps": {},
     }
-    with tempfile.TemporaryDirectory(prefix="gcf-live-e2e-") as temp:
+    with tempfile.TemporaryDirectory(prefix="gcf-live-e2e-", ignore_cleanup_errors=True) as temp:
         root = Path(temp) / "project"
         data = root / "data"
         media_root = data / "media"
@@ -102,7 +102,7 @@ def main() -> int:
             rights = client.put(f"/api/sources/{sid}/rights", json={
                 "status": "AUTHORIZED",
                 "license_type": "Owner-provided authorization for this acceptance test",
-                "permission_evidence": "Video owner explicitly confirmed ownership in the test conversation on 2026-10-27.",
+                "permission_evidence": "Owner explicitly confirmed authorization for this run through the workflow input.",
                 "editing_allowed": True,
                 "commercial_use_allowed": True,
                 "reviewed_by_owner": True,
@@ -223,7 +223,7 @@ if __name__ == "__main__":
     except Exception as exc:
         failure = {
             "test": "live_youtube_download_analysis_remotion_render",
-            "video_id": "W8bIC5C8FgU",
+            "video_id": parse_qs(urlparse(os.environ.get("GCF_E2E_YOUTUBE_URL", "")).query).get("v", ["unknown"])[0],
             "result": "FAIL",
             "error_type": type(exc).__name__,
             "error": str(exc)[:3000],
