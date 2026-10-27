@@ -851,3 +851,114 @@ def test_voice_synthesis_requires_explicit_script_review(tmp_path,monkeypatch):
     assert queued.status_code==202,queued.text
     assert queued.json()["status"]=="QUEUED"
     c.__exit__(None,None,None)
+
+
+def _seed_youtube_processing_publication(client, media_root, tmp_path, published_id, scheduled=True):
+    import hashlib
+    sid=add_source(client)
+    assert authorize(client,sid).status_code==200
+    media_root.mkdir(parents=True,exist_ok=True)
+    source_file=media_root/"gameplay.mp4"
+    source_file.write_bytes(b"test fixture video bytes")
+    imported=client.post("/api/media/import",json={"source_id":sid,"path":"gameplay.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    db=client.app.state.settings.database_path
+    output_dir=db.parent/"outputs"
+    output_dir.mkdir(parents=True,exist_ok=True)
+    output=output_dir/(published_id+".mp4")
+    output.write_bytes(b"private upload fixture")
+    sha=hashlib.sha256(output.read_bytes()).hexdigest()
+    candidate_id=published_id+"-candidate"
+    rendered_id=published_id+"-render"
+    stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    publish_at=(datetime.now(timezone.utc)+timedelta(days=1)).isoformat(timespec="seconds") if scheduled else None
+    with sqlite3.connect(db) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (candidate_id,mid,0.0,8.0,"test","YouTube processing test","RENDERED_QC_PASSED",stamp))
+        raw.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (rendered_id,candidate_id,mid,str(output),output.stat().st_size,sha,8.0,1080,1920,"h264","aac","PASS","{}",stamp))
+        raw.execute("""INSERT INTO published_videos(id,source_id,media_id,candidate_id,output_path,title,description,template_id,qc_status,publishing_status,youtube_video_id,created_at,updated_at,rendered_output_id,scheduled_publish_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (published_id,sid,mid,candidate_id,str(output),"Test upload","", "test","PASS","PROCESSING","youtube-video-123",stamp,stamp,rendered_id,publish_at))
+        raw.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_uploads_enabled','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
+        raw.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?, 'CHECK_YOUTUBE_PROCESSING','RUNNING',?,?, ?,?,?)",
+                    (published_id+"-check",sid,mid,json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20}),stamp,stamp))
+    return db, published_id+"-check", published_id, publish_at
+
+def _fake_youtube_processing_service(processing_status, privacy_status="private"):
+    class Request:
+        def execute(self):
+            return {"items":[{"id":"youtube-video-123","processingDetails":{"processingStatus":processing_status,"processingFailureReason":"test_failure" if processing_status=="failed" else ""},"status":{"privacyStatus":privacy_status}}]}
+    class Videos:
+        def list(self,**kwargs):
+            assert kwargs.get("part")=="processingDetails,status"
+            assert kwargs.get("id")=="youtube-video-123"
+            return Request()
+    class Service:
+        def videos(self):
+            return Videos()
+    return Service()
+
+def test_youtube_processing_success_queues_gated_publication(tmp_path,monkeypatch):
+    import app.worker as worker_module
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:_fake_youtube_processing_service("succeeded"))
+    client,media=setup_client(tmp_path)
+    db,job_id,published_id,publish_at=_seed_youtube_processing_publication(client,media,tmp_path,"processing-success",scheduled=True)
+    Worker(db,None,None,5).check_youtube_processing({"id":job_id,"payload_json":json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20})})
+    with sqlite3.connect(db) as raw:
+        video=raw.execute("SELECT publishing_status,remote_processing_status,scheduled_publish_at FROM published_videos WHERE id=?",(published_id,)).fetchone()
+        release=raw.execute("SELECT status,next_attempt_at,payload_json FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND payload_json LIKE ?",("%"+published_id+"%",)).fetchone()
+    assert tuple(video[:2])==("SCHEDULED","succeeded")
+    assert video[2]==publish_at
+    assert release is not None
+    assert release[0]=="QUEUED"
+    assert datetime.fromisoformat(release[1].replace("Z","+00:00")) > datetime.now(timezone.utc)
+    assert json.loads(release[2])["published_video_id"]==published_id
+    client.__exit__(None,None,None)
+
+def test_youtube_processing_failure_cancels_public_release(tmp_path,monkeypatch):
+    import app.worker as worker_module
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","true")
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:_fake_youtube_processing_service("failed"))
+    client,media=setup_client(tmp_path)
+    db,job_id,published_id,_=_seed_youtube_processing_publication(client,media,tmp_path,"processing-failure",scheduled=True)
+    stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with sqlite3.connect(db) as raw:
+        raw.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?, 'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?)",
+                    (published_id+"-release", "source-unused", "media-unused", json.dumps({"published_video_id":published_id,"publish_at":"2099-01-01T00:00:00+00:00"}),stamp,stamp))
+    # Use actual foreign-key references for the scheduled job.
+    with sqlite3.connect(db) as raw:
+        raw.execute("UPDATE jobs SET source_id=(SELECT source_id FROM published_videos WHERE id=?),media_id=(SELECT media_id FROM published_videos WHERE id=?) WHERE id=?",
+                    (published_id,published_id,published_id+"-release"))
+    Worker(db,None,None,5).check_youtube_processing({"id":job_id,"payload_json":json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20})})
+    with sqlite3.connect(db) as raw:
+        video=raw.execute("SELECT publishing_status,remote_processing_status,processing_failure_reason FROM published_videos WHERE id=?",(published_id,)).fetchone()
+        release=raw.execute("SELECT status FROM jobs WHERE id=?",(published_id+"-release",)).fetchone()
+    assert video[0]=="PROCESSING_FAILED"
+    assert video[1]=="failed"
+    assert "test_failure" in video[2]
+    assert release[0]=="CANCELLED"
+    client.__exit__(None,None,None)
+
+def test_youtube_processing_success_keeps_video_private_when_public_gate_disabled(tmp_path,monkeypatch):
+    import app.worker as worker_module
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","false")
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:_fake_youtube_processing_service("succeeded"))
+    client,media=setup_client(tmp_path)
+    db,job_id,published_id,_=_seed_youtube_processing_publication(client,media,tmp_path,"processing-private",scheduled=True)
+    Worker(db,None,None,5).check_youtube_processing({"id":job_id,"payload_json":json.dumps({"published_video_id":published_id,"poll_attempt":0,"max_polls":20})})
+    with sqlite3.connect(db) as raw:
+        video=raw.execute("SELECT publishing_status,remote_processing_status,scheduled_publish_at FROM published_videos WHERE id=?",(published_id,)).fetchone()
+        releases=raw.execute("SELECT COUNT(*) FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND payload_json LIKE ? AND status IN ('QUEUED','RUNNING')",("%"+published_id+"%",)).fetchone()[0]
+    assert tuple(video)==("READY_PRIVATE","succeeded",None)
+    assert releases==0
+    client.__exit__(None,None,None)
