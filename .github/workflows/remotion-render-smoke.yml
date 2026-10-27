@@ -9,11 +9,14 @@ on:
       - "backend/app/main.py"
       - "backend/app/twitch_user_auth.py"
       - "backend/app/integrations/twitch_download.py"
+      - "backend/app/integrations/youtube_download.py"
       - "scripts/setup-remotion.bat"
       - "tests/test_remotion_render_pipeline.py"
       - "tests/test_twitch_download.py"
       - "tests/test_highlight_detector.py"
       - "tests/test_youtube_highlight_intelligence.py"
+      - "tests/test_youtube_download.py"
+      - "backend/requirements.txt"
       - ".env.example"
       - "README.md"
       - ".github/workflows/remotion-render-smoke.yml"
@@ -24,11 +27,14 @@ on:
       - "backend/app/main.py"
       - "backend/app/twitch_user_auth.py"
       - "backend/app/integrations/twitch_download.py"
+      - "backend/app/integrations/youtube_download.py"
       - "scripts/setup-remotion.bat"
       - "tests/test_remotion_render_pipeline.py"
       - "tests/test_twitch_download.py"
       - "tests/test_highlight_detector.py"
       - "tests/test_youtube_highlight_intelligence.py"
+      - "tests/test_youtube_download.py"
+      - "backend/requirements.txt"
       - ".env.example"
       - "README.md"
       - ".github/workflows/remotion-render-smoke.yml"
@@ -68,8 +74,10 @@ jobs:
       - name: Render a synthetic clip and validate its streams
         working-directory: remotion
         run: npm run test:render
+      - name: Install yt-dlp integration dependency
+        run: python -m pip install "yt-dlp>=2025.10.22,<2027"
       - name: Exercise the actual FastAPI worker, Remotion render, and QC path
-        run: python -m pytest -q tests/test_remotion_render_pipeline.py tests/test_twitch_download.py tests/test_highlight_detector.py tests/test_youtube_highlight_intelligence.py
+        run: python -m pytest -q tests/test_remotion_render_pipeline.py tests/test_twitch_download.py tests/test_highlight_detector.py tests/test_youtube_highlight_intelligence.py tests/test_youtube_download.py
       - name: Upload generated dependency lock for review
         if: always() && hashFiles('remotion/package-lock.json') != ''
         uses: actions/upload-artifact@v4
@@ -110,5 +118,7 @@ jobs:
       - name: Render synthetic media through Remotion on Windows
         working-directory: remotion
         run: npm run test:render
+      - name: Install yt-dlp integration dependency
+        run: python -m pip install "yt-dlp>=2025.10.22,<2027"
       - name: Exercise Windows FastAPI worker, Remotion render, and QC
-        run: python -m pytest -q tests/test_remotion_render_pipeline.py tests/test_twitch_download.py tests/test_highlight_detector.py tests/test_youtube_highlight_intelligence.py
+        run: python -m pytest -q tests/test_remotion_render_pipeline.py tests/test_twitch_download.py tests/test_highlight_detector.py tests/test_youtube_highlight_intelligence.py tests/test_youtube_download.py
