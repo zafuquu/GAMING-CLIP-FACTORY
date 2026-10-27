@@ -282,7 +282,8 @@ def test_scheduled_public_worker_rechecks_current_rights_before_remote_update(tm
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
     _public_job(cfg,pub_id,scheduled)
-    Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":scheduled.isoformat()})})
+    with pytest.raises(PermissionError,match="rights are expired, revoked or unauthorized"):
+        Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":scheduled.isoformat()})})
     with sqlite3.connect(cfg.database_path) as db:
         state=db.execute("SELECT publishing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()[0]
     assert state=="BLOCKED_RIGHTS"
@@ -297,7 +298,7 @@ def test_scheduled_public_worker_refuses_modified_render_hash(tmp_path,monkeypat
     scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
     with sqlite3.connect(cfg.database_path) as db:
         db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(timespec="seconds"),pub_id))
-    output.write_bytes(b"tampered after QC")
+    output.write_bytes(b"X"*output.stat().st_size)
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
     _public_job(cfg,pub_id,scheduled)
