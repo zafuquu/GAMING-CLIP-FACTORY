@@ -22,3 +22,21 @@
 .narration-editor{display:flex;flex-direction:column;gap:9px;padding:12px;margin:10px 0;border:1px solid #35435b;background:#0e151f;border-radius:9px}.narration-editor textarea{width:100%;min-height:96px;resize:vertical;background:#0a1018;color:#e6edf8;border:1px solid #344154;border-radius:7px;padding:10px;font-size:11px;line-height:1.55}.narration-editor .caption-editor-head{display:flex;flex-direction:column;gap:4px}.narration-editor .caption-editor-head b{font-size:11px;color:#dbe7fb}.narration-editor .caption-editor-head small,.narration-editor>small{font-size:9px;line-height:1.5;color:#8e9db1;overflow-wrap:anywhere}.narration-preview{width:100%;max-width:420px;height:38px;margin-top:4px}
 
 .script-draft{display:flex;flex-direction:column;align-items:flex-start;gap:8px;margin:10px 0;padding:12px;border:1px solid #4a4366;background:#151421;border-radius:8px}.script-draft>b{font-size:11px;color:#e6dcff}.script-draft>p{white-space:pre-wrap;font-size:11px;line-height:1.6;color:#e2e5ef;margin:0}.script-draft>small{font-size:9px;line-height:1.5;color:#a7a5bb;overflow-wrap:anywhere}.script-review-check{display:flex;gap:8px;align-items:flex-start;padding:9px 10px;background:#171d20;border:1px solid #34414a;border-radius:7px;color:#d6e2e8;font-size:10px;line-height:1.5}.script-review-check input{margin-top:2px;accent-color:#8e7be8}
+
+
+/* Live startup/readiness preflight */
+.readiness-panel{border-color:#354154;background:linear-gradient(145deg,#171e2a,#11161e)}
+.readiness-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}
+.readiness-head h2{margin:7px 0 5px}
+.readiness-head p{margin:0;max-width:720px}
+.readiness-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:22px}
+.readiness-row{display:flex;align-items:center;gap:10px;min-width:0;padding:10px 0;border-bottom:1px solid #283242}
+.readiness-row>div{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}
+.readiness-row b{text-transform:capitalize;font-size:10px;overflow-wrap:anywhere}
+.readiness-row small{font-size:9px;color:#8793a7;overflow-wrap:anywhere}
+.readiness-dot{width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:#64748b}
+.readiness-dot.ready{background:#84dfa0;box-shadow:0 0 0 3px #1b3826}
+.readiness-dot.not-ready{background:#ff858c;box-shadow:0 0 0 3px #3a222b}
+.readiness-panel>.note{margin:13px 0 0}
+@media(max-width:900px){.readiness-list{grid-template-columns:1fr}}
+@media(max-width:700px){.readiness-head{align-items:flex-start;flex-direction:column;gap:9px}}
