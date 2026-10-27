@@ -132,7 +132,7 @@ async function main() {
       inputProps,
       codec: "h264",
       audioCodec: "aac",
-      audioBitrate: 128000,
+      audioBitrate: "128K",
       pixelFormat: "yuv420p",
       crf: 21,
       x264Preset: "veryfast",
