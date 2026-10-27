@@ -338,13 +338,27 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert Path(render["thumbnail_path"]).is_file()
         assert render["file_size"] == Path(render["output_path"]).stat().st_size
 
-        # Re-running analysis must not create another automatic batch for this same file.
-        repeat_analysis = client.post(f"/api/media/{media_id}/analyze")
-        assert repeat_analysis.status_code == 202, repeat_analysis.text
+        # Simulate a repeated/recovered analysis job from the same folder watch.
+        # Preserve the watch ID exactly as the actual watcher does in its job payload.
+        repeat_analysis_id = "repeat-auto-render-cap"
+        repeat_stamp = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute(
+                """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                   VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
+                (
+                    repeat_analysis_id,
+                    source_id,
+                    media_id,
+                    json.dumps({"folder_watch_id": watch_id}),
+                    repeat_stamp,
+                    repeat_stamp,
+                ),
+            )
         assert worker.one() is True
         repeat_job = next(
             job for job in client.get("/api/jobs").json()
-            if job["id"] == repeat_analysis.json()["id"]
+            if job["id"] == repeat_analysis_id
         )
         assert repeat_job["status"] == "COMPLETED", repeat_job.get("error")
         repeat_summary = json.loads(repeat_job["payload_json"])
