@@ -218,19 +218,20 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         )
         assert rights_response.status_code == 200, rights_response.text
 
-        # Step 2 — generate 16 seconds of moving test patterns with unmistakable scene cuts.
-        # The moving box prevents the deterministic QC freeze detector from flagging each scene.
+        # Step 2 — generate four full-frame colors with hard scene cuts and a moving white box.
+        # The distinct backgrounds ensure scene score exceeds the production detector threshold;
+        # the moving box ensures QC does not interpret each segment as frozen footage.
         input_path = media / "mock_gameplay.mp4"
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-f", "lavfi", "-i",
-            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=red@0.60:t=fill",
+            "color=c=red:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=lime@0.60:t=fill",
+            "color=c=lime:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=blue@0.60:t=fill",
+            "color=c=blue:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=yellow@0.60:t=fill",
+            "color=c=yellow:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=16",
             "-filter_complex", "[0:v][1:v][2:v][3:v]concat=n=4:v=1:a=0[v]",
             "-map", "[v]", "-map", "4:a", "-t", "16",
