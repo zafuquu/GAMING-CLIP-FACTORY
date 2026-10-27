@@ -54,9 +54,10 @@ jobs:
           python-version: ${{ matrix.python_version }}
       - name: Resolve standard and optional ML locks for this OS/Python pair
         run: |
-          python -m pip install --upgrade pip pip-tools
+          python -m pip install --upgrade pip
+          python -m pip install "pip-tools==7.6.2"
           pip-compile --resolver=backtracking --generate-hashes --strip-extras --output-file=backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt backend/requirements.txt
-          pip-compile --resolver=backtracking --generate-hashes --strip-extras --output-file=backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt backend/requirements-ml.txt
+          pip-compile --resolver=backtracking --constraint=backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt --generate-hashes --strip-extras --output-file=backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt backend/requirements-ml.txt
       - uses: actions/upload-artifact@v7
         with:
           name: dependency-locks-${{ matrix.os_key }}-${{ matrix.python_key }}
@@ -132,6 +133,8 @@ jobs:
       - name: Use generated lock files
         run: |
           python -c "from pathlib import Path; import shutil,os; a=Path('lock-artifacts'); o=os.environ['GCF_TEST_LOCK_OS']; p=os.environ['GCF_TEST_LOCK_PY']; names=[f'requirements-lock-{o}-{p}.txt',f'requirements-ml-lock-{o}-{p}.txt']; [shutil.copyfile(a/n,Path('backend')/n) for n in names]; shutil.copyfile(a/'package-lock.json',Path('frontend')/'package-lock.json')"
+      - name: Validate generated dependency locks
+        run: python scripts/validate_dependency_locks.py --os-key ${{ matrix.os_key }} --python-key ${{ matrix.python_key }}
       - name: Install FFmpeg for media integration tests (Linux)
         if: runner.os == 'Linux'
         run: |
