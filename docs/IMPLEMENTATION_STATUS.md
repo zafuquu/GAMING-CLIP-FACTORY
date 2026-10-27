@@ -4,7 +4,7 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Implemented in code
 
-- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–012, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
+- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–013, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
 - Source rights registry with evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
 - Local media registration restricted to the configured media root with file checks, SHA-256 and duplicate prevention.
 - Twitch Helix and YouTube Data API metadata-only discovery with schedules/history. No source media is downloaded and public metadata never grants reuse rights.
@@ -17,14 +17,15 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 - Browser preview for PASS and REVIEW outputs, transcript/content-plan/vision evidence exposed in API/dashboard.
 - YouTube OAuth Desktop stored in OS keyring with scope-version checking; private resumable upload; processing-status polling/manual recheck; official custom Shorts cover generation/upload with a separate retryable state machine; Analytics API snapshots and schedule; same-window game/format report with a three-video minimum sample; upload reconciliation; separately gated scheduled-public-release worker.
 - Public-state reconciliation validates channel ownership, current rights, output QC/hash, schedule and remote processing state, and attempts to make unexpected public videos private when policy no longer permits publication.
+- Scheduled public release verifies YouTube reports `privacyStatus=public` before recording `PUBLISHED`; if the update response omits status, the worker performs an authoritative read. A video still reported private is not recorded as published; ambiguous remote state requires reconciliation.
 - Owner cancel/reschedule controls, global-pause checks before outbound YouTube operations, immediate SQLite write locks and a partial unique index allowing only one publication record per render.
 - Bounded subprocess timeouts/retries, job recovery, migration collision/rollback tests and current CI.
 
 ## Latest verification evidence
 
-GitHub Actions run 40358583264 on commit 63517f8f ran all five jobs. The four backend test steps passed: Windows/Python 3.11 and 3.12 each reported 70 passed, 2 skipped; Ubuntu/Python 3.11 and 3.12 each reported 72 passed including FFmpeg render integration. The frontend typecheck/production build passed. At time of inspection, workflow cleanup was still in progress. Link: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40358583264.
+GitHub Actions run 40428209391 on commit `b99b8368` completed successfully across all five jobs: Windows and Ubuntu, Python 3.11 and 3.12, plus the frontend typecheck/production build. The Windows/Python 3.11 job reported 107 passed and 2 skipped; Ubuntu/Python 3.11 reported 109 passed, including the FFmpeg render integration and scheduled YouTube processing/public-state tests. Run link: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40428209391.
 
-An earlier completed CI run 40356307571 also passed the then-current full matrix. Hosted CI does not verify the user's local Windows FFmpeg package, live provider credentials, source licenses or a real YouTube upload.
+CI does not verify the user's local Windows FFmpeg package, real provider credentials, actual source licenses or a live YouTube channel upload. Those remain end-to-end acceptance requirements.
 
 ## Configuration and acceptance still required
 
