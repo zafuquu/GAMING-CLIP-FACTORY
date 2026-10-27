@@ -61,7 +61,7 @@ def test_media_analysis_ranks_an_audio_event_into_a_shorts_window(tmp_path, monk
         video_path = media_root / "synthetic-gameplay.mp4"
         # The sound level abruptly rises from seconds 20–22. The test checks that
         # the real FFmpeg RMS metadata parser identifies that event and ranks a
-        # sensible 24-second candidate around it without using any network/model.
+        # sensible 15-second Shorts candidate around it without using any network/model.
         subprocess.run([
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
             "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=45",
