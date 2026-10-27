@@ -1195,6 +1195,19 @@ class Worker(threading.Thread):
                 raise FileNotFoundError("Publication, render or rights record disappeared before public release.")
             if latest["publishing_status"] not in {"SCHEDULED","PROCESSING"} or not latest["scheduled_publish_at"]:
                 raise PermissionError("Scheduled public release was cancelled or disabled before the remote state change.")
+            try:
+                latest_scheduled=datetime.fromisoformat(latest["scheduled_publish_at"].replace("Z","+00:00"))
+            except (ValueError,TypeError) as exc:
+                raise PermissionError("Scheduled publication timestamp became invalid before the remote state change.") from exc
+            if latest_scheduled.tzinfo is None:
+                latest_scheduled=latest_scheduled.replace(tzinfo=timezone.utc)
+            if latest_scheduled>datetime.now(timezone.utc):
+                due=latest_scheduled.astimezone(timezone.utc).isoformat(timespec="microseconds")
+                stamp=now()
+                c.execute("UPDATE jobs SET status='QUEUED',error='Publication was rescheduled during remote verification; waiting for the new scheduled time.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(stamp,due,job["id"]))
+                event(c,"INFO","youtube.publication_rescheduled_before_mutation","The public release was deferred because its current schedule is now in the future.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
             if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
                 stamp=now()
                 c.execute("UPDATE published_videos SET publishing_status='BLOCKED_RIGHTS',scheduled_publish_at=NULL,processing_failure_reason='Rights were revoked or expired before public release.',updated_at=? WHERE id=?",(stamp,published_id))
