@@ -52,7 +52,7 @@ if errorlevel 1 goto setup
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\lock-state.ps1" -Mode test >nul 2>nul
 if errorlevel 1 goto setup
 if not exist "frontend\node_modules\vite\bin\vite.js" goto setup
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL" >nul 2>nul
+".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL, yt_dlp" >nul 2>nul
 if errorlevel 1 goto setup
 ".venv\Scripts\python.exe" -m pip check >nul 2>nul
 if errorlevel 1 goto setup
@@ -67,7 +67,7 @@ goto build_dashboard
 echo Installing or repairing application dependencies...
 call scripts\setup-windows.bat
 if errorlevel 1 goto fail
-".venv\Scripts\python.exe" -c "import sys,fastapi,uvicorn,pydantic,dotenv,requests,googleapiclient,google_auth_oauthlib,google_auth_httplib2,keyring,PIL; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
+".venv\Scripts\python.exe" -c "import sys,fastapi,uvicorn,pydantic,dotenv,requests,googleapiclient,google_auth_oauthlib,google_auth_httplib2,keyring,PIL,yt_dlp; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
 if errorlevel 1 (
   echo ERROR: Supported Python or required packages are still unavailable after setup.
   goto fail
