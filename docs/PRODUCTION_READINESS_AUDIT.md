@@ -8,9 +8,9 @@
 
 Reviewed the repository tree and current product documentation, architecture/implementation status, environment and security guidance, Windows setup/run scripts, GitHub Actions workflow, FastAPI application and configuration, the persistent worker and scheduler, source/rights and media intake paths, rendering/vision/narration/YouTube integration modules, and tests for API behavior, rights gating, rendering, storage safety, processing, publication, reconciliation and analytics. The audit focused on operational paths and safety-critical state transitions rather than assuming that code presence proves the feature works.
 
-## Changes in the production-hardening branch
+## Verified repository hardening (as of 27 October 2026)
 
-The current hardening PR proposes the following targeted improvements:
+The following changes are merged into main and covered by GitHub Actions run #364 (all six jobs green): [run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40478057648).
 
 - `scripts/start.bat` is the one-click local entry point. It checks supported Python/Node versions and dependency health, creates `.env` only if absent, installs or repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API and waits for both API and UI to respond.
 - The API serves the built React bundle from the same local process. The Vite development server remains available through the separate developer script.
@@ -18,9 +18,12 @@ The current hardening PR proposes the following targeted improvements:
 - The worker continues retrying after an operational failure even if writing the error event also fails; the secondary failure is written to stderr.
 - Scheduled public release revalidates rights, schedule, publishing policy, output/QC linkage, file size/hash and global pause after the live YouTube status lookup and before making a video public.
 - Windows CI installs FFmpeg so that media-integration tests can exercise Windows rather than silently skip because the binary is absent.
+- Windows startup CI runs the production launcher, verifies API/dashboard/readiness, starts the app a second time to assert one backend process remains, invokes the stop command, and confirms the API is no longer responding.
+- A synthetic-media mock-production acceptance test exercises watched-folder import, scene analysis, capped supervised auto-render, FFmpeg render/QC, private YouTube-upload state using a mocked provider, and mocked processing success. It verifies that a private upload does not queue public release.
+- The Windows stop command terminates the owned backend process tree so an active FFmpeg child is not left running after a normal stop.
 - Regression tests cover healthy/degraded readiness, serving the built dashboard, worker-error logging failure, a live worker, and rights/artifact/schedule changes during the remote status lookup.
 
-**Merge rule:** treat these changes as verified only after the current pull request's latest Actions run completes successfully. Historical green main-branch CI runs are only a baseline.
+**Verification rule:** a result applies only to its exact commit. The cited main-branch run verifies the merged start/stop hardening and mock-production tests; changes made afterward require another successful run. Hosted CI still does not certify the actual target PC or real external credentials.
 
 ## What the application can and cannot automate safely
 
@@ -48,7 +51,7 @@ The current UI supports candidate approval, rendering/QC, YouTube publication wo
 
 ## Acceptance runbook
 
-1. On the target Windows machine, preserve existing `data/`, `media/`, `.env`, OAuth keyring entries and outputs. Install Python 3.11+ and Node.js 20.19+ or 22.12+, then run `scripts/start.bat`.
+1. On the target Windows machine, preserve existing `data/`, `media/`, `.env`, OAuth keyring entries and outputs. Install Python 3.11 or 3.12 and Node.js 20.19+ or 22.12+, then run `scripts/start.bat`.
 2. Verify `http://127.0.0.1:8765/api/health`, `/api/readiness`, dashboard rendering, worker status and app restart. Readiness must be fully ready for the local media pipeline before real jobs are queued.
 3. Import synthetic/authorized footage through a source whose rights evidence has been explicitly recorded. Run discovery/analysis, inspect the evidence and preview the candidate, approve it, render it and require QC PASS. Watch for missing audio, malformed captions, wrong aspect ratio, visual crop mistakes and encoding artifacts.
 4. With a test/owner-controlled YouTube channel, exercise private upload, processing, thumbnail, reconciliation, analytics and controlled retry after a deliberately interrupted operation. Confirm the same render never produces duplicate uploads.
