@@ -185,6 +185,10 @@ def rank_highlight_windows(
     for event_time in event_times:
         audio_score = nearby_audio_activity(event_time)
         scene_score = scene_proximity(event_time)
+        # When usable audio exists, a scene cut alone is not enough evidence.
+        # This prevents quiet menus/outros from becoming gameplay candidates.
+        if has_audio_samples and audio_score < 0.42:
+            continue
         if has_audio_samples:
             score = 0.15 + 0.65 * audio_score + 0.20 * scene_score
         else:
@@ -211,6 +215,7 @@ def rank_highlight_windows(
             "event_type": event_type,
             "ranking_components": {
                 "method": "local_audio_scene_v1",
+                "event_type": event_type,
                 "audio_activity": round(audio_score, 4),
                 "scene_proximity": round(scene_score, 4),
                 "audio_samples_available": has_audio_samples,
@@ -231,3 +236,27 @@ def rank_highlight_windows(
         if len(selected) >= max_candidates:
             break
     return sorted(selected, key=lambda item: (-item["ranking_score"], item["start_seconds"]))
+
+
+VISION_RENDER_MIN_SCORE = 0.75
+VISION_RENDER_MIN_CONFIDENCE = 0.75
+VISION_RENDER_ALLOWED_EVENTS = frozenset({"clutch", "elimination", "victory", "near_death", "team_fight", "skill_play"})
+
+
+def is_render_worthy_vision_assessment(assessment: dict) -> bool:
+    """Fail-closed semantic gate for unattended rendering; not a view prediction."""
+    if not isinstance(assessment, dict) or assessment.get("status", "COMPLETED") != "COMPLETED":
+        return False
+    if assessment.get("is_actionable_highlight") not in (True, 1):
+        return False
+    if assessment.get("event_type") not in VISION_RENDER_ALLOWED_EVENTS:
+        return False
+    for field, threshold in (("highlight_score", VISION_RENDER_MIN_SCORE), ("confidence", VISION_RENDER_MIN_CONFIDENCE)):
+        value = assessment.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or float(value) < threshold:
+            return False
+    issues = assessment.get("quality_issues", [])
+    if not isinstance(issues, list) or issues:
+        return False
+    evidence = assessment.get("evidence", [])
+    return isinstance(evidence, list) and any(isinstance(item, str) and item.strip() for item in evidence)
