@@ -177,3 +177,67 @@ def test_custom_thumbnail_art_is_vertical_title_led_and_hash_verified(tmp_path):
     assert result["file_size"]<=result["max_bytes"]
     import hashlib
     assert hashlib.sha256(output.read_bytes()).hexdigest()==result["sha256"]
+
+
+def test_local_narration_draft_is_evidence_linked_and_unreviewed(monkeypatch):
+    import json
+    import app.script_writer as writer
+    monkeypatch.setenv("GCF_ENABLE_SCRIPT_DRAFTING","true")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_BASE_URL","http://127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_MODEL","test-local-model")
+    result={
+        "script":"Watch this angle, then reset.",
+        "hook":"Watch this angle.",
+        "evidence_used":[{"ref":"transcript:4","quote":"Watch this angle"}],
+        "unsupported_claims":[],
+    }
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"message":{"content":json.dumps(result)}}
+    captured={}
+    def fake_post(url,**kwargs):
+        captured["url"]=url
+        captured["body"]=kwargs["json"]
+        return Response()
+    generated=writer.generate_narration_draft(
+        game="Valorant",
+        source_title="Ranked match",
+        candidate_duration=13,
+        transcript_segments=[{"segment_index":4,"start_seconds":2.1,"end_seconds":3.4,"text":"Watch this angle","confidence":0.9}],
+        http_post=fake_post,
+    )
+    assert generated["script"]==result["script"]
+    assert generated["status"]=="GENERATED_UNREVIEWED"
+    assert generated["owner_review_required"] is True
+    assert generated["automatic_synthesis"] is False
+    assert generated["evidence_used"]==[{"ref":"transcript:4","quote":"Watch this angle"}]
+    assert captured["body"]["stream"] is False
+    assert captured["body"]["options"]["temperature"]==0
+
+def test_local_narration_draft_rejects_model_invented_evidence_refs(monkeypatch):
+    import json
+    import app.script_writer as writer
+    from app.script_writer import ScriptDraftError
+    monkeypatch.setenv("GCF_ENABLE_SCRIPT_DRAFTING","true")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_BASE_URL","http://127.0.0.1:11434/api/chat")
+    payload={"script":"A guaranteed ace!","hook":"A guaranteed ace",
+             "evidence_used":[{"ref":"transcript:99","quote":"ace"}],"unsupported_claims":[]}
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"message":{"content":json.dumps(payload)}}
+    with pytest.raises(ScriptDraftError,match="not present"):
+        writer.generate_narration_draft(
+            game="Valorant",source_title="Match",candidate_duration=10,
+            transcript_segments=[{"segment_index":1,"start_seconds":1,"end_seconds":2,"text":"Nice angle"}],
+            http_post=lambda *args,**kwargs:Response(),
+        )
+
+def test_local_narration_draft_is_disabled_by_default(monkeypatch):
+    import app.script_writer as writer
+    from app.script_writer import ScriptDraftNotConfigured
+    monkeypatch.delenv("GCF_ENABLE_SCRIPT_DRAFTING",raising=False)
+    with pytest.raises(ScriptDraftNotConfigured,match="disabled"):
+        writer.generate_narration_draft(
+            game="Valorant",source_title="Match",candidate_duration=10,
+            transcript_segments=[{"segment_index":1,"start_seconds":1,"end_seconds":2,"text":"Nice angle"}],
+        )
