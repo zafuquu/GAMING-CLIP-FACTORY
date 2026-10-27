@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event, session
 from .integrations.twitch import TwitchHelix
+from .integrations.twitch_download import TwitchClipDownloader, TwitchClipDownloadError
+from .twitch_user_auth import TwitchUserNotConfigured
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, ThumbnailUploadError, set_custom_thumbnail, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
@@ -255,6 +257,8 @@ class Worker(threading.Thread):
                 self.analyze_candidate_vision(job)
             elif job["job_type"] == "DISCOVER_TWITCH_CLIPS":
                 self.discover_twitch(job)
+            elif job["job_type"] == "DOWNLOAD_TWITCH_CLIP":
+                self.download_twitch_clip(job)
             elif job["job_type"] == "DISCOVER_YOUTUBE_VIDEOS":
                 self.discover_youtube(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
@@ -548,6 +552,19 @@ class Worker(threading.Thread):
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("FFmpeg/FFprobe not configured.")
         payload=json.loads(job["payload_json"] or "{}")
+        render_engine=os.getenv("GCF_RENDER_ENGINE","ffmpeg").strip().lower()
+        if render_engine not in {"ffmpeg","remotion"}:
+            raise RuntimeError("Unsupported GCF_RENDER_ENGINE. Choose 'ffmpeg' or 'remotion'.")
+        remotion_node=None
+        remotion_script=None
+        if render_engine=="remotion":
+            remotion_node=os.getenv("GCF_NODE_PATH") or shutil.which("node")
+            project_root=Path(os.getenv("GCF_PROJECT_ROOT") or Path(__file__).resolve().parents[2]).expanduser().resolve()
+            remotion_script=Path(os.getenv("GCF_REMOTION_SCRIPT_PATH") or project_root/"remotion"/"render.mjs").expanduser().resolve()
+            if not remotion_node:
+                raise RuntimeError("Remotion rendering requires Node.js. Install Node.js 20.19+ or 22.13+ and run scripts\\setup-remotion.bat.")
+            if not remotion_script.is_file():
+                raise RuntimeError(f"Remotion renderer entry point was not found: {remotion_script}. Run scripts\\setup-remotion.bat and check GCF_PROJECT_ROOT.")
         cid=payload.get("candidate_id")
         if not cid:
             raise RuntimeError("Render job is missing candidate_id.")
@@ -592,8 +609,8 @@ class Worker(threading.Thread):
             narration_path=None
             narration_duration=None
             narration_sha=None
-            narration_requested=bool(row["narration_audio_status"] and row["narration_audio_status"] in {"QUEUED","SYNTHESIZING"})
-            if row["narration_audio_status"]=="READY":
+            narration_requested=bool(render_engine!="remotion" and row["narration_audio_status"] and row["narration_audio_status"] in {"QUEUED","SYNTHESIZING"})
+            if render_engine!="remotion" and row["narration_audio_status"]=="READY":
                 if not row["narration_audio_path"] or not row["narration_audio_sha256"]:
                     raise RuntimeError("Narration is marked READY but its audio artifact is missing from the content plan.")
                 narration_path=Path(row["narration_audio_path"]).resolve()
@@ -614,7 +631,7 @@ class Worker(threading.Thread):
                 if narration_duration>end-start+0.25:
                     raise ValueError(f"Narration takes {narration_duration:.1f}s but this clip is only {end-start:.1f}s. Shorten the script or select a longer candidate.")
                 narration_sha=audio_hash.hexdigest()
-            elif narration_requested:
+            elif render_engine!="remotion" and narration_requested:
                 raise RuntimeError("Narration synthesis is still in progress; wait for READY before rendering the voiceover.")
             output_dir=self.db.parent/"outputs"
             output_dir.mkdir(parents=True,exist_ok=True)
@@ -626,6 +643,7 @@ class Worker(threading.Thread):
             caption_path=None
             captions_burned=False
             caption_filter_warning=False
+            remotion_captions=[]
             render_profile=str(payload.get("render_profile","fit_pad"))
             subtitle_filter=None
             if caption_rows:
@@ -637,12 +655,17 @@ class Worker(threading.Thread):
                     cap_end=min(end,float(cap["end_seconds"]))-start
                     text_line=str(cap["text"]).replace("-->","→").replace("\r"," ").replace("\n"," ").strip()
                     if not text_line or cap_end<=cap_start: continue
+                    remotion_captions.append({
+                        "startFrame": max(0,int(cap_start*30)),
+                        "endFrame": max(1,int(cap_end*30+0.999)),
+                        "text": text_line[:500],
+                    })
                     cap_index+=1
                     blocks.append(f"{cap_index}\n{srt_time(cap_start)} --> {srt_time(cap_end)}\n{text_line}\n")
                 if blocks:
                     with caption_path.open("x",encoding="utf-8",newline="\n") as sidecar:
                         sidecar.write("\n".join(blocks))
-                    if os.getenv("GCF_BURN_CAPTIONS","true").lower()=="true":
+                    if render_engine=="ffmpeg" and os.getenv("GCF_BURN_CAPTIONS","true").lower()=="true":
                         filters=run([self.ffmpeg,"-hide_banner","-filters"],15)
                         if " subtitles " in filters.stdout or re.search(r"\bsubtitles\s+V->V",filters.stdout):
                             escaped=escape_filter_path(caption_path)
@@ -685,13 +708,37 @@ class Worker(threading.Thread):
                 else:
                     args += ["-map","0:a?"]
             args += ["-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
+            remotion_props_path=None
             try:
-                run(args,self.timeout)
+                if render_engine=="remotion":
+                    remotion_props_path=output_dir/(".remotion-props-"+uuid4().hex+".json")
+                    remotion_props={
+                        "sourcePath":str(source),
+                        "outputPath":str(output),
+                        "startSeconds":start,
+                        "durationSeconds":end-start,
+                        "profile":render_profile,
+                        "captions":remotion_captions,
+                    }
+                    with remotion_props_path.open("x",encoding="utf-8",newline="\n") as props_file:
+                        json.dump(remotion_props,props_file,ensure_ascii=False)
+                    try:
+                        remotion_timeout=max(self.timeout,min(3600,max(30,int(os.getenv("GCF_REMOTION_TIMEOUT_SECONDS","900")))))
+                    except (TypeError,ValueError):
+                        remotion_timeout=max(self.timeout,900)
+                    run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],remotion_timeout)
+                    captions_burned=bool(remotion_captions)
+                else:
+                    run(args,self.timeout)
             except Exception:
                 # Failed/timed-out encodes must not leave an untracked partial MP4 behind.
                 try: output.unlink(missing_ok=True)
                 except OSError: pass
                 raise
+            finally:
+                if remotion_props_path is not None:
+                    try: remotion_props_path.unlink(missing_ok=True)
+                    except OSError: pass
             try:
                 source_stat_after=source.stat()
             except OSError:
@@ -745,38 +792,39 @@ class Worker(threading.Thread):
                     h.update(block)
             warnings=list(review_flags)
             if not audio and not source_has_audio: warnings.append("Source had no audio stream.")
-            # Create a local portrait poster from the completed render for dashboard/review use.
-            # This image is a local preview asset, not a YouTube custom-thumbnail upload.
             thumbnail=output.with_suffix(".thumbnail.jpg")
             thumbnail_path=None
             thumbnail_hash=None
             thumbnail_width=None
             thumbnail_height=None
             thumbnail_error=None
-            try:
-                sample_time=max(0.0,min(max(0.0,duration-0.05),duration/2.0))
-                thumb_filter="scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black"
-                run([self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{sample_time:.3f}","-i",str(output),"-frames:v","1","-map","0:v:0","-vf",thumb_filter,"-q:v","2",str(thumbnail)],min(self.timeout,60))
-                if not thumbnail.is_file() or thumbnail.stat().st_size<=0:
-                    raise RuntimeError("FFmpeg did not produce a nonempty poster image.")
-                thumb_probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams",str(thumbnail)],min(30,self.timeout))
-                thumb_data=json.loads(thumb_probe.stdout)
-                thumb_video=next((x for x in thumb_data.get("streams",[]) if x.get("codec_type")=="video"),None)
-                if not thumb_video or thumb_video.get("width")!=720 or thumb_video.get("height")!=1280:
-                    raise RuntimeError("Poster image failed the expected 720x1280 dimension check.")
-                th=hashlib.sha256()
-                with thumbnail.open("rb") as image_file:
-                    for block in iter(lambda:image_file.read(1024*1024),b""): th.update(block)
-                thumbnail_path=str(thumbnail)
-                thumbnail_hash=th.hexdigest()
-                thumbnail_width=int(thumb_video["width"])
-                thumbnail_height=int(thumb_video["height"])
-            except Exception as exc:
-                thumbnail_error=f"{type(exc).__name__}: {str(exc)[:400]}"
-                try: thumbnail.unlink(missing_ok=True)
-                except OSError: pass
-                warnings.append("local_thumbnail_generation_failed")
-            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
+            if render_engine=="ffmpeg":
+                # Create a local portrait poster from the completed render for dashboard/review use.
+                # This image is a local preview asset, not a YouTube custom-thumbnail upload.
+                try:
+                    sample_time=max(0.0,min(max(0.0,duration-0.05),duration/2.0))
+                    thumb_filter="scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black"
+                    run([self.ffmpeg,"-hide_banner","-nostdin","-n","-ss",f"{sample_time:.3f}","-i",str(output),"-frames:v","1","-map","0:v:0","-vf",thumb_filter,"-q:v","2",str(thumbnail)],min(self.timeout,60))
+                    if not thumbnail.is_file() or thumbnail.stat().st_size<=0:
+                        raise RuntimeError("FFmpeg did not produce a nonempty poster image.")
+                    thumb_probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams",str(thumbnail)],min(30,self.timeout))
+                    thumb_data=json.loads(thumb_probe.stdout)
+                    thumb_video=next((x for x in thumb_data.get("streams",[]) if x.get("codec_type")=="video"),None)
+                    if not thumb_video or thumb_video.get("width")!=720 or thumb_video.get("height")!=1280:
+                        raise RuntimeError("Poster image failed the expected 720x1280 dimension check.")
+                    th=hashlib.sha256()
+                    with thumbnail.open("rb") as image_file:
+                        for block in iter(lambda:image_file.read(1024*1024),b""): th.update(block)
+                    thumbnail_path=str(thumbnail)
+                    thumbnail_hash=th.hexdigest()
+                    thumbnail_width=int(thumb_video["width"])
+                    thumbnail_height=int(thumb_video["height"])
+                except Exception as exc:
+                    thumbnail_error=f"{type(exc).__name__}: {str(exc)[:400]}"
+                    try: thumbnail.unlink(missing_ok=True)
+                    except OSError: pass
+                    warnings.append("local_thumbnail_generation_failed")
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"render_engine":render_engine,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
             # Serialize the final authorization check with permission revocation and record
             # the render plus any automated private-upload intent in the same SQLite transaction.
@@ -862,7 +910,7 @@ class Worker(threading.Thread):
                          "rendered_output_id":out_id,"published_video_id":published_id,"upload_job_id":upload_job_id,
                          "privacy_status":"private","public_release_scheduled":False,"per_media_upload_cap":1})
             summary={"rendered_output_id":out_id,"output_path":str(output),"file_size":output.stat().st_size,"sha256":h.hexdigest(),"qc_status":qc_status,"qc_report":report,
-                "automatic_private_upload_queued":auto_private_upload_queued}
+                "automatic_private_upload_queued":auto_private_upload_queued,"render_engine":render_engine}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO" if qc_status=="PASS" else "WARNING","render.qc_passed" if qc_status=="PASS" else "render.qc_review_required","Candidate rendered; deterministic QC status is "+qc_status+".",{"job_id":job["id"],"candidate_id":cid,"output_id":out_id,"duration_seconds":duration,"warnings":warnings,"automatic_private_upload_queued":auto_private_upload_queued})
             c.commit()
@@ -899,6 +947,81 @@ class Worker(threading.Thread):
             c.execute("UPDATE settings SET value=?,updated_at=? WHERE key='twitch_discovery_next_at'",(next_time,t))
             event(c,"INFO","discovery.scheduled_job_queued","Scheduled Twitch metadata discovery job queued.",{"job_id":jid,"queries":queries,"next_run":next_time})
             c.commit()
+        finally:
+            c.close()
+
+    def download_twitch_clip(self, job):
+        """Fetch one Twitch clip through the official API after a fresh rights check."""
+        payload=json.loads(job["payload_json"] or "{}")
+        sid=str(payload.get("source_id") or job["source_id"] or "")
+        if not sid:
+            raise ValueError("Twitch clip download job is missing source_id.")
+        if not self.ffprobe:
+            raise RuntimeError("FFprobe is required to verify downloaded Twitch clips.")
+        c=connect(self.db)
+        destination=None
+        try:
+            row=c.execute("""SELECT s.id,s.source_url,s.title,s.game,s.platform,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not row:
+                raise FileNotFoundError("Twitch source no longer exists.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked Twitch download: current AUTHORIZED permission is required.")
+            source_url=str(row["source_url"])
+            from .integrations.twitch_download import clip_slug_from_url
+            slug=clip_slug_from_url(source_url)
+            downloader=TwitchClipDownloader()
+            destination_dir=self.media_root/"downloads"
+            destination_dir.mkdir(parents=True,exist_ok=True)
+            destination=destination_dir/f"twitch_{slug}_{uuid4().hex[:12]}.mp4"
+            details=downloader.download(source_url,destination)
+            if not destination.is_file() or destination.stat().st_size<=0:
+                raise RuntimeError("Twitch download did not create a nonempty local file.")
+            probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(destination)],min(60,self.timeout))
+            probe_data=json.loads(probe.stdout)
+            streams=probe_data.get("streams") or []
+            video=next((stream for stream in streams if stream.get("codec_type")=="video"),None)
+            if not video:
+                raise RuntimeError("Downloaded Twitch file has no valid video stream.")
+            duration=float((probe_data.get("format") or {}).get("duration") or 0)
+            if duration<=0 or duration>180:
+                raise RuntimeError("Downloaded Twitch clip duration was invalid or unexpectedly exceeded 180 seconds.")
+            digest=hashlib.sha256()
+            with destination.open("rb") as handle:
+                for block in iter(lambda:handle.read(1024*1024),b""):
+                    digest.update(block)
+            file_hash=digest.hexdigest()
+            source_stat=destination.stat()
+            c.execute("BEGIN IMMEDIATE")
+            latest=c.execute("""SELECT s.source_url,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not latest or latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights gate blocked Twitch download persistence: source permission was revoked or expired.")
+            if latest["source_url"]!=source_url:
+                raise PermissionError("Twitch source URL changed during download; the media was not registered.")
+            duplicate=c.execute("SELECT id FROM media_assets WHERE source_id=? AND sha256=?",(sid,file_hash)).fetchone()
+            if duplicate:
+                raise ValueError("This exact Twitch clip file is already registered for the source.")
+            mid=str(uuid4()); stamp=now()
+            c.execute("""INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,probe_json,state,created_at)
+                VALUES(?,?,?,?,?,?,?,'IMPORTED',?)""",
+                (mid,sid,str(destination),destination.name,source_stat.st_size,file_hash,json.dumps(probe_data),stamp))
+            summary={"media_id":mid,"source_id":sid,"source_url":source_url,"file_name":destination.name,
+                "file_size":source_stat.st_size,"sha256":file_hash,"duration_seconds":duration,
+                "width":video.get("width"),"height":video.get("height"),"download_provider":"twitch_official_clips_api",
+                "clip_id":details.get("clip_id"),"broadcaster_id":details.get("broadcaster_id"),
+                "broadcaster_name":details.get("broadcaster_name"),"rights_rechecked":True}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                (json.dumps(summary),stamp,stamp,job["id"]))
+            event(c,"INFO","media.twitch_clip_downloaded","Official Twitch clip downloaded and registered as local media.",{"job_id":job["id"],**summary})
+            c.commit()
+        except Exception:
+            if c.in_transaction:
+                c.rollback()
+            if destination is not None:
+                try: destination.unlink(missing_ok=True)
+                except OSError: pass
+            raise
         finally:
             c.close()
 
