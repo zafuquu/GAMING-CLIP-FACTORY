@@ -5,7 +5,7 @@
 - React/TypeScript/Vite dashboard reads API data; SQLite is authoritative.
 - FastAPI binds to 127.0.0.1:8765 by default.
 - SQLite stores source rights, media assets, candidates, jobs, transcripts, content plans, captions, rendered outputs/posters, publishing records, Analytics snapshots, settings/schedules, discovery runs and system events.
-- Numbered migrations 001–018 are checked for unique version numbers and applied atomically with the schema-version marker. Migration tests cover duplicate numbering and rollback of a broken migration.
+- Numbered migrations 001–020 are checked for unique version numbers and applied atomically with the schema-version marker. Migration tests cover duplicate numbering and rollback of a broken migration.
 - A single worker consumes persistent jobs. Persisted discovery and Analytics schedules are checked every worker cycle before queue claims, so a busy job queue cannot starve scheduled runs; scheduler faults are logged without blocking local work. Critical queue admission/publication transitions use immediate SQLite write locks. FFmpeg subprocesses use argument arrays, shell=False and finite timeouts.
 - Restart recovery requeues interrupted local processing but marks uncertain external YouTube operations RECONCILE_REQUIRED instead of blindly retrying.
 
@@ -18,7 +18,7 @@ Twitch Helix and YouTube Data API return public metadata only; they do not downl
 1. Register authorized local media under the managed media root and record SHA-256.
 2. FFprobe extracts technical metadata.
 3. FFmpeg scene-change analysis creates candidate intervals marked NEEDS_REVIEW. Scene changes are heuristics, not evidence of gameplay meaning.
-4. Optional Faster-Whisper creates local speech transcripts and timestamps.
+4. Optional Faster-Whisper creates local speech transcripts and timestamps. Re-transcription rechecks rights and file identity after the subprocess; existing content plans and captions marked as owner-edited are not overwritten.
 5. Deterministic content planning uses source metadata/transcript evidence and does not invent narration or unsupported gameplay events.
 6. Optional local vision analysis samples 3 or 5 frames (default 5), passes candidate-relative timestamps with the images, and stores structured visible-event/evidence estimates, source timestamps and relative offsets. Scores are uncalibrated and it never auto-approves.
 7. By default, the owner edits captions and approves/rejects each candidate. For an explicitly opted-in authorized folder watch, supervised auto-production may auto-approve and render at most three scene-change candidates per media file after checking the watch, pause state and current source rights. This is a convenience batch, not semantic highlight approval: scene changes are uncalibrated, and the finished local clips still require owner quality review.
