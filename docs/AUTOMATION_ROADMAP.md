@@ -16,7 +16,10 @@ This roadmap separates code that exists from owner configuration and live accept
 - Public release begins from a private upload, rechecks current rights, output hash/size/QC, processing state and scheduled time; owners can cancel/reschedule.
 - Global pause checks queue admission and outbound YouTube mutations. Queue transitions use immediate SQLite write locks; a partial unique index prevents multiple publication records for one render.
 - Migration runner rejects duplicate version numbers and atomically commits each migration with its version marker; tests cover rollback/duplicate numbers.
-- Latest verified hosted CI run 40437190729 on commit `bdcab795` passed all five jobs (Windows/Linux, Python 3.11/3.12, frontend build). Ubuntu/Python 3.12 reported 130 passed and 1 warning; Ubuntu/Python 3.11 reported 130 passed and 2 warnings, including FFmpeg media integration. https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40437190729.
+- One-click Windows launcher checks supported runtimes and dependency health, creates the safe default environment file, builds the optimized dashboard, starts/reuses the loopback API, verifies the dashboard route and reports readiness. The API can serve the built React bundle from the same process; the separate Vite server remains available for development.
+- Runtime readiness reports SQLite health, executable FFmpeg/FFprobe version checks, writable media/database/output folders and background-worker liveness. Worker error reporting no longer lets a secondary database/logging failure terminate the worker loop.
+- Scheduled public release now rechecks current permission state, schedule, publishing-policy flags, output linkage, QC, file size/hash and global pause after the remote YouTube status lookup and before the public-state mutation. Rights revocation, output mutation and rescheduling during the lookup have regression tests.
+- Pre-hardening baseline: hosted CI run 40437498235 on commit `0df6b1d` passed all five jobs (Windows/Linux, Python 3.11/3.12, frontend build). The production-hardening branch has its own PR validation; do not treat the baseline run as evidence that the newly added launcher and gate tests passed. https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40437498235.
 
 ## Configuration required
 

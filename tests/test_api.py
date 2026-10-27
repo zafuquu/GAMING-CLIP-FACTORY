@@ -30,6 +30,104 @@ def test_health_and_empty_dashboard(tmp_path):
     d=c.get("/api/dashboard").json()
     assert d["counts"]["sources_total"]==0 and d["counts"]["published_videos"]==0
     c.__exit__(None,None,None)
+def test_built_dashboard_is_served_by_local_api(tmp_path):
+    root=tmp_path/"project"
+    dist=root/"frontend"/"dist"
+    dist.mkdir(parents=True)
+    (dist/"index.html").write_text("<!doctype html><html><body>GCF production dashboard</body></html>",encoding="utf-8")
+    data=root/"data"
+    cfg=Settings(root,data,data/"media",data/"test.sqlite3",None,None,5)
+    with TestClient(create_app(settings=cfg,start_worker=False)) as c:
+        home=c.get("/")
+        assert home.status_code==200,home.text
+        assert "GCF production dashboard" in home.text
+        health=c.get("/api/health")
+        assert health.status_code==200,health.text
+        assert health.json()["status"]=="ok"
+
+def test_worker_survives_when_failure_event_cannot_be_written(tmp_path,monkeypatch):
+    from app.worker import Worker
+    import app.worker as worker_module
+
+    worker=Worker(tmp_path/"missing"/"worker.sqlite3",None,None,5)
+    attempts=[]
+    def failing_work():
+        attempts.append("attempted")
+        raise RuntimeError("simulated worker failure")
+    worker.one=failing_work
+
+    class StopAfterWait:
+        stopped=False
+        def is_set(self):
+            return self.stopped
+        def wait(self,timeout=None):
+            self.stopped=True
+            return True
+        def set(self):
+            self.stopped=True
+
+    worker.stop_event=StopAfterWait()
+    def unavailable_database(_path):
+        raise sqlite3.OperationalError("simulated database outage")
+    monkeypatch.setattr(worker_module,"connect",unavailable_database)
+    # Must swallow the secondary logging failure, wait, and stop cleanly instead of
+    # letting an exception escape the worker thread and permanently killing automation.
+    worker.run()
+    assert attempts==["attempted"]
+    assert worker.stop_event.is_set()
+
+def test_readiness_reports_missing_media_toolchain(tmp_path):
+    c,_=setup_client(tmp_path)
+    response=c.get("/api/readiness")
+    assert response.status_code==200,response.text
+    payload=response.json()
+    assert payload["ready"] is False
+    assert payload["status"]=="degraded"
+    assert payload["checks"]["database"]["ready"] is True
+    assert payload["checks"]["worker"]["enabled"] is False
+    assert payload["checks"]["worker"]["required"] is False
+    assert payload["checks"]["ffmpeg"]["ready"] is False
+    assert payload["checks"]["ffprobe"]["ready"] is False
+    assert payload["checks"]["database_directory"]["ready"] is True
+    assert payload["checks"]["media_root"]["ready"] is True
+    assert payload["checks"]["output_directory"]["ready"] is True
+    c.__exit__(None,None,None)
+
+def test_readiness_reports_live_background_worker(tmp_path):
+    root=tmp_path/"worker-ready-project"
+    data=root/"data"
+    cfg=Settings(root,data,data/"media",data/"test.sqlite3",None,None,5)
+    with TestClient(create_app(settings=cfg,start_worker=True)) as c:
+        response=c.get("/api/readiness")
+        assert response.status_code==200,response.text
+        payload=response.json()
+        assert payload["ready"] is False  # Missing FFmpeg/FFprobe still block full readiness.
+        assert payload["checks"]["worker"]["enabled"] is True
+        assert payload["checks"]["worker"]["required"] is True
+        assert payload["checks"]["worker"]["ready"] is True
+
+
+def test_readiness_reports_healthy_media_toolchain(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    root=tmp_path/"ready-project"; data=root/"data"; media=data/"media"
+    cfg=Settings(root,data,media,data/"test.sqlite3","ffmpeg-test","ffprobe-test",5)
+    def fake_run(args,**kwargs):
+        assert args[1]=="-version"
+        assert kwargs.get("shell") is False
+        return SimpleNamespace(returncode=0,stdout=f"{args[0]} version 7.1.2",stderr="")
+    monkeypatch.setattr("app.main.subprocess.run",fake_run)
+    with TestClient(create_app(settings=cfg,start_worker=False)) as c:
+        response=c.get("/api/readiness")
+        assert response.status_code==200,response.text
+        payload=response.json()
+        assert payload["ready"] is True
+        assert payload["status"]=="ready"
+        assert payload["checks"]["worker"]["enabled"] is False
+        assert payload["checks"]["worker"]["ready"] is True
+        assert payload["checks"]["ffmpeg"]["version"]=="ffmpeg-test version 7.1.2"
+        assert payload["checks"]["ffprobe"]["version"]=="ffprobe-test version 7.1.2"
+        assert all(payload["checks"][k]["ready"] for k in ("database","ffmpeg","ffprobe","database_directory","media_root","output_directory"))
+
 def test_new_source_starts_unknown_and_duplicate_blocked(tmp_path):
     c,_=setup_client(tmp_path); sid=add_source(c)
     assert c.get("/api/sources").json()[0]["rights_status"]=="UNKNOWN"

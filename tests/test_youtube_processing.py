@@ -236,6 +236,69 @@ def test_scheduled_public_worker_publishes_only_after_all_live_gates_pass(tmp_pa
     assert fake.video_api.updates[0]["body"]["status"]["privacyStatus"]=="public"
     client.__exit__(None,None,None)
 
+@pytest.mark.parametrize("mutation,expected_status",[
+    ("rights","BLOCKED_RIGHTS"),
+    ("output","BLOCKED_QC"),
+])
+def test_scheduled_public_worker_rechecks_rights_and_artifact_after_remote_read(tmp_path,monkeypatch,mutation,expected_status):
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    output,sha,render_id=_attach_render_for_public_release(tmp_path,cfg,pub_id,sid,mid)
+    _enable_public_release(tmp_path,monkeypatch,cfg)
+    scheduled=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(scheduled.isoformat(),pub_id))
+    fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
+    original_list=fake.video_api.list
+    def list_then_mutate(**kwargs):
+        result=original_list(**kwargs)
+        if mutation=="rights":
+            with sqlite3.connect(cfg.database_path) as db:
+                db.execute("UPDATE source_permissions SET status='REVOKED' WHERE source_id=?",(sid,))
+        else:
+            output.write_bytes(b"content changed during live YouTube status verification")
+        return result
+    fake.video_api.list=list_then_mutate
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
+    _public_job(cfg,pub_id,scheduled)
+    with pytest.raises(PermissionError,match="rights|hash|size"):
+        Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":scheduled.isoformat()})})
+    with sqlite3.connect(cfg.database_path) as db:
+        status=db.execute("SELECT publishing_status FROM published_videos WHERE id=?",(pub_id,)).fetchone()[0]
+    assert status==expected_status
+    assert fake.video_api.updates==[]
+    client.__exit__(None,None,None)
+
+
+def test_scheduled_public_worker_respects_reschedule_during_remote_read(tmp_path,monkeypatch):
+    client,cfg,pub_id,sid,mid=_fixture(tmp_path)
+    _attach_render_for_public_release(tmp_path,cfg,pub_id,sid,mid)
+    _enable_public_release(tmp_path,monkeypatch,cfg)
+    past=datetime.now(timezone.utc)-__import__("datetime").timedelta(minutes=1)
+    future=datetime.now(timezone.utc)+__import__("datetime").timedelta(hours=2)
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(past.isoformat(),pub_id))
+    fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
+    original_list=fake.video_api.list
+    def list_then_reschedule(**kwargs):
+        result=original_list(**kwargs)
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute("UPDATE published_videos SET scheduled_publish_at=? WHERE id=?",(future.isoformat(),pub_id))
+        return result
+    fake.video_api.list=list_then_reschedule
+    monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
+    _public_job(cfg,pub_id,past)
+    Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":past.isoformat()})})
+    with sqlite3.connect(cfg.database_path) as db:
+        state=db.execute("SELECT publishing_status,scheduled_publish_at FROM published_videos WHERE id=?",(pub_id,)).fetchone()
+        job=db.execute("SELECT status,next_attempt_at FROM jobs WHERE id='public-release-job'").fetchone()
+    assert state[0]=="SCHEDULED"
+    assert datetime.fromisoformat(state[1])>=future
+    assert job[0]=="QUEUED"
+    assert datetime.fromisoformat(job[1])>=future
+    assert fake.video_api.updates==[]
+    client.__exit__(None,None,None)
+
+
 def test_scheduled_public_worker_does_not_mutate_remote_before_scheduled_time(tmp_path,monkeypatch):
     client,cfg,pub_id,sid,mid=_fixture(tmp_path)
     _attach_render_for_public_release(tmp_path,cfg,pub_id,sid,mid)

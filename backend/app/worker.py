@@ -48,14 +48,34 @@ class Worker(threading.Thread):
         super().__init__(daemon=True,name="gcf-worker"); self.db=Path(db).resolve(); self.ffmpeg=ffmpeg; self.ffprobe=ffprobe; self.timeout=timeout; self.media_root=Path(media_root or (self.db.parent/"media")).expanduser().resolve(); self.stop_event=threading.Event()
     def stop(self): self.stop_event.set()
     def run(self):
+        """Run one worker loop and survive transient failures in both work and error logging."""
         while not self.stop_event.is_set():
-            try: worked=self.one()
-            except Exception as e:
-                c=connect(self.db)
-                try: event(c,"ERROR","worker.error",str(e)); c.commit()
-                finally: c.close()
-                worked=False
-            if not worked: self.stop_event.wait(1)
+            try:
+                worked = self.one()
+            except Exception as exc:
+                worked = False
+                try:
+                    c = connect(self.db)
+                    try:
+                        event(c, "ERROR", "worker.error", str(exc)[:3000],
+                              {"error_type": type(exc).__name__})
+                        c.commit()
+                    finally:
+                        c.close()
+                except Exception as log_exc:
+                    # A storage/database outage must not terminate the worker thread just
+                    # because it also prevents writing the failure event. The next loop
+                    # retries storage checks; startup recovery handles any RUNNING job.
+                    print(
+                        "[gcf-worker] operation failed "
+                        f"({type(exc).__name__}: {str(exc)[:500]}); "
+                        "could not persist event "
+                        f"({type(log_exc).__name__}: {str(log_exc)[:500]}).",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            if not worked:
+                self.stop_event.wait(1)
     def check_storage_safety(self):
         """Fail closed on low/unreadable output-volume capacity; recovery never auto-resumes work."""
         enabled=os.getenv("GCF_DISK_SAFETY_ENABLED","true").strip().lower()=="true"
@@ -1159,6 +1179,75 @@ class Worker(threading.Thread):
             if row["remote_processing_status"]!="succeeded":
                 # Keep remote processing state as a recorded precondition; the live query above is authoritative.
                 c.execute("UPDATE published_videos SET remote_processing_status='succeeded',processing_checked_at=?,updated_at=? WHERE id=?",(now(),now(),published_id))
+                c.commit()
+
+            # Remote reads take time. Re-query every mutable local safety gate after that
+            # network round-trip and immediately before the non-idempotent public mutation.
+            latest=c.execute("""SELECT pv.publishing_status,pv.scheduled_publish_at,pv.qc_status AS publication_qc,
+                pv.output_path AS publication_path,ro.output_path AS render_path,ro.qc_status AS render_qc,
+                ro.sha256 AS render_sha,ro.file_size AS render_size,p.status AS rights_status,p.expires_at
+                FROM published_videos pv
+                JOIN rendered_outputs ro ON ro.id=pv.rendered_output_id
+                JOIN media_assets m ON m.id=ro.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id
+                WHERE pv.id=?""",(published_id,)).fetchone()
+            if not latest:
+                raise FileNotFoundError("Publication, render or rights record disappeared before public release.")
+            if latest["publishing_status"] not in {"SCHEDULED","PROCESSING"} or not latest["scheduled_publish_at"]:
+                raise PermissionError("Scheduled public release was cancelled or disabled before the remote state change.")
+            try:
+                latest_scheduled=datetime.fromisoformat(latest["scheduled_publish_at"].replace("Z","+00:00"))
+            except (ValueError,TypeError) as exc:
+                raise PermissionError("Scheduled publication timestamp became invalid before the remote state change.") from exc
+            if latest_scheduled.tzinfo is None:
+                latest_scheduled=latest_scheduled.replace(tzinfo=timezone.utc)
+            if latest_scheduled>datetime.now(timezone.utc):
+                due=latest_scheduled.astimezone(timezone.utc).isoformat(timespec="microseconds")
+                stamp=now()
+                c.execute("UPDATE jobs SET status='QUEUED',error='Publication was rescheduled during remote verification; waiting for the new scheduled time.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(stamp,due,job["id"]))
+                event(c,"INFO","youtube.publication_rescheduled_before_mutation","The public release was deferred because its current schedule is now in the future.",{"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
+            if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_RIGHTS',scheduled_publish_at=NULL,processing_failure_reason='Rights were revoked or expired before public release.',updated_at=? WHERE id=?",(stamp,published_id))
+                event(c,"ERROR","youtube.publication_blocked_rights","Final pre-mutation check blocked public release because source rights are no longer current.",{"job_id":job["id"],"published_video_id":published_id})
+                c.commit()
+                raise PermissionError("Scheduled publication blocked: source rights were revoked or expired during the remote status check.")
+            if latest["publication_qc"]!="PASS" or latest["render_qc"]!="PASS" or latest["publication_path"]!=latest["render_path"]:
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason='Render/QC linkage changed before public release.',updated_at=? WHERE id=?",(stamp,published_id))
+                event(c,"ERROR","youtube.publication_blocked_qc","Final pre-mutation check blocked public release because render/QC linkage is no longer valid.",{"job_id":job["id"],"published_video_id":published_id})
+                c.commit()
+                raise PermissionError("Scheduled publication blocked: the render/QC linkage changed during the remote status check.")
+            try:
+                final_size=output.stat().st_size
+                if final_size!=latest["render_size"]:
+                    raise PermissionError("Scheduled publication blocked: render size changed immediately before public release.")
+                final_sha=hashlib.sha256()
+                with output.open("rb") as final_stream:
+                    for block in iter(lambda:final_stream.read(1024*1024),b""): final_sha.update(block)
+                if final_sha.hexdigest()!=latest["render_sha"]:
+                    raise PermissionError("Scheduled publication blocked: render hash changed immediately before public release.")
+            except PermissionError as exc:
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason=?,updated_at=? WHERE id=?",(str(exc)[:1000],stamp,published_id))
+                event(c,"ERROR","youtube.publication_blocked_qc","Final pre-mutation artifact integrity check blocked public release.",{"job_id":job["id"],"published_video_id":published_id,"reason":str(exc)[:300]})
+                c.commit()
+                raise
+            except OSError as exc:
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason='Render could not be verified immediately before public release.',updated_at=? WHERE id=?",(stamp,published_id))
+                c.commit()
+                raise PermissionError("Scheduled publication blocked: rendered output could not be verified immediately before release.") from exc
+            enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not enabled or enabled["value"]!="true" or os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()!="true":
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='UPLOADED_PRIVATE',scheduled_publish_at=NULL,updated_at=? WHERE id=?",(stamp,published_id))
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Publishing policy was disabled before the remote state change.',updated_at=?,finished_at=? WHERE id=?",(stamp,stamp,job["id"]))
+                event(c,"WARNING","youtube.publication_disabled_before_mutation","Public release was not attempted because publishing policy was disabled before the remote mutation.",{"job_id":job["id"],"published_video_id":published_id})
+                c.commit()
+                return
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if pause and pause["value"]=="true":
                 t=now()

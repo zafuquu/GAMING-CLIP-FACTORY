@@ -31,7 +31,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## Requirements
 
-- Windows 10/11, Python 3.11+, Node.js/npm.
+- Windows 10/11, Python 3.11+, Node.js 20.19+ or 22.12+, npm.
 - FFmpeg/FFprobe installed separately. The app auto-detects common project-local directories or uses GCF_FFMPEG_PATH/GCF_FFPROBE_PATH.
 - Provider credentials only for integrations you enable.
 
@@ -39,13 +39,11 @@ No API credentials, OAuth files, model weights or FFmpeg binaries are committed.
 
 ## Windows quick start
 
-1. Copy .env.example to .env and keep optional providers/model/public-publishing gates disabled until configured.
-2. Run scripts\setup-windows.bat.
-3. Start backend with scripts\run-backend.bat.
-4. In a second terminal run scripts\run-dashboard.bat.
-5. Open http://127.0.0.1:5173 (or the Vite URL shown). API: http://127.0.0.1:8765; docs: http://127.0.0.1:8765/docs.
+**First run:** install Python 3.11+ and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. It checks prerequisites, creates a default `.env` from `.env.example` if needed, installs missing dependencies, starts the backend/dashboard in separate windows, waits for both services, checks media-toolchain readiness, and opens the dashboard. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the app opens in degraded mode and analysis/rendering remain unavailable until they are installed/configured.
 
-Defaults: data\gaming_clip_factory.sqlite3, media in data\media, render outputs and posters in data\outputs. Keep .env, media/output files, OAuth client JSON and model caches out of Git.
+**Later runs:** double-click `scripts\start.bat` again. To run components separately for debugging, use `scripts\run-backend.bat` and `scripts\run-dashboard.bat`.
+
+Dashboard: http://127.0.0.1:5173; API: http://127.0.0.1:8765; API docs: http://127.0.0.1:8765/docs; liveness: http://127.0.0.1:8765/api/health; readiness report: http://127.0.0.1:8765/api/readiness.
 
 ## Storage safety
 
