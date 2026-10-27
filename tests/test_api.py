@@ -1008,3 +1008,62 @@ def test_scheduled_public_worker_defers_while_youtube_still_processing(tmp_path,
     assert recheck is not None and recheck[0]=="QUEUED"
     assert json.loads(recheck[2])["published_video_id"]==published_id
     client.__exit__(None,None,None)
+
+
+def test_low_disk_safety_pauses_queue_and_requires_manual_resume(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    import app.worker as worker_module
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_DISK_SAFETY_ENABLED","true")
+    monkeypatch.setenv("GCF_MIN_FREE_DISK_GB","3")
+    free={"bytes":2*(1024**3)}
+    monkeypatch.setattr(worker_module.shutil,"disk_usage",lambda path:SimpleNamespace(total=100*(1024**3),used=100*(1024**3)-free["bytes"],free=free["bytes"]))
+    client,_=setup_client(tmp_path)
+    db=client.app.state.settings.database_path
+    worker=Worker(db,None,None,5)
+    assert worker.one() is False
+    with sqlite3.connect(db) as raw:
+        values={key:value for key,value in raw.execute("SELECT key,value FROM settings WHERE key IN ('global_paused','low_disk_pause_active','system_pause_reason','storage_safety_status')")}
+    assert values["global_paused"]=="true"
+    assert values["low_disk_pause_active"]=="true"
+    assert values["system_pause_reason"]=="low_disk"
+    assert values["storage_safety_status"]=="LOW"
+    status=client.get("/api/operations/storage")
+    assert status.status_code==200,status.text
+    assert status.json()["disk_state"]=="LOW"
+    assert status.json()["blocked"] is True
+    assert status.json()["low_disk_pause_active"] is True
+    free["bytes"]=10*(1024**3)
+    assert worker.one() is False
+    with sqlite3.connect(db) as raw:
+        values={key:value for key,value in raw.execute("SELECT key,value FROM settings WHERE key IN ('global_paused','low_disk_pause_active','system_pause_reason','storage_safety_status')")}
+    assert values["storage_safety_status"]=="OK"
+    assert values["low_disk_pause_active"]=="false"
+    assert values["global_paused"]=="true"
+    assert values["system_pause_reason"]=="low_disk_recovered_waiting_for_manual_resume"
+    resumed=client.post("/api/system/pause",json={"paused":False})
+    assert resumed.status_code==200
+    with sqlite3.connect(db) as raw:
+        values={key:value for key,value in raw.execute("SELECT key,value FROM settings WHERE key IN ('global_paused','system_pause_reason')")}
+    assert values["global_paused"]=="false"
+    assert values["system_pause_reason"]==""
+    client.__exit__(None,None,None)
+
+def test_disk_capacity_check_failure_pauses_fail_closed(tmp_path,monkeypatch):
+    import app.worker as worker_module
+    from app.worker import Worker
+    monkeypatch.setenv("GCF_DISK_SAFETY_ENABLED","true")
+    monkeypatch.setenv("GCF_MIN_FREE_DISK_GB","3")
+    def broken_usage(_path):
+        raise OSError("permission denied")
+    monkeypatch.setattr(worker_module.shutil,"disk_usage",broken_usage)
+    client,_=setup_client(tmp_path)
+    db=client.app.state.settings.database_path
+    assert Worker(db,None,None,5).one() is False
+    with sqlite3.connect(db) as raw:
+        values={key:value for key,value in raw.execute("SELECT key,value FROM settings WHERE key IN ('global_paused','low_disk_pause_active','system_pause_reason','storage_safety_status')")}
+    assert values["global_paused"]=="true"
+    assert values["low_disk_pause_active"]=="true"
+    assert values["system_pause_reason"]=="storage_check_failed"
+    assert values["storage_safety_status"]=="ERROR"
+    client.__exit__(None,None,None)
