@@ -49,6 +49,8 @@ if not exist ".env" (
 if not exist ".venv\Scripts\python.exe" goto setup
 ".venv\Scripts\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
 if errorlevel 1 goto setup
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\lock-state.ps1" -Mode test >nul 2>nul
+if errorlevel 1 goto setup
 if not exist "frontend\node_modules\vite\bin\vite.js" goto setup
 ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL" >nul 2>nul
 if errorlevel 1 goto setup
