@@ -67,3 +67,28 @@ def test_invalid_duration_and_candidate_limits_are_rejected():
         rank_highlight_windows(0.0, [], [])
     with pytest.raises(ValueError):
         rank_highlight_windows(10.0, [], [], max_candidates=0)
+
+
+def test_audio_present_but_no_action_spike_does_not_fall_back_to_random_scene_candidates():
+    samples = [(float(t), -25.0) for t in range(90)]
+    assert rank_highlight_windows(90.0, [10.0, 30.0, 60.0], samples) == []
+
+
+def test_unattended_render_requires_strong_evidence_grounded_vision_assessment():
+    from app.highlight_detector import is_render_worthy_vision_assessment
+    good = {"status":"COMPLETED","is_actionable_highlight":True,"event_type":"elimination",
+            "highlight_score":0.88,"confidence":0.84,"quality_issues":[],"evidence":["Visible elimination indicator in HUD"]}
+    assert is_render_worthy_vision_assessment(good)
+    for change in ({"event_type":"ordinary_gameplay"},{"highlight_score":0.74},{"confidence":0.74},
+                   {"is_actionable_highlight":False},{"quality_issues":["outro graphic dominates the final frames"]},
+                   {"evidence":[]},{"status":"FAILED"}):
+        assert not is_render_worthy_vision_assessment({**good, **change})
+
+
+def test_unattended_render_gate_fails_closed_on_malformed_assessments():
+    from app.highlight_detector import is_render_worthy_vision_assessment
+    assert not is_render_worthy_vision_assessment(None)
+    assert not is_render_worthy_vision_assessment({})
+    assert not is_render_worthy_vision_assessment({
+        "status":"COMPLETED","is_actionable_highlight":True,"event_type":"elimination",
+        "highlight_score":float("nan"),"confidence":0.9,"quality_issues":[],"evidence":["HUD"]})
