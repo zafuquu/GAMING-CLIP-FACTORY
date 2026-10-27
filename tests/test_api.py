@@ -30,6 +30,21 @@ def test_health_and_empty_dashboard(tmp_path):
     d=c.get("/api/dashboard").json()
     assert d["counts"]["sources_total"]==0 and d["counts"]["published_videos"]==0
     c.__exit__(None,None,None)
+def test_built_dashboard_is_served_by_local_api(tmp_path):
+    root=tmp_path/"project"
+    dist=root/"frontend"/"dist"
+    dist.mkdir(parents=True)
+    (dist/"index.html").write_text("<!doctype html><html><body>GCF production dashboard</body></html>",encoding="utf-8")
+    data=root/"data"
+    cfg=Settings(root,data,data/"media",data/"test.sqlite3",None,None,5)
+    with TestClient(create_app(settings=cfg,start_worker=False)) as c:
+        home=c.get("/")
+        assert home.status_code==200,home.text
+        assert "GCF production dashboard" in home.text
+        health=c.get("/api/health")
+        assert health.status_code==200,health.text
+        assert health.json()["status"]=="ok"
+
 def test_worker_survives_when_failure_event_cannot_be_written(tmp_path,monkeypatch):
     from app.worker import Worker
     import app.worker as worker_module
