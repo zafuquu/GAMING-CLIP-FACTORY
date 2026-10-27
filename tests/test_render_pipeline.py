@@ -242,6 +242,7 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=72",
             "-filter_complex", "[0:v][1:v][2:v][3:v][4:v][5:v]concat=n=6:v=1:a=0[v]",
             "-map", "[v]", "-map", "6:a", "-t", "72",
+            "-af", "volume=eval=frame:volume='if(between(t\\\\,20\\\\,22)\\\\,18\\\\,0.1)'",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", str(input_path),
         ]
@@ -297,8 +298,9 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             ).fetchone()
         assert analysis_row is not None
 
-        # Step 4 — the real analyzer may automatically queue no more than three render jobs
-        # for this explicitly configured folder. Every render still runs rights/QC gates.
+        # Step 4 — signal-only candidates must never be auto-rendered. This fixture
+        # includes a deliberate audio-energy event, but without a completed semantic
+        # vision assessment it must stay in NEEDS_REVIEW until the owner approves it.
         assert worker.one() is True
         analysis_job = next(
             job for job in client.get("/api/jobs").json()
@@ -306,38 +308,43 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         )
         assert analysis_job["status"] == "COMPLETED", analysis_job.get("error")
         analysis_summary = json.loads(analysis_job["payload_json"])
-        assert analysis_summary["auto_render_queued"] >= 1, analysis_summary
-        assert analysis_summary["auto_render_queued"] <= 3, analysis_summary
+        assert analysis_summary["auto_render_queued"] == 0, analysis_summary
+        assert analysis_summary["ranking_method"] == "local_audio_scene_v1"
+        assert analysis_summary["ranking_calibrated"] is False
 
         candidates = [
             candidate for candidate in client.get("/api/candidates").json()
             if candidate["media_id"] == media_id
         ]
-        assert candidates, "Signal analysis should create ranked candidates for the generated full-frame cuts."
-        assert analysis_summary["ranking_method"] == "local_audio_scene_v1"
-        assert analysis_summary["ranking_calibrated"] is False
+        assert candidates, "The deliberate audio-energy event should produce a review candidate."
         assert all(candidate["detector"] == "local_audio_scene_ranker_v1" for candidate in candidates)
         assert all(candidate["ranking_score"] is not None for candidate in candidates)
-        approved = [candidate for candidate in candidates if candidate["state"] == "APPROVED"]
-        assert len(candidates) >= 4, "Fixture must produce more than the lifetime auto-render cap."
-        assert len(approved) == 3, "Only three of the detected candidates may auto-render for a media file."
-        assert len(approved) == analysis_summary["auto_render_queued"]
-        assert len(approved) <= 3
-        render_jobs = [
+        assert all(candidate["state"] == "NEEDS_REVIEW" for candidate in candidates)
+        assert not [
             job for job in client.get("/api/jobs").json()
-            if job["media_id"] == media_id
-            and job["job_type"] == "RENDER_CANDIDATE"
+            if job["media_id"] == media_id and job["job_type"] == "RENDER_CANDIDATE"
             and job["status"] == "QUEUED"
-        ]
-        assert len(render_jobs) == len(approved)
-        for _ in render_jobs:
-            assert worker.one() is True
+        ], "No candidate may auto-render without passing semantic vision review."
 
+        selected = candidates[0]
+        decision = client.post(
+            f"/api/candidates/{selected['id']}/decision",
+            json={"decision": "approve", "notes": "Owner-approved synthetic acceptance fixture"},
+        )
+        assert decision.status_code == 202, decision.text
+        render_job_id = decision.json()["job_id"]
+        assert worker.one() is True
         final_jobs = {job["id"]: job for job in client.get("/api/jobs").json()}
-        for render_job in render_jobs:
-            assert final_jobs[render_job["id"]]["status"] == "COMPLETED", final_jobs[render_job["id"]].get("error")
+        assert final_jobs[render_job_id]["status"] == "COMPLETED", final_jobs[render_job_id].get("error")
 
-        selected = approved[0]
+        approved = [
+            candidate for candidate in client.get("/api/candidates").json()
+            if candidate["media_id"] == media_id and candidate["state"] == "APPROVED"
+        ]
+        assert any(candidate["id"] == selected["id"] for candidate in approved)
+        render_jobs = [job for job in client.get("/api/jobs").json() if job["id"] == render_job_id]
+        assert len(render_jobs) == 1
+
         render = next(
             output for output in client.get("/api/renders").json()
             if output["candidate_id"] == selected["id"]
@@ -350,46 +357,30 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert Path(render["thumbnail_path"]).is_file()
         assert render["file_size"] == Path(render["output_path"]).stat().st_size
 
-        # Simulate a repeated/recovered analysis job from the same folder watch.
-        # Preserve the watch ID exactly as the actual watcher does in its job payload.
+        # Re-analysis is idempotent and cannot promote heuristic-only candidates.
         repeat_analysis_id = "repeat-auto-render-cap"
-        # Prioritize this synthetic retry over the already-queued private upload so this
-        # assertion tests analysis idempotency without consuming the later upload step.
         repeat_stamp = "2000-01-01T00:00:00+00:00"
         with sqlite3.connect(cfg.database_path) as db:
             db.execute(
                 """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
                    VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
                 (
-                    repeat_analysis_id,
-                    source_id,
-                    media_id,
-                    json.dumps({"folder_watch_id": watch_id}),
-                    repeat_stamp,
-                    repeat_stamp,
+                    repeat_analysis_id, source_id, media_id,
+                    json.dumps({"folder_watch_id": watch_id}), repeat_stamp, repeat_stamp,
                 ),
             )
         assert worker.one() is True
-        repeat_job = next(
-            job for job in client.get("/api/jobs").json()
-            if job["id"] == repeat_analysis_id
-        )
+        repeat_job = next(job for job in client.get("/api/jobs").json() if job["id"] == repeat_analysis_id)
         assert repeat_job["status"] == "COMPLETED", repeat_job.get("error")
         repeat_summary = json.loads(repeat_job["payload_json"])
         assert repeat_summary["auto_render_queued"] == 0, repeat_summary
-        assert repeat_summary["auto_rendered_historically"] == 3, repeat_summary
+        assert repeat_summary["auto_rendered_historically"] == 0, repeat_summary
         with sqlite3.connect(cfg.database_path) as db:
             auto_rendered_count = db.execute(
                 "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
                 (media_id,),
             ).fetchone()[0]
-        assert auto_rendered_count == 3, "Persistent candidate markers must enforce the lifetime per-media cap."
-        remaining = [
-            candidate for candidate in client.get("/api/candidates").json()
-            if candidate["media_id"] == media_id and candidate["state"] == "NEEDS_REVIEW"
-        ]
-        assert remaining, "Candidates beyond the auto-render cap must stay in the manual review queue."
-
+        assert auto_rendered_count == 0, "Manual approval must not be counted as an unattended render."
         # Step 5 — the real render completion path should enqueue exactly one private upload
         # for this media after a QC-PASS output and all live rights/settings checks.
         # The per-media cap prevents one long recording from flooding the channel.
