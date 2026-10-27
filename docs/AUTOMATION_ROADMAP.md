@@ -4,10 +4,10 @@ This roadmap separates code that exists from owner configuration and live accept
 
 ## Current alpha: implemented in code
 
-- FastAPI and React dashboard, SQLite migrations 001–019, persistent jobs and startup recovery.
+- FastAPI and React dashboard, SQLite migrations 001–020, persistent jobs and startup recovery.
 - Rights registry and repeated expiry/revocation checks; discovered sources remain UNKNOWN.
 - Scheduled Twitch Helix and YouTube Data API metadata-only discovery; providers do not download source footage.
-- FFmpeg scene-change candidate generation, optional Faster-Whisper transcripts, timed captions and transcript-grounded draft metadata.
+- FFmpeg scene-change candidate generation, optional Faster-Whisper transcripts, timed captions and transcript-grounded draft metadata. Re-transcription rechecks current rights and source-file identity before persistence; owner-edited content plans and manually corrected captions are preserved.
 - Optional local Ollama-compatible vision assessment using configurable 3 or 5 sampled frames with candidate-relative timestamp context; structured evidence/uncalibrated score, mandatory human review.
 - Candidate review/approval, editable candidate-relative captions, vertical rendering with fit-and-pad or blurred-backdrop profile, SRT caption sidecar/burn-in and QC PASS/REVIEW. A deterministic title-led Shorts cover is generated from the actual rendered poster.
 - Generated portrait poster frames, hash/dimension verification and browser preview.
