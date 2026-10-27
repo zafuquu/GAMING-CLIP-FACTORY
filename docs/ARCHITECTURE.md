@@ -5,7 +5,7 @@
 - React/TypeScript/Vite dashboard reads API data; SQLite is authoritative.
 - FastAPI binds to 127.0.0.1:8765 by default.
 - SQLite stores source rights, media assets, candidates, jobs, transcripts, content plans, captions, rendered outputs/posters, publishing records, Analytics snapshots, settings/schedules, discovery runs and system events.
-- Numbered migrations 001–012 are checked for unique version numbers and applied atomically with the schema-version marker. Migration tests cover duplicate numbering and rollback of a broken migration.
+- Numbered migrations 001–013 are checked for unique version numbers and applied atomically with the schema-version marker. Migration tests cover duplicate numbering and rollback of a broken migration.
 - A single worker consumes persistent jobs. Critical queue admission/publication transitions use immediate SQLite write locks. FFmpeg subprocesses use argument arrays, shell=False and finite timeouts.
 - Restart recovery requeues interrupted local processing but marks uncertain external YouTube operations RECONCILE_REQUIRED instead of blindly retrying.
 
