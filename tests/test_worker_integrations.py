@@ -245,3 +245,32 @@ def test_analytics_scheduler_respects_global_pause_and_is_opt_in(tmp_path,monkey
         next_run=db.execute("SELECT value FROM settings WHERE key='youtube_analytics_schedule_next_at'").fetchone()
     assert count==0
     assert next_run is None
+
+
+def test_schedulers_run_while_queue_is_busy_and_failures_do_not_block_jobs(tmp_path,monkeypatch):
+    db_path=tmp_path/"busy-scheduler.sqlite3"
+    _seed_analytics_db(db_path)
+    calls=[]
+    monkeypatch.setattr(Worker,"check_storage_safety",lambda self:{"blocked":False})
+    monkeypatch.setattr(Worker,"scan_due_folder_watches",lambda self:None)
+    def twitch_failure(self):
+        calls.append("twitch")
+        raise RuntimeError("simulated scheduler fault")
+    def youtube_discovery(self):
+        calls.append("youtube_discovery")
+    def analytics_schedule(self):
+        calls.append("youtube_analytics")
+    monkeypatch.setattr(Worker,"schedule_due_discovery",twitch_failure)
+    monkeypatch.setattr(Worker,"schedule_due_youtube_discovery",youtube_discovery)
+    monkeypatch.setattr(Worker,"schedule_due_analytics",analytics_schedule)
+    monkeypatch.setattr(worker_module,"fetch_video_analytics",lambda start_date,end_date,max_results=200:[{"video":"yt-video-1","views":9}])
+    worker=Worker(db_path,None,None,timeout=5)
+    assert worker.one() is True
+    assert calls==["twitch","youtube_discovery","youtube_analytics"]
+    with sqlite3.connect(db_path) as db:
+        job_status=db.execute("SELECT status FROM jobs WHERE id='analytics-job'").fetchone()[0]
+        scheduler_event=db.execute("SELECT level,message FROM system_events WHERE event_type='scheduler.evaluation_failed'").fetchone()
+    assert job_status=="COMPLETED"
+    assert scheduler_event is not None
+    assert scheduler_event[0]=="ERROR"
+    assert "simulated scheduler fault" in scheduler_event[1]
