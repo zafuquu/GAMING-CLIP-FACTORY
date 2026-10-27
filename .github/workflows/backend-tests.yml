@@ -42,6 +42,77 @@ jobs:
       - name: Run API tests
         run: python -m pytest -q
 
+
+  windows-startup-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install FFmpeg for full local readiness
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
+          $env:Path = "$chocoBin;$env:Path"
+          $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          & (Join-Path $chocoBin "ffmpeg.exe") -version
+          & (Join-Path $chocoBin "ffprobe.exe") -version
+      - name: Exercise the actual one-click launcher
+        shell: pwsh
+        env:
+          GCF_STARTUP_SKIP_BROWSER: "true"
+        run: |
+          $repoRoot = (Get-Location).Path
+          $pythonPath = Join-Path $repoRoot ".venv\Scripts\python.exe"
+          $backendBatch = Join-Path $repoRoot "scripts\run-backend.bat"
+          try {
+            & cmd.exe /c "scripts\start.bat"
+            if ($LASTEXITCODE -ne 0) { throw "scripts/start.bat exited with code $LASTEXITCODE" }
+
+            $health = Invoke-RestMethod -TimeoutSec 10 "http://127.0.0.1:8765/api/health"
+            if ($health.status -ne "ok") { throw "Health endpoint did not report status=ok." }
+
+            $home = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:8765/"
+            if ($home.StatusCode -ne 200 -or $home.Content -notmatch '<div id="root"') {
+              throw "The API did not serve the production React dashboard."
+            }
+
+            $readiness = Invoke-RestMethod -TimeoutSec 10 "http://127.0.0.1:8765/api/readiness"
+            if (-not $readiness.ready) {
+              $detail = ($readiness.checks.PSObject.Properties | ForEach-Object {
+                "$($_.Name)=$($_.Value.ready):$($_.Value.reason)"
+              }) -join "; "
+              throw "One-click startup returned degraded readiness: $detail"
+            }
+            foreach ($check in @("database","ffmpeg","ffprobe","database_directory","media_root","output_directory","worker")) {
+              if (-not $readiness.checks.$check.ready) { throw "Readiness check '$check' failed." }
+            }
+            Write-Host "PASS: start.bat launched the API, built dashboard, FFmpeg/FFprobe, writable paths and worker."
+          }
+          finally {
+            # The launcher intentionally creates a separate backend window. Tear down only
+            # this checkout's worker processes so the hosted runner is always left clean.
+            $escapedBatch = [regex]::Escape($backendBatch)
+            $processes = Get-CimInstance Win32_Process
+            $pythonProcesses = $processes | Where-Object {
+              $_.ExecutablePath -eq $pythonPath -and $_.CommandLine -match '-m\s+app'
+            }
+            foreach ($proc in $pythonProcesses) {
+              Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+            $backendCommands = Get-CimInstance Win32_Process | Where-Object {
+              $_.Name -ieq "cmd.exe" -and $_.CommandLine -match $escapedBatch
+            }
+            foreach ($proc in $backendCommands) {
+              Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+
   frontend-build:
     runs-on: ubuntu-latest
     steps:
