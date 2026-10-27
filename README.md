@@ -31,7 +31,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## Requirements
 
-- Windows 10/11, Python 3.11+, Node.js 20.19+ or 22.12+, npm.
+- Windows 10/11, Python 3.11 or 3.12, Node.js 20.19+ or 22.12+, and npm.
 - FFmpeg/FFprobe installed separately. The app auto-detects common project-local directories or uses GCF_FFMPEG_PATH/GCF_FFPROBE_PATH.
 - Provider credentials only for integrations you enable.
 
@@ -39,7 +39,7 @@ No API credentials, OAuth files, model weights or FFmpeg binaries are committed.
 
 ## Windows quick start
 
-**First run:** install Python 3.11+ and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. The launcher creates `.env` from `.env.example` only if missing, repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API, checks local readiness and opens the dashboard. The API runs as a background process; its logs are stored at `data\logs\backend.stdout.log` and `data\logs\backend.stderr.log`. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the readiness panel reports degraded status and media processing remains unavailable until those tools are installed/configured.
+**First run:** install Python 3.11 or 3.12 and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. The launcher creates `.env` from `.env.example` only if missing, repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API, checks local readiness and opens the dashboard. The API runs as a background process; its logs are stored at `data\logs\backend.stdout.log` and `data\logs\backend.stderr.log`. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the readiness panel reports degraded status and media processing remains unavailable until those tools are installed/configured.
 
 **Later runs:** double-click `scripts\start.bat` again. For development only, use `scripts\run-backend.bat` and `scripts\run-dashboard.bat` separately to run the Vite development server. To stop the background app, use `scripts\stop.bat`.
 
@@ -120,9 +120,7 @@ Frontend:
     npm install
     npm run build
 
-Latest CI for the tested migration/profile/thumbnail code: GitHub Actions run 40358583264 on commit 63517f8f. Its four backend test steps passed: Windows/Python 3.11 and 3.12 reported 70 passed, 2 skipped; Ubuntu/Python 3.11 and 3.12 reported 72 passed including FFmpeg render integration. The frontend typecheck/production build also passed. Link: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40358583264. Job cleanup was still finishing when these test steps were inspected.
-
-Latest verified GitHub Actions run for commit `b99b8368` passed all five jobs: Windows/Linux on Python 3.11/3.12 plus the frontend build. The backend matrix reported 107 passed / 2 skipped on Windows Python 3.11 and 109 passed on Ubuntu Python 3.11; all four backend jobs were green. [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40428209391).
+The latest main-branch acceptance run is [GitHub Actions run #364](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40478057648) on commit `9f4917a92053cd47a939050ec918cae8a71c7ca1`. All six jobs passed: Python 3.11 and 3.12 tests on Windows and Ubuntu, frontend production build, and the Windows one-click start/readiness/restart/stop smoke test. The suite includes a synthetic-media mock-production path through scene analysis, human-review/approval, FFmpeg rendering/QC, a mocked private YouTube upload and a mocked processing-success response. This is not a real credentialed YouTube acceptance test.
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
 
