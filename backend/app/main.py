@@ -601,6 +601,49 @@ def create_app(settings=None,start_worker=True):
             c.execute("INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,state,created_at) VALUES(?,?,?,?,?,?,'IMPORTED',?)",(mid,data.source_id,str(p),p.name,p.stat().st_size,sha,t))
             event(c,"INFO","media.imported","Authorized media registered.",{"media_id":mid,"source_id":data.source_id})
         return {"id":mid,"source_id":data.source_id,"file_name":p.name,"file_size":p.stat().st_size,"sha256":sha,"state":"IMPORTED","created_at":t}
+    @app.post("/api/sources/{sid}/fetch-twitch-clip",status_code=202)
+    def queue_twitch_clip_download(sid: str):
+        """Queue a clip download only through Twitch's official authorized download API."""
+        try:
+            from .integrations.twitch_download import clip_slug_from_url
+            from .twitch_user_auth import load_user_token, TwitchUserNotConfigured
+        except Exception as exc:
+            raise HTTPException(503,detail="Twitch clip download components are unavailable. Check the local installation.") from exc
+        try:
+            token=load_user_token()
+        except TwitchUserNotConfigured as exc:
+            raise HTTPException(503,detail=str(exc)) from exc
+        t=now()
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            row=c.execute("""SELECT s.source_url,s.platform,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Source not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Rights gate blocked download: review and authorize documented editing/commercial rights first.")
+            try:
+                clip_slug_from_url(row["source_url"])
+            except ValueError as exc:
+                raise HTTPException(400,detail=str(exc)) from exc
+            active=c.execute("""SELECT id FROM jobs WHERE job_type='DOWNLOAD_TWITCH_CLIP'
+                AND source_id=? AND status IN ('QUEUED','RUNNING') LIMIT 1""",(sid,)).fetchone()
+            if active:
+                return {"id":active["id"],"status":"ALREADY_QUEUED","job_type":"DOWNLOAD_TWITCH_CLIP"}
+            jid=str(uuid4())
+            c.execute("""INSERT INTO jobs(id,job_type,status,source_id,payload_json,created_at,updated_at)
+                VALUES(?,'DOWNLOAD_TWITCH_CLIP','QUEUED',?,?,?,?)""",
+                (jid,sid,json.dumps({"source_id":sid,"source_url":row["source_url"]}),t,t))
+            event(c,"INFO","media.twitch_clip_download_queued",
+                "Official Twitch clip download queued after rights and connected-user checks.",
+                {"job_id":jid,"source_id":sid,"twitch_user_id":token.get("user_id")})
+        return {"id":jid,"status":"QUEUED","job_type":"DOWNLOAD_TWITCH_CLIP",
+                "provider":"twitch_official_clips_api","media_downloaded":False,
+                "note":"Requires current Twitch broadcaster/editor authorization and authorized source rights."}
+
     @app.post("/api/media/{mid}/analyze",status_code=202)
     def analyze(mid: str):
         with session(cfg.database_path) as c:
@@ -1018,6 +1061,18 @@ def create_app(settings=None,start_worker=True):
             youtube_credentials_present=bool(keyring.get_password("gaming-clip-factory-ai","youtube-oauth-credentials"))
         except Exception:
             youtube_credentials_present=False
+        try:
+            import keyring
+            twitch_raw=keyring.get_password("gaming-clip-factory-ai","twitch-user-oauth-token")
+            twitch_data=json.loads(twitch_raw) if twitch_raw else {}
+            twitch_scopes=set(twitch_data.get("scope") or [])
+            twitch_clip_download_connected=bool(
+                twitch_data.get("access_token")
+                and twitch_data.get("client_id")==os.getenv("GCF_TWITCH_CLIENT_ID","").strip()
+                and ({"channel:manage:clips","editor:manage:clips"} & twitch_scopes)
+            )
+        except Exception:
+            twitch_clip_download_connected=False
         with connect(cfg.database_path) as c:
             values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('youtube_uploads_enabled','twitch_discovery_enabled','twitch_discovery_queries','twitch_discovery_interval_minutes','twitch_discovery_next_at','youtube_discovery_enabled','youtube_discovery_queries','youtube_discovery_interval_minutes','youtube_discovery_next_at','youtube_analytics_schedule_enabled','youtube_analytics_schedule_interval_minutes','youtube_analytics_schedule_window_days','youtube_analytics_schedule_next_at')")}
         try: twitch_queries=json.loads(values.get("twitch_discovery_queries","[]"))
@@ -1025,7 +1080,7 @@ def create_app(settings=None,start_worker=True):
         try: youtube_queries=json.loads(values.get("youtube_discovery_queries","[]"))
         except (ValueError,TypeError): youtube_queries=[]
         return {
-            "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":twitch_queries,"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at")},
+            "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":twitch_queries,"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at"),"clip_download_connected":twitch_clip_download_connected,"clip_download_auth_command":"python -m app.twitch_user_auth","clip_download_scopes":["channel:manage:clips","editor:manage:clips"]},
             "transcription":{"enabled":os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true","dependency_installed":importlib.util.find_spec("faster_whisper") is not None,"model_path_configured":bool(os.getenv("GCF_WHISPER_MODEL_PATH")),"model_download_allowed":os.getenv("GCF_WHISPER_ALLOW_MODEL_DOWNLOAD","").lower()=="true","device":os.getenv("GCF_WHISPER_DEVICE","cpu")},
             "script_drafting":get_script_drafting_status(),
             "narration":get_narration_status(),
