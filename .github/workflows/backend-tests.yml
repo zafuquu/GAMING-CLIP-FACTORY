@@ -14,8 +14,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
-        python-version: ["3.11", "3.12"]
+        include:
+          - os: ubuntu-latest
+            os_key: linux
+            python-version: "3.11"
+            python_key: py311
+          - os: ubuntu-latest
+            os_key: linux
+            python-version: "3.12"
+            python_key: py312
+          - os: windows-latest
+            os_key: win
+            python-version: "3.11"
+            python_key: py311
+          - os: windows-latest
+            os_key: win
+            python-version: "3.12"
+            python_key: py312
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -38,7 +53,7 @@ jobs:
           & (Join-Path $chocoBin "ffmpeg.exe") -version
           & (Join-Path $chocoBin "ffprobe.exe") -version
       - name: Install backend dependencies
-        run: python -m pip install --require-hashes -r backend/requirements-lock.txt
+        run: python -m pip install --require-hashes -r backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
       - name: Run API tests
         run: python -m pytest -q
 
