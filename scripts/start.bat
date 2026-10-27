@@ -98,7 +98,7 @@ echo Reusing the running local API.
 
 :wait_backend
 echo Waiting for the local app...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0;$i -lt 45;$i++){ try { $h=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/api/health; $home=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/; if($h.StatusCode -eq 200 -and $home.StatusCode -eq 200){$ok=$true;break} } catch {}; Start-Sleep -Seconds 1 }; if(-not $ok){Write-Error 'The API and production dashboard did not both become ready within 45 seconds. Inspect the backend window.'; exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0;$i -lt 45;$i++){ try { $h=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/api/health; $home=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/; if($h.StatusCode -eq 200 -and $home.StatusCode -eq 200){$ok=$true;break} } catch {}; Start-Sleep -Seconds 1 }; if(-not $ok){Write-Error 'The API and production dashboard did not both become ready within 45 seconds. Inspect data\\logs\\backend.stdout.log and backend.stderr.log.'; exit 1 }"
 if errorlevel 1 goto fail
 
 echo.
@@ -136,11 +136,8 @@ goto wait_backend
 :fail
 echo.
 echo Startup could not safely complete. See the message above.
-if exist "data\logs\backend.stderr.log" (
-  echo.
-  echo Last backend error log lines - data\logs\backend.stderr.log:
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 60 -ErrorAction SilentlyContinue 'data\logs\backend.stderr.log'"
-)
+if exist "data\logs\backend.stdout.log" powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 40 -ErrorAction SilentlyContinue 'data\logs\backend.stdout.log'"
+if exist "data\logs\backend.stderr.log" powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 60 -ErrorAction SilentlyContinue 'data\logs\backend.stderr.log'"
 if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 1
 pause
 exit /b 1
