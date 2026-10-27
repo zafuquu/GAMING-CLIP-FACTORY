@@ -696,6 +696,8 @@ def create_app(settings=None,start_worker=True):
                     plan_data["narration_audio_available"]=bool(narration_path and Path(narration_path).is_file())
                     plan_data["tags"]=json.loads(plan_data.pop("tags_json") or "[]")
                     plan_data["evidence"]=json.loads(plan_data.pop("evidence_json") or "{}")
+                    plan_data["narration_draft_evidence"]=json.loads(plan_data.pop("narration_draft_evidence_json") or "{}")
+                    plan_data["narration_script_reviewed"]=bool(plan_data.get("narration_script_reviewed"))
                     row["content_plan"]=plan_data
                 else:
                     row["content_plan"]=None
