@@ -1,0 +1,92 @@
+name: refresh-dependency-locks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-dependency-locks-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  python-locks:
+    name: Generate locks (${{ matrix.os_key }}, ${{ matrix.python_key }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os_key: linux
+            python-version: "3.11"
+            python_key: py311
+          - os: ubuntu-latest
+            os_key: linux
+            python-version: "3.12"
+            python_key: py312
+          - os: windows-latest
+            os_key: win
+            python-version: "3.11"
+            python_key: py311
+          - os: windows-latest
+            os_key: win
+            python-version: "3.12"
+            python_key: py312
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned lock generator
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pip-tools==7.6.2"
+      - name: Compile standard runtime lock
+        run: >
+          pip-compile
+          --resolver=backtracking
+          --generate-hashes
+          --strip-extras
+          --output-file=backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+          backend/requirements.txt
+      - name: Compile optional ML lock constrained to the standard lock
+        run: >
+          pip-compile
+          --resolver=backtracking
+          --constraint=backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+          --generate-hashes
+          --strip-extras
+          --output-file=backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+          backend/requirements-ml.txt
+      - name: Upload this OS/Python lock pair
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-locks-${{ matrix.os_key }}-${{ matrix.python_key }}
+          path: |
+            backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+            backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend-lock:
+    name: Generate frontend npm lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+      - name: Update lock from package.json
+        working-directory: frontend
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Upload npm lock
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-locks-frontend
+          path: frontend/package-lock.json
+          if-no-files-found: error
+          retention-days: 14
