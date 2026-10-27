@@ -2060,8 +2060,13 @@ class Worker(threading.Thread):
             if not row: raise FileNotFoundError("Media record missing.")
             if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
                 raise PermissionError("Rights gate blocked transcription: current AUTHORIZED permission is required.")
-            media_path=Path(row["original_path"])
+            media_path=Path(row["original_path"]).resolve()
             if not media_path.is_file(): raise FileNotFoundError("Media file is missing.")
+            source_before=media_path.stat()
+            source_signature=(source_before.st_size,source_before.st_mtime_ns)
+            if row["file_size"] is not None and int(row["file_size"])!=source_signature[0]:
+                raise RuntimeError("Source media size no longer matches the imported asset record; re-import the changed file.")
+            source_recorded_path=media_path
         finally:
             c.close()
         timeout=int(os.getenv("GCF_TRANSCRIPTION_TIMEOUT_SECONDS","3600"))
@@ -2082,8 +2087,28 @@ class Worker(threading.Thread):
             if text and start>=0 and end>start:
                 cleaned.append({"start_seconds":round(start,3),"end_seconds":round(end,3),"text":text[:1000],"confidence":confidence})
         full_text=" ".join(x["text"] for x in cleaned).strip()
+        source_after=media_path.stat()
+        if (source_after.st_size,source_after.st_mtime_ns)!=source_signature:
+            raise RuntimeError("Source media changed during transcription. Let the file finish copying and retry.")
         c=connect(self.db)
         try:
+            # Transcription can take a long time. Rights are rechecked after the subprocess
+            # and serialized with transcript/caption writes, not only at job start.
+            c.execute("BEGIN IMMEDIATE")
+            current_source=c.execute("""SELECT m.original_path,m.file_size,p.status AS rights_status,p.expires_at
+                FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?""",
+                (job["media_id"],)).fetchone()
+            if not current_source:
+                raise FileNotFoundError("Media record disappeared during transcription.")
+            if Path(current_source["original_path"]).resolve()!=source_recorded_path:
+                raise RuntimeError("Media source path changed during transcription; results were not persisted.")
+            if current_source["rights_status"]!="AUTHORIZED" or expiry_passed(current_source["expires_at"]):
+                raise PermissionError("Rights expired or were revoked during transcription; results were not persisted.")
+            if current_source["file_size"] is not None and int(current_source["file_size"])!=source_signature[0]:
+                raise RuntimeError("Imported media size metadata changed during transcription; results were not persisted.")
+            source_latest=media_path.stat()
+            if (source_latest.st_size,source_latest.st_mtime_ns)!=source_signature:
+                raise RuntimeError("Source media changed during transcription. Let the file finish copying and retry.")
             current=c.execute("SELECT id FROM transcripts WHERE media_id=?",(job["media_id"],)).fetchone()
             transcript_id=current["id"] if current else str(uuid4())
             t=now()
@@ -2108,18 +2133,24 @@ class Worker(threading.Thread):
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,'DRAFT',?,?)
                     ON CONFLICT(candidate_id) DO UPDATE SET chosen_format=excluded.chosen_format,hook_text=excluded.hook_text,title=excluded.title,
                     description=excluded.description,tags_json=excluded.tags_json,narration_text=excluded.narration_text,evidence_json=excluded.evidence_json,
-                    confidence=excluded.confidence,strategy_version=excluded.strategy_version,status='DRAFT',updated_at=excluded.updated_at""",
+                    confidence=excluded.confidence,strategy_version=excluded.strategy_version,status='DRAFT',updated_at=excluded.updated_at
+                    WHERE content_plans.owner_edited=0""",
                     (plan_id,candidate["id"],plan["chosen_format"],plan["hook_text"],plan["title"],plan["description"],json.dumps(plan["tags"]),plan["narration_text"],json.dumps(plan["evidence"]),plan["confidence"],plan["strategy_version"],t,t))
                 c.execute("UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",(plan["confidence"],json.dumps(plan["ranking_components"]),candidate["id"]))
-                c.execute("DELETE FROM caption_segments WHERE candidate_id=?",(candidate["id"],))
-                caption_index=0
-                for seg in candidate_segments:
-                    seg_start=max(float(candidate["start_seconds"]),seg["start_seconds"])
-                    seg_end=min(float(candidate["end_seconds"]),seg["end_seconds"])
-                    if seg_end<=seg_start: continue
-                    c.execute("INSERT INTO caption_segments(id,candidate_id,segment_index,start_seconds,end_seconds,text,confidence,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                        (str(uuid4()),candidate["id"],caption_index,round(seg_start,3),round(seg_end,3),seg["text"],seg["confidence"],t))
-                    caption_index+=1
+                has_manual_captions=c.execute(
+                    "SELECT 1 FROM caption_segments WHERE candidate_id=? AND manually_edited=1 LIMIT 1",
+                    (candidate["id"],),
+                ).fetchone()
+                if not has_manual_captions:
+                    c.execute("DELETE FROM caption_segments WHERE candidate_id=?",(candidate["id"],))
+                    caption_index=0
+                    for seg in candidate_segments:
+                        seg_start=max(float(candidate["start_seconds"]),seg["start_seconds"])
+                        seg_end=min(float(candidate["end_seconds"]),seg["end_seconds"])
+                        if seg_end<=seg_start: continue
+                        c.execute("INSERT INTO caption_segments(id,candidate_id,segment_index,start_seconds,end_seconds,text,confidence,created_at,manually_edited) VALUES(?,?,?,?,?,?,?,?,0)",
+                            (str(uuid4()),candidate["id"],caption_index,round(seg_start,3),round(seg_end,3),seg["text"],seg["confidence"],t))
+                        caption_index+=1
             c.execute("UPDATE media_assets SET state='TRANSCRIBED' WHERE id=?",(job["media_id"],))
             summary={"media_id":job["media_id"],"transcript_id":transcript_id,"language":result.get("language","unknown"),"segment_count":len(cleaned),"candidate_plans_updated":len(candidates),"model_name":result.get("model_name"),"local_only":True}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))

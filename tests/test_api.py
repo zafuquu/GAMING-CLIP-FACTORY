@@ -1311,3 +1311,180 @@ def test_analysis_releases_sqlite_write_lock_during_ffmpeg_and_rechecks_revoked_
     assert "revoked or expired" in job[1].lower()
     assert candidates==0
     c.__exit__(None,None,None)
+
+
+def test_transcription_discards_results_if_rights_are_revoked_during_subprocess(tmp_path,monkeypatch):
+    import subprocess
+    import app.worker as worker_module
+    from app.worker import Worker
+
+    monkeypatch.setenv("GCF_ENABLE_TRANSCRIPTION","true")
+    client,media=setup_client(tmp_path)
+    source_id=add_source(client)
+    assert authorize(client,source_id).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"rights-race.mp4").write_bytes(b"synthetic transcription fixture bytes")
+    imported=client.post("/api/media/import",json={"source_id":source_id,"path":"rights-race.mp4"})
+    assert imported.status_code==201,imported.text
+    media_id=imported.json()["id"]
+    cfg=client.app.state.settings
+    job_id="transcribe-rights-race-job"
+    stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute(
+            """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+               VALUES(?,'TRANSCRIBE_MEDIA','QUEUED',?,?, '{}',?,?)""",
+            (job_id,source_id,media_id,stamp,stamp),
+        )
+
+    def revoke_during_transcription(args,timeout,cwd=None):
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute("UPDATE source_permissions SET status='REVOKED' WHERE source_id=?",(source_id,))
+        return subprocess.CompletedProcess(
+            args,0,
+            stdout=json.dumps({
+                "language":"en","language_probability":0.99,"model_name":"synthetic-test-model",
+                "segments":[{"start_seconds":0.25,"end_seconds":1.25,"text":"This transcript must be discarded.","confidence":0.99}],
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(worker_module,"run",revoke_during_transcription)
+    monkeypatch.setattr(Worker,"check_storage_safety",lambda self:{"blocked":False})
+    assert Worker(cfg.database_path,None,None,timeout=5,media_root=media).one() is True
+
+    with sqlite3.connect(cfg.database_path) as db:
+        job=db.execute("SELECT status,error FROM jobs WHERE id=?",(job_id,)).fetchone()
+        transcripts=db.execute("SELECT COUNT(*) FROM transcripts WHERE media_id=?",(media_id,)).fetchone()[0]
+        segments=db.execute(
+            "SELECT COUNT(*) FROM transcript_segments ts JOIN transcripts tr ON tr.id=ts.transcript_id WHERE tr.media_id=?",
+            (media_id,),
+        ).fetchone()[0]
+        content_plans=db.execute(
+            "SELECT COUNT(*) FROM content_plans cp JOIN candidate_moments cm ON cm.id=cp.candidate_id WHERE cm.media_id=?",
+            (media_id,),
+        ).fetchone()[0]
+        media_state=db.execute("SELECT state FROM media_assets WHERE id=?",(media_id,)).fetchone()[0]
+    assert job[0]=="FAILED"
+    assert "were revoked during transcription" in job[1].lower()
+    assert transcripts==0 and segments==0 and content_plans==0
+    assert media_state=="IMPORTED"
+    client.__exit__(None,None,None)
+
+
+def test_retranscription_preserves_owner_content_plan_audio_and_manual_captions(tmp_path,monkeypatch):
+    import subprocess
+    import app.worker as worker_module
+    from app.worker import Worker
+
+    monkeypatch.setenv("GCF_ENABLE_TRANSCRIPTION","true")
+    client,media=setup_client(tmp_path)
+    source_id=add_source(client)
+    assert authorize(client,source_id).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"owner-edits.mp4").write_bytes(b"synthetic owner-edit fixture bytes")
+    imported=client.post("/api/media/import",json={"source_id":source_id,"path":"owner-edits.mp4"})
+    assert imported.status_code==201,imported.text
+    media_id=imported.json()["id"]
+    cfg=client.app.state.settings
+    candidate_id="retranscribe-owner-protection-candidate"
+    stamp=datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute(
+            """INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (candidate_id,media_id,0.0,8.0,"test","Owner edit preservation candidate","NEEDS_REVIEW",stamp),
+        )
+        db.execute(
+            """INSERT INTO transcripts(id,media_id,language,language_probability,full_text,model_name,status,error,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,'COMPLETED','',?,?)""",
+            ("old-owner-transcript",media_id,"en",0.9,"Old transcript words","synthetic-old-model",stamp,stamp),
+        )
+        db.execute(
+            """INSERT INTO transcript_segments(id,transcript_id,segment_index,start_seconds,end_seconds,text,confidence)
+               VALUES(?,?,?,?,?,?,?)""",
+            ("old-owner-transcript-segment","old-owner-transcript",0,0.2,1.1,"Old transcript words",0.9),
+        )
+
+    saved_plan=client.put(f"/api/candidates/{candidate_id}/content-plan",json={
+        "title":"Owner-approved title",
+        "description":"Owner-written description that must survive re-transcription.",
+        "tags":["OwnerTag","Reviewed"],
+        "narration_text":"The owner-reviewed narration script.",
+        "narration_script_reviewed":True,
+    })
+    assert saved_plan.status_code==200,saved_plan.text
+    caption_response=client.put(f"/api/candidates/{candidate_id}/captions",json={
+        "segments":[{"start_seconds":0.4,"end_seconds":1.7,"text":"Owner-corrected caption."}]
+    })
+    assert caption_response.status_code==200,caption_response.text
+
+    output_dir=cfg.data_dir/"outputs"
+    output_dir.mkdir(parents=True,exist_ok=True)
+    audio_path=output_dir/"owner-reviewed-narration.wav"
+    audio_path.write_bytes(b"synthetic retained audio artifact")
+    audio_sha=__import__("hashlib").sha256(audio_path.read_bytes()).hexdigest()
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute(
+            """UPDATE content_plans SET narration_audio_path=?,narration_audio_sha256=?,
+                narration_audio_duration_seconds=2.5,narration_audio_status='READY',
+                narration_audio_error='',narration_audio_generated_at=?,updated_at=?
+               WHERE candidate_id=?""",
+            (str(audio_path),audio_sha,stamp,stamp,candidate_id),
+        )
+        owner_lock=db.execute("SELECT owner_edited FROM content_plans WHERE candidate_id=?",(candidate_id,)).fetchone()[0]
+        manual_caption=db.execute(
+            "SELECT manually_edited FROM caption_segments WHERE candidate_id=?",(candidate_id,),
+        ).fetchone()[0]
+    assert owner_lock==1
+    assert manual_caption==1
+
+    job_id="transcribe-owner-preservation-job"
+    with sqlite3.connect(cfg.database_path) as db:
+        db.execute(
+            """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+               VALUES(?,'TRANSCRIBE_MEDIA','QUEUED',?,?, '{}',?,?)""",
+            (job_id,source_id,media_id,stamp,stamp),
+        )
+
+    def new_transcript(args,timeout,cwd=None):
+        return subprocess.CompletedProcess(
+            args,0,
+            stdout=json.dumps({
+                "language":"en","language_probability":0.98,"model_name":"synthetic-new-model",
+                "segments":[{"start_seconds":0.35,"end_seconds":1.4,"text":"Fresh transcript output.","confidence":0.98}],
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(worker_module,"run",new_transcript)
+    monkeypatch.setattr(Worker,"check_storage_safety",lambda self:{"blocked":False})
+    assert Worker(cfg.database_path,None,None,timeout=5,media_root=media).one() is True
+
+    with sqlite3.connect(cfg.database_path) as db:
+        db.row_factory=sqlite3.Row
+        transcript=db.execute("SELECT full_text,model_name,status FROM transcripts WHERE media_id=?",(media_id,)).fetchone()
+        plan=db.execute(
+            """SELECT title,description,tags_json,narration_text,narration_script_reviewed,
+                      narration_audio_path,narration_audio_sha256,narration_audio_status,owner_edited
+               FROM content_plans WHERE candidate_id=?""",
+            (candidate_id,),
+        ).fetchone()
+        captions=db.execute(
+            "SELECT text,manually_edited FROM caption_segments WHERE candidate_id=? ORDER BY segment_index",
+            (candidate_id,),
+        ).fetchall()
+        job=db.execute("SELECT status FROM jobs WHERE id=?",(job_id,)).fetchone()[0]
+    assert tuple(transcript)==("Fresh transcript output.","synthetic-new-model","COMPLETED")
+    assert plan["title"]=="Owner-approved title"
+    assert plan["description"]=="Owner-written description that must survive re-transcription."
+    assert json.loads(plan["tags_json"])==["OwnerTag","Reviewed"]
+    assert plan["narration_text"]=="The owner-reviewed narration script."
+    assert plan["narration_script_reviewed"]==1
+    assert plan["narration_audio_path"]==str(audio_path)
+    assert plan["narration_audio_sha256"]==audio_sha
+    assert plan["narration_audio_status"]=="READY"
+    assert plan["owner_edited"]==1
+    assert len(captions)==1 and tuple(captions[0])==("Owner-corrected caption.",1)
+    assert job=="COMPLETED"
+    client.__exit__(None,None,None)

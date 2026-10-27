@@ -657,14 +657,14 @@ def create_app(settings=None,start_worker=True):
                 draft_state="EDITED"
             if script_changed:
                 c.execute("""UPDATE content_plans SET title=?,description=?,tags_json=?,narration_text=?,
-                    narration_script_reviewed=?,narration_draft_status=?,
+                    narration_script_reviewed=?,narration_draft_status=?,owner_edited=1,
                     narration_audio_path=NULL,narration_audio_sha256=NULL,narration_audio_duration_seconds=NULL,
                     narration_audio_status='NOT_GENERATED',narration_audio_error='',narration_audio_generated_at=NULL,
                     status='DRAFT',updated_at=? WHERE id=?""",
                     (new_title,new_description,json.dumps(new_tags),new_script,int(reviewed_now),draft_state,t,plan["id"]))
             else:
                 c.execute("""UPDATE content_plans SET title=?,description=?,tags_json=?,narration_text=?,
-                    narration_script_reviewed=?,narration_draft_status=?,status='DRAFT',updated_at=? WHERE id=?""",
+                    narration_script_reviewed=?,narration_draft_status=?,owner_edited=1,status='DRAFT',updated_at=? WHERE id=?""",
                     (new_title,new_description,json.dumps(new_tags),new_script,int(reviewed_now),draft_state,t,plan["id"]))
             if script_changed:
                 event(c,"INFO","narration.script_changed","Owner edited the narration script; any previous synthesized audio was invalidated.",{
@@ -805,8 +805,8 @@ def create_app(settings=None,start_worker=True):
             c.execute("DELETE FROM caption_segments WHERE candidate_id=?",(cid,))
             base=float(row["start_seconds"])
             for index,segment in enumerate(data.segments):
-                c.execute("""INSERT INTO caption_segments(id,candidate_id,segment_index,start_seconds,end_seconds,text,confidence,created_at)
-                    VALUES(?,?,?,?,?,?,NULL,?)""",
+                c.execute("""INSERT INTO caption_segments(id,candidate_id,segment_index,start_seconds,end_seconds,text,confidence,created_at,manually_edited)
+                    VALUES(?,?,?,?,?,?,NULL,?,1)""",
                     (str(uuid4()),cid,index,round(base+segment.start_seconds,3),round(base+segment.end_seconds,3),segment.text,t))
             event(c,"INFO","captions.edited","Owner saved caption timing/text corrections.",{"candidate_id":cid,"segment_count":len(data.segments)})
         return {"candidate_id":cid,"caption_segment_count":len(data.segments),"state":"NEEDS_REVIEW","saved":True}

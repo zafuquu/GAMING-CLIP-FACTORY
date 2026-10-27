@@ -4,13 +4,13 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Implemented in code
 
-- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–019, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
+- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–020, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
 - One-click Windows startup through `scripts/start.bat`: checks runtime and dependency health, repairs missing environment dependencies, builds the optimized frontend, starts/reuses the API and opens a same-origin local dashboard. `/api/readiness` reports database, FFmpeg/FFprobe, writable paths and worker liveness. The Windows launch path still requires acceptance on the actual target PC.
 - Source rights registry with evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
 - Local media registration restricted to the configured media root with file checks, SHA-256 and duplicate prevention.
 - Twitch Helix and YouTube Data API metadata-only discovery with schedules/history. No source media is downloaded and public metadata never grants reuse rights.
 - FFprobe metadata and FFmpeg scene-change candidates; still a heuristic detector rather than semantic game-event understanding.
-- Optional Faster-Whisper transcription, timed phrase segments, deterministic transcript-grounded content drafts and caption timing.
+- Optional Faster-Whisper transcription, timed phrase segments, deterministic transcript-grounded content drafts and caption timing. A post-subprocess rights/file-identity recheck prevents persistence after revocation or source mutation; owner-edited plans and manually corrected captions survive re-transcription.
 - Optional local Ollama-compatible vision assessment sampling configurable 3 or 5 frames with candidate-relative timestamps, saving structured evidence and an uncalibrated score. Local inference is preferred, feature is off by default and never auto-approves.
 - Candidate review/approval, editable candidate-relative captions, H.264/AAC 1080×1920 fit-and-pad or blurred-backdrop rendering, optional SRT subtitle burn-in and output hashes.
 - Opt-in supervised folder auto-production: stable files can be imported/analyzed, and up to three candidates per media file can be automatically rendered locally after current rights/watch/pause checks. The lifetime cap is stored on candidate records so repeated analysis cannot create extra batches. Unselected candidates remain in manual review; rendered outputs still need human inspection.
