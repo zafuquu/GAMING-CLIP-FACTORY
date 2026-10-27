@@ -4,7 +4,7 @@ This roadmap separates code that exists from owner configuration and live accept
 
 ## Current alpha: implemented in code
 
-- FastAPI and React dashboard, SQLite migrations 001–016, persistent jobs and startup recovery.
+- FastAPI and React dashboard, SQLite migrations 001–017, persistent jobs and startup recovery.
 - Rights registry and repeated expiry/revocation checks; discovered sources remain UNKNOWN.
 - Scheduled Twitch Helix and YouTube Data API metadata-only discovery; providers do not download source footage.
 - FFmpeg scene-change candidate generation, optional Faster-Whisper transcripts, timed captions and transcript-grounded draft metadata.
