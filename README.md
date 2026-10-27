@@ -111,16 +111,16 @@ Voiceover is opt-in and remains local until you approve a clip for rendering. Th
 
 From project root:
 
-    python -m pip install -r backend\requirements.txt
+    python -m pip install --require-hashes -r backend\requirements-lock.txt
     python -m pytest -q
 
 Frontend:
 
     cd frontend
-    npm install
+    npm ci
     npm run build
 
-The latest main-branch acceptance run is [GitHub Actions run #364](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40478057648) on commit `9f4917a92053cd47a939050ec918cae8a71c7ca1`. All six jobs passed: Python 3.11 and 3.12 tests on Windows and Ubuntu, frontend production build, and the Windows one-click start/readiness/restart/stop smoke test. The suite includes a synthetic-media mock-production path through scene analysis, human-review/approval, FFmpeg rendering/QC, a mocked private YouTube upload and a mocked processing-success response. This is not a real credentialed YouTube acceptance test.
+The latest main-branch acceptance run after supervised auto-production was merged is [GitHub Actions run #381](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814) on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. All six jobs passed: Python 3.11 and 3.12 tests on Windows and Ubuntu, frontend production build, and the Windows one-click start/readiness/restart/stop smoke test. The dependency-lock change is separate and must pass its own PR checks before those lockfiles are the required install path. The suite uses mocked YouTube provider calls; it is not a real credentialed channel acceptance test.
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
 
