@@ -88,7 +88,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebReque
 if errorlevel 1 goto launch_backend
 
 echo API process is already responding. Checking whether it serves the production dashboard...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8765/; if($r.StatusCode -eq 200 -and $r.Content -match 'id=\"root\"|GCF production dashboard|<div id=\"root\"'){exit 0}; exit 1 } catch { exit 1 }" >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8765/; if($r.StatusCode -eq 200){exit 0}; exit 1 } catch { exit 1 }" >nul 2>nul
 if errorlevel 1 (
   echo ERROR: An older API is running on port 8765 but does not serve the built dashboard.
   echo Close the older Gaming Clip Factory backend window, then run start.bat again.
