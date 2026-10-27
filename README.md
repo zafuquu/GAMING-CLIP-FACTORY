@@ -25,7 +25,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - Public metadata search does not supply legal permission to republish footage. Owner must provide/prove rights or provide authorized local files; source media is not downloaded by current provider integrations.
 - Scene-change and sparse-frame vision estimates do not reliably detect gameplay events across games. Vision scores are subjective and uncalibrated; game-specific accuracy needs labeled, rights-cleared validation clips.
 - Transcript correction beyond candidate-relative captions, narration pronunciation/emotion/timing controls, richer templates/compositions, automated visual safe-area checks and advanced repair/quarantine remain incomplete. Local script-to-WAV synthesis is implemented but requires a configured Piper executable and voice. A custom cover is a deterministic title layout, not AI-generated artwork; the actual YouTube account must be eligible for custom thumbnail uploads.
-- The optional Remotion render engine is available on the `feat/remotion-render-engine` integration branch; keep FFmpeg as the default until the Remotion smoke and worker acceptance tests pass for your environment.
+- An optional Remotion render engine is available; keep FFmpeg as the default until the Remotion smoke and worker acceptance tests pass for your environment.
 - No real provider credentials, creator permission evidence or YouTube channel has been validated end-to-end in this repository.
 - The user's Windows installation/FFmpeg build still needs a local acceptance run; hosted CI is not a substitute.
 
