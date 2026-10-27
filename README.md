@@ -80,9 +80,10 @@ The worker checks free space on the database/output volume before folder scans o
 
 Create a Twitch developer app. Set GCF_TWITCH_CLIENT_ID, GCF_TWITCH_CLIENT_SECRET, and GCF_TWITCH_REDIRECT_URI=http://localhost:8766/callback in .env. Register that exact redirect URI in the developer console, then restart the app. The standard discovery feature uses a free app access token and returns metadata only; it never changes source rights.
 
-To authorize official clip downloads from channels where your account is the broadcaster or editor, run this command from the repository root on Windows:
+To authorize official clip downloads from channels where your account is the broadcaster or editor, run these commands from the repository root on Windows:
 
-    .venv\\Scripts\\python.exe -m app.twitch_user_auth
+    cd backend
+    ..\\.venv\\Scripts\\python.exe -m app.twitch_user_auth
 
 A browser opens Twitch's OAuth consent screen. The user access token and refresh token are stored in the operating-system keyring; they are not written to the repository or printed. In Sources & Rights, register or select the Twitch clip URL and document editing/commercial permission. Then, in Media Library, choose that authorized source and click **Fetch selected authorized Twitch clip**. The official Twitch API creates a short-lived download URL, which the worker streams to disk, validates with FFprobe, hashes, and registers as local media. Only then can you queue analysis.
 
