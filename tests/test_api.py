@@ -30,6 +30,37 @@ def test_health_and_empty_dashboard(tmp_path):
     d=c.get("/api/dashboard").json()
     assert d["counts"]["sources_total"]==0 and d["counts"]["published_videos"]==0
     c.__exit__(None,None,None)
+def test_worker_survives_when_failure_event_cannot_be_written(tmp_path,monkeypatch):
+    from app.worker import Worker
+    import app.worker as worker_module
+
+    worker=Worker(tmp_path/"missing"/"worker.sqlite3",None,None,5)
+    attempts=[]
+    def failing_work():
+        attempts.append("attempted")
+        raise RuntimeError("simulated worker failure")
+    worker.one=failing_work
+
+    class StopAfterWait:
+        stopped=False
+        def is_set(self):
+            return self.stopped
+        def wait(self,timeout=None):
+            self.stopped=True
+            return True
+        def set(self):
+            self.stopped=True
+
+    worker.stop_event=StopAfterWait()
+    def unavailable_database(_path):
+        raise sqlite3.OperationalError("simulated database outage")
+    monkeypatch.setattr(worker_module,"connect",unavailable_database)
+    # Must swallow the secondary logging failure, wait, and stop cleanly instead of
+    # letting an exception escape the worker thread and permanently killing automation.
+    worker.run()
+    assert attempts==["attempted"]
+    assert worker.stop_event.is_set()
+
 def test_readiness_reports_missing_media_toolchain(tmp_path):
     c,_=setup_client(tmp_path)
     response=c.get("/api/readiness")
