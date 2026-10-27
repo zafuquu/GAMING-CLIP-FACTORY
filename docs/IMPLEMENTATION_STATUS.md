@@ -23,7 +23,9 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Latest verification evidence
 
-GitHub Actions run 40428209391 on commit `b99b8368` completed successfully across all five jobs: Windows and Ubuntu, Python 3.11 and 3.12, plus the frontend typecheck/production build. The Windows/Python 3.11 job reported 107 passed and 2 skipped; Ubuntu/Python 3.11 reported 109 passed, including the FFmpeg render integration and scheduled YouTube processing/public-state tests. Run link: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40428209391.
+GitHub Actions run **40437190729** on commit `bdcab795` completed successfully across all five jobs: Windows and Ubuntu with Python 3.11/3.12, plus the frontend typecheck/production build. The Ubuntu/Python 3.12 job reported **130 passed, 1 warning**; Ubuntu/Python 3.11 reported **130 passed, 2 warnings**. Both Linux jobs installed FFmpeg and ran the media integration tests. Run: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40437190729.
+
+The current CI suite covers the added 3/5-frame timestamped vision sampling, scheduler fairness and error isolation, along with the existing API/rights, YouTube processing/reconciliation, storage-safety, narration, render and frontend tests.
 
 CI does not verify the user's local Windows FFmpeg package, real provider credentials, actual source licenses or a live YouTube channel upload. Those remain end-to-end acceptance requirements.
 
