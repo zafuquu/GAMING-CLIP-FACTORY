@@ -4,7 +4,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## What is implemented now
 
-- Local app: FastAPI, SQLite numbered migrations 001–012, React/TypeScript/Vite dashboard, loopback API.
+- Local app: FastAPI, SQLite numbered migrations 001–013, React/TypeScript/Vite dashboard, loopback API.
 - Source discovery: Twitch Helix clip metadata and YouTube Data API public video metadata search, including persisted schedules. These store URLs/metadata only; they do not download platform footage. New sources always start with rights UNKNOWN.
 - Rights registry: documented permission evidence, editing/commercial-use permission, owner review and expiry checks. Expired/revoked rights block processing and publishing.
 - Local media intake: configured media-root containment, file checks, SHA-256 and duplicate protection.
@@ -17,7 +17,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - Automated QC: FFprobe checks dimensions/duration/codecs/audio; FFmpeg decode scan and black/frozen-frame heuristics produce PASS or REVIEW. REVIEW outputs may be previewed but only PASS outputs can be queued for YouTube.
 - YouTube service: OAuth Desktop flow uses the OS keyring; a scope-version marker requires reconnect after scope changes. Private resumable uploads, processing-status polling/recheck, upload history, uncertain-outcome reconciliation and Analytics API snapshots exist behind local configuration.
 - Analytics feedback: exact-window comparisons group observed outcomes by game and content format. A cohort is highlighted only with at least three comparable videos; smaller samples are labeled insufficient and no metrics are fabricated.
-- Scheduled release controls: public release is separately gated, begins from a private upload, rechecks current rights/output hash/size/QC and live processing before making a video public; owners can cancel/reschedule. Global pause defers outbound YouTube operations.
+- Scheduled release controls: public release is separately gated, begins from a private upload, rechecks current rights/output hash/size/QC and live processing before making a video public; owners can cancel/reschedule. Global pause defers outbound YouTube operations. The worker only records `PUBLISHED` after YouTube's response or a follow-up API read confirms public visibility; uncertain outcomes require reconciliation.
 - Idempotency and migrations: write transitions use immediate SQLite locks; a partial unique index allows one publication record per render. Migration numbers are validated as unique and each migration plus its version marker is applied atomically.
 
 ## Still not complete
@@ -119,6 +119,8 @@ Frontend:
     npm run build
 
 Latest CI for the tested migration/profile/thumbnail code: GitHub Actions run 40358583264 on commit 63517f8f. Its four backend test steps passed: Windows/Python 3.11 and 3.12 reported 70 passed, 2 skipped; Ubuntu/Python 3.11 and 3.12 reported 72 passed including FFmpeg render integration. The frontend typecheck/production build also passed. Link: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40358583264. Job cleanup was still finishing when these test steps were inspected.
+
+Latest verified GitHub Actions run for commit `b99b8368` passed all five jobs: Windows/Linux on Python 3.11/3.12 plus the frontend build. The backend matrix reported 107 passed / 2 skipped on Windows Python 3.11 and 109 passed on Ubuntu Python 3.11; all four backend jobs were green. [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40428209391).
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
 
