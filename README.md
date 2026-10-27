@@ -127,6 +127,8 @@ Platform-specific hash-pinned backend/optional-ML locks, `frontend/package-lock.
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
 
+The locked Pillow dependency was upgraded from the audited-vulnerable 12.3.0 to 13.0.0; all eight platform/Python base and optional-ML lock variants passed `pip-audit`, and `npm audit` passed in [security audit run #7](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40492166354). The new lock-refresh workflow now audits generated locks before publishing them; its updated workflow definitions and the rest of PR #11 still require their exact-head CI to finish.
+
 ## Important limitations
 
 - No public discovery endpoint is treated as a reuse/download grant.
