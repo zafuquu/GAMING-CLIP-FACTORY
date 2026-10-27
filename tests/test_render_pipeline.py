@@ -176,9 +176,9 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
 
     def fake_upload_video(path, title, description, tags):
         assert Path(path).is_file()
-        assert title == "CI mock production clip"
-        assert description == "Synthetic footage; no third-party content."
-        assert tags == ["automation-test"]
+        assert isinstance(title, str) and title.strip() and len(title) <= 100
+        assert isinstance(description, str) and len(description) <= 5000
+        assert isinstance(tags, list) and len(tags) <= 30
         upload_calls.append(Path(path))
         return {
             "video_id": "mockVideo123",
@@ -245,8 +245,13 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         ]
         subprocess.run(command, capture_output=True, text=True, timeout=90, check=True)
 
-        # Step 3 — opt in to supervised auto-production for a watched, authorized folder.
-        # The folder watcher waits for file stability, imports it, and queues analysis.
+        # Step 3 — explicitly enable the credential-gated upload setting in this isolated test.
+        # Only the upload provider network call is mocked; local rights/QC/hash gates stay real.
+        enable_response = client.post("/api/publishing/enable", json={"enabled": True})
+        assert enable_response.status_code == 200, enable_response.text
+
+        # Opt in to the watched-folder pipeline including private upload after QC PASS.
+        # Public release remains disabled and is never queued by this feature.
         watch_response = client.post(
             "/api/automation/folder-watches",
             json={
@@ -256,12 +261,14 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
                 "recursive": False,
                 "auto_analyze": True,
                 "auto_render": True,
+                "auto_upload_private": True,
                 "scan_interval_seconds": 15,
             },
         )
         assert watch_response.status_code == 201, watch_response.text
         watch_id = watch_response.json()["id"]
         assert watch_response.json()["auto_render"] is True
+        assert watch_response.json()["auto_upload_private"] is True
         worker = Worker(cfg.database_path, ffmpeg, ffprobe, 90, media_root=media)
 
         first_scan = worker.scan_folder_watch(watch_id)
@@ -376,26 +383,30 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         ]
         assert remaining, "Candidates beyond the auto-render cap must stay in the manual review queue."
 
-        # Step 5 — simulate the owner enabling uploads after the normal OAuth setup.
-        # Only the provider network operation is mocked; the real rights/QC/hash/API gates run.
-        enable_response = client.post("/api/publishing/enable", json={"enabled": True})
-        assert enable_response.status_code == 200, enable_response.text
-        queue_upload_response = client.post(
-            "/api/publishing/schedule",
-            json={
-                "rendered_output_id": render["id"],
-                "title": "CI mock production clip",
-                "description": "Synthetic footage; no third-party content.",
-                "tags": ["automation-test"],
-                "publication_mode": "private",
-            },
-        )
-        assert queue_upload_response.status_code == 202, queue_upload_response.text
-        assert queue_upload_response.json()["privacy_status"] == "private"
+        # Step 5 — the real render completion path should enqueue exactly one private upload
+        # for this media after a QC-PASS output and all live rights/settings checks.
+        # The per-media cap prevents one long recording from flooding the channel.
+        with sqlite3.connect(cfg.database_path) as db:
+            auto_publication = db.execute(
+                "SELECT id,rendered_output_id,title FROM published_videos WHERE media_id=?",
+                (media_id,),
+            ).fetchone()
+            upload_jobs = db.execute(
+                "SELECT payload_json FROM jobs WHERE job_type='UPLOAD_YOUTUBE' AND status IN ('QUEUED','RUNNING')"
+            ).fetchall()
+            public_jobs_before_upload = db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING')"
+            ).fetchone()[0]
+        assert auto_publication is not None, "QC-passed watched-folder render must queue a private upload when explicitly enabled."
+        assert auto_publication[2].strip(), "Automatic upload must have a nonempty title."
+        assert len(upload_jobs) == 1, "Only one automatic private upload may be queued per media file."
+        assert json.loads(upload_jobs[0][0])["publication_mode"] == "private"
+        assert json.loads(upload_jobs[0][0])["publish_at"] is None
+        assert public_jobs_before_upload == 0, "Automatic private upload must never queue public release."
         assert worker.one() is True
         assert len(upload_calls) == 1
 
-        publication_id = queue_upload_response.json()["published_video_id"]
+        publication_id = auto_publication[0]
         publication = next(
             row for row in client.get("/api/publishing/videos").json()
             if row["id"] == publication_id
