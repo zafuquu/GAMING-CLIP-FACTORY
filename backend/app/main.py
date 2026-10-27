@@ -308,7 +308,15 @@ def create_app(settings=None,start_worker=True):
                         pass
                 checks[name] = {"ready": False, "reason": f"directory_check_failed:{type(exc).__name__}"}
 
-        required = ("database", "ffmpeg", "ffprobe", "database_directory", "media_root", "output_directory")
+        worker = workers.get("worker")
+        worker_enabled = bool(start_worker)
+        worker_ready = (not worker_enabled) or bool(worker and worker.is_alive())
+        checks["worker"] = {
+            "ready": worker_ready,
+            "enabled": worker_enabled,
+            "required": worker_enabled,
+        }
+        required = ("database", "ffmpeg", "ffprobe", "database_directory", "media_root", "output_directory", "worker")
         ready = all(checks.get(name, {}).get("ready", False) for name in required)
         return {
             "ready": ready,
