@@ -19,6 +19,14 @@ if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
     throw "The verified dependency lock for Windows/Python $version is missing: $lockPath"
 }
 
+# Fail closed before installation if the editable manifest no longer matches the
+# checked-in hash locks. Never bless stale locks in the fingerprint marker.
+$validator = Join-Path $projectRoot "scripts\validate_dependency_locks.py"
+& $pythonPath $validator --os-key win --python-key $pythonKey
+if ($LASTEXITCODE -ne 0) {
+    throw "Dependency manifests and lockfiles disagree. Refresh and commit the lock matrix before starting the application."
+}
+
 Write-Output "Installing exact hashed dependencies from $lockPath"
 & $pythonPath -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "Could not upgrade pip." }
