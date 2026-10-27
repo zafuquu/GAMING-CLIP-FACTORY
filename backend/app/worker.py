@@ -647,13 +647,23 @@ class Worker(threading.Thread):
             if remote_status=="succeeded":
                 scheduled_at=row["scheduled_publish_at"]
                 rights_current=row["rights_status"]=="AUTHORIZED" and not expiry_passed(row["expires_at"])
+                rights_cover_schedule=rights_current
+                if scheduled_at and rights_current and row["expires_at"]:
+                    try:
+                        expiry_at=datetime.fromisoformat(row["expires_at"].replace("Z","+00:00"))
+                        scheduled_dt=datetime.fromisoformat(scheduled_at.replace("Z","+00:00"))
+                        if expiry_at.tzinfo is None: expiry_at=expiry_at.replace(tzinfo=timezone.utc)
+                        if scheduled_dt.tzinfo is None: scheduled_dt=scheduled_dt.replace(tzinfo=timezone.utc)
+                        rights_cover_schedule=expiry_at>scheduled_dt
+                    except (ValueError,TypeError):
+                        rights_cover_schedule=False
                 upload_enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
                 upload_gate=bool(upload_enabled and upload_enabled["value"]=="true" and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true")
                 public_gate=os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true"
                 scheduled_job_id=None
-                if scheduled_at and not rights_current:
+                if scheduled_at and not rights_cover_schedule:
                     final_state="BLOCKED_RIGHTS"
-                    c.execute("UPDATE jobs SET status='CANCELLED',error='Rights were expired or revoked before scheduled release.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
+                    c.execute("UPDATE jobs SET status='CANCELLED',error='Rights are expired/revoked or expire before scheduled release.',updated_at=?,finished_at=? WHERE job_type='PUBLISH_YOUTUBE' AND status='QUEUED' AND payload_json LIKE ?",(t,t,"%"+published_id+"%"))
                 elif scheduled_at and upload_gate and public_gate:
                     final_state="SCHEDULED"
                 else:
@@ -685,10 +695,10 @@ class Worker(threading.Thread):
                             VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)""",
                             (scheduled_job_id,row["source_id"],row["media_id"],json.dumps({"published_video_id":published_id,"publish_at":parsed.isoformat()}),t,t,due))
                 c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
-                          (json.dumps({"published_video_id":published_id,"processing_status":"succeeded","publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id,"rights_current":rights_current}),t,t,job["id"]))
+                          (json.dumps({"published_video_id":published_id,"processing_status":"succeeded","publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id,"rights_current":rights_current,"rights_cover_schedule":rights_cover_schedule}),t,t,job["id"]))
                 event_level="WARNING" if final_state=="BLOCKED_RIGHTS" else "INFO"
                 event_kind="youtube.scheduled_release_blocked" if final_state=="BLOCKED_RIGHTS" else "youtube.processing_succeeded"
-                event(c,event_level,event_kind,"YouTube processing succeeded; public-release conditions were re-evaluated.",{"job_id":job["id"],"published_video_id":published_id,"youtube_video_id":video_id,"publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id,"rights_current":rights_current,"upload_gate":upload_gate,"public_gate":public_gate})
+                event(c,event_level,event_kind,"YouTube processing succeeded; public-release conditions were re-evaluated.",{"job_id":job["id"],"published_video_id":published_id,"youtube_video_id":video_id,"publishing_status":final_state,"scheduled_publish_job_id":scheduled_job_id,"rights_current":rights_current,"rights_cover_schedule":rights_cover_schedule,"upload_gate":upload_gate,"public_gate":public_gate})
                 c.commit()
                 return
             poll_attempt=int(payload.get("poll_attempt",0))
