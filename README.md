@@ -4,13 +4,13 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## What is implemented now
 
-- Local app: FastAPI, SQLite numbered migrations 001–013, React/TypeScript/Vite dashboard, loopback API.
+- Local app: FastAPI, SQLite numbered migrations 001–016, React/TypeScript/Vite dashboard, loopback API.
 - Source discovery: Twitch Helix clip metadata and YouTube Data API public video metadata search, including persisted schedules. These store URLs/metadata only; they do not download platform footage. New sources always start with rights UNKNOWN.
 - Rights registry: documented permission evidence, editing/commercial-use permission, owner review and expiry checks. Expired/revoked rights block processing and publishing.
 - Local media intake: configured media-root containment, file checks, SHA-256 and duplicate protection.
 - Analysis: FFprobe metadata and FFmpeg scene-change candidates. These are heuristics, not a semantic gameplay-event detector.
 - Optional local speech recognition: Faster-Whisper produces transcript/timed segments. A deterministic transcript-grounded content director drafts format/title/description/tags and caption timing. Owners can also write an exact script and explicitly synthesize it through a configured local Piper CLI/voice model; generated WAVs are hashed, previewed and mixed into renders with gameplay-audio ducking. The app does not invent or auto-synthesize scripts.
-- Optional local vision assessment: Ollama-compatible vision model samples three frames per candidate and returns structured evidence. Scores are uncalibrated and never auto-approve; remote endpoints are blocked by default.
+- Optional local vision assessment: Ollama-compatible vision model samples a configurable 3 or 5 frames per candidate, passes candidate-relative timestamps to the model, and returns structured evidence. Scores are uncalibrated and never auto-approve; remote endpoints are blocked by default.
 - Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering.
 - Local rendering: H.264/AAC 1080×1920 MP4. Owner chooses fit-and-pad or blurred-backdrop composition; both preserve the full foreground gameplay frame without forcing a center crop. Timed caption sidecars are saved and may be burned in if the FFmpeg subtitle filter exists.
 - Local poster and designed cover: the pipeline extracts a 720×1280 poster from the render, creates a title-led 9:16 JPEG Shorts cover from the actual frame, records hash/dimensions and uploads it with the official YouTube thumbnail API after processing succeeds. Cover generation/upload has its own visible status, retry path and failure handling; it does not falsify video-upload success.
