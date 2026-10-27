@@ -348,7 +348,9 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         # Simulate a repeated/recovered analysis job from the same folder watch.
         # Preserve the watch ID exactly as the actual watcher does in its job payload.
         repeat_analysis_id = "repeat-auto-render-cap"
-        repeat_stamp = datetime.now(timezone.utc).isoformat()
+        # Prioritize this synthetic retry over the already-queued private upload so this
+        # assertion tests analysis idempotency without consuming the later upload step.
+        repeat_stamp = "2000-01-01T00:00:00+00:00"
         with sqlite3.connect(cfg.database_path) as db:
             db.execute(
                 """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
