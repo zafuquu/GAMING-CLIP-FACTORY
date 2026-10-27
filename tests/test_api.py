@@ -1190,3 +1190,55 @@ def test_disk_capacity_check_failure_pauses_fail_closed(tmp_path,monkeypatch):
     assert values["system_pause_reason"]=="storage_check_failed"
     assert values["storage_safety_status"]=="ERROR"
     client.__exit__(None,None,None)
+
+
+def test_analysis_releases_sqlite_write_lock_during_ffmpeg_and_rechecks_revoked_rights(tmp_path, monkeypatch):
+    """Dashboard writes must work while FFmpeg is running, and revocation must win."""
+    import subprocess
+    import app.worker as worker_module
+    from app.worker import Worker
+
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"clip.mp4").write_bytes(b"synthetic bytes accepted by the import registry")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
+    assert imported.status_code==201,imported.text
+    media_id=imported.json()["id"]
+    queued=c.post(f"/api/media/{media_id}/analyze")
+    assert queued.status_code==202,queued.text
+
+    cfg=c.app.state.settings
+    worker=Worker(cfg.database_path,"fake-ffmpeg","fake-ffprobe",timeout=5,media_root=media)
+    original_run=worker_module.run
+    revocation_results=[]
+
+    def controlled_run(args,timeout,cwd=None):
+        if args[0]=="fake-ffprobe":
+            return subprocess.CompletedProcess(args,0,stdout=json.dumps({
+                "format":{"format_name":"mp4","duration":"10"},
+                "streams":[{"codec_type":"video","codec_name":"h264","width":320,"height":180,"avg_frame_rate":"30/1"}],
+            }),stderr="")
+        if args[0]=="fake-ffmpeg" and "-vf" in args:
+            # This write would time out with sqlite's 10-second busy timeout if the
+            # analyzer accidentally kept a write transaction open across the subprocess.
+            response=c.put(f"/api/sources/{sid}/rights",json={"status":"REVOKED"})
+            revocation_results.append(response.status_code)
+            assert response.status_code==200,response.text
+            return subprocess.CompletedProcess(args,0,stdout="",stderr="pts_time:5.000")
+        return original_run(args,timeout,cwd)
+
+    monkeypatch.setattr(worker_module,"run",controlled_run)
+    assert worker.one() is True
+    assert revocation_results==[200]
+
+    with sqlite3.connect(cfg.database_path) as raw:
+        status=raw.execute("SELECT status FROM source_permissions WHERE source_id=?",(sid,)).fetchone()[0]
+        job=raw.execute("SELECT status,error FROM jobs WHERE id=?",(queued.json()["id"],)).fetchone()
+        candidates=raw.execute("SELECT COUNT(*) FROM candidate_moments WHERE media_id=?",(media_id,)).fetchone()[0]
+    assert status=="REVOKED"
+    assert job[0]=="FAILED"
+    assert "revoked or expired" in job[1].lower()
+    assert candidates==0
+    c.__exit__(None,None,None)
