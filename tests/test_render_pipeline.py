@@ -228,20 +228,20 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-f", "lavfi", "-i",
-            "color=c=red:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=red:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=lime:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=lime:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=blue:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=blue:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=yellow:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=yellow:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=magenta:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=magenta:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=cyan:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
-            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=18",
+            "color=c=cyan:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=72",
             "-filter_complex", "[0:v][1:v][2:v][3:v][4:v][5:v]concat=n=6:v=1:a=0[v]",
-            "-map", "[v]", "-map", "6:a", "-t", "18",
+            "-map", "[v]", "-map", "6:a", "-t", "72",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", str(input_path),
         ]
@@ -313,8 +313,11 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             candidate for candidate in client.get("/api/candidates").json()
             if candidate["media_id"] == media_id
         ]
-        assert candidates, "Scene-change analysis should create candidates for the generated full-frame cuts."
-        assert all(candidate["detector"] == "ffmpeg_scene_change" for candidate in candidates)
+        assert candidates, "Signal analysis should create ranked candidates for the generated full-frame cuts."
+        assert analysis_summary["ranking_method"] == "local_audio_scene_v1"
+        assert analysis_summary["ranking_calibrated"] is False
+        assert all(candidate["detector"] == "local_audio_scene_ranker_v1" for candidate in candidates)
+        assert all(candidate["ranking_score"] is not None for candidate in candidates)
         approved = [candidate for candidate in candidates if candidate["state"] == "APPROVED"]
         assert len(candidates) >= 4, "Fixture must produce more than the lifetime auto-render cap."
         assert len(approved) == 3, "Only three of the detected candidates may auto-render for a media file."
