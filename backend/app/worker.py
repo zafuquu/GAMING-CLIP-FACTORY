@@ -158,6 +158,69 @@ class Worker(threading.Thread):
                     # Preserve worker availability if the audit database itself is temporarily unavailable.
                     pass
 
+    def _cleanup_unregistered_render_artifacts(self, candidate_id):
+        """Remove local files from a failed render only when no committed output references them.
+
+        An FFmpeg command can succeed but probe/QC/thumbnail work can fail afterward. Those
+        failures must not accumulate orphan MP4/SRT/poster files across retries. Registered
+        successful REVIEW outputs are preserved for human inspection.
+        """
+        candidate_id=str(candidate_id or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}",candidate_id):
+            return []
+        output_dir=(self.db.parent/"outputs").resolve()
+        if not output_dir.is_dir():
+            return []
+        c=connect(self.db)
+        try:
+            rows=c.execute(
+                "SELECT output_path,thumbnail_path,qc_report_json FROM rendered_outputs WHERE candidate_id=?",
+                (candidate_id,),
+            ).fetchall()
+            registered=set()
+            for row in rows:
+                for raw_path in (row["output_path"],row["thumbnail_path"]):
+                    if not raw_path:
+                        continue
+                    try:
+                        resolved=Path(raw_path).resolve()
+                        resolved.relative_to(output_dir)
+                        registered.add(resolved)
+                    except (OSError,ValueError,RuntimeError):
+                        continue
+                try:
+                    report=json.loads(row["qc_report_json"] or "{}")
+                    raw_caption=report.get("caption_sidecar_path")
+                    if raw_caption:
+                        resolved=Path(raw_caption).resolve()
+                        resolved.relative_to(output_dir)
+                        registered.add(resolved)
+                except (ValueError,TypeError,OSError,RuntimeError):
+                    pass
+        finally:
+            c.close()
+
+        removed=[]
+        prefix=candidate_id+"_"
+        for artifact in output_dir.iterdir():
+            if artifact.is_symlink() or not artifact.is_file() or not artifact.name.startswith(prefix):
+                continue
+            if artifact.suffix.lower() not in {".mp4",".srt"} and not artifact.name.lower().endswith(".thumbnail.jpg"):
+                continue
+            try:
+                resolved=artifact.resolve()
+                resolved.relative_to(output_dir)
+            except (OSError,ValueError,RuntimeError):
+                continue
+            if resolved in registered:
+                continue
+            try:
+                artifact.unlink(missing_ok=True)
+                removed.append(artifact.name)
+            except OSError as exc:
+                print(f"[render-cleanup] Could not remove orphan artifact {artifact}: {type(exc).__name__}: {exc}",file=sys.stderr)
+        return removed
+
     def one(self):
         storage=self.check_storage_safety()
         if storage["blocked"]:
@@ -313,6 +376,21 @@ class Worker(threading.Thread):
                         pass
                 event(c,"ERROR","job.reconciliation_required" if status=="RECONCILE_REQUIRED" else "job.failed" if status=="FAILED" else "job.retry_queued",str(e),{"job_id":job["id"]}); c.commit()
             finally: c.close()
+            if job["job_type"] == "RENDER_CANDIDATE":
+                try:
+                    payload=json.loads(job["payload_json"] or "{}")
+                    removed=self._cleanup_unregistered_render_artifacts(payload.get("candidate_id"))
+                    if removed:
+                        event_c=connect(self.db)
+                        try:
+                            event(event_c,"WARNING","render.orphan_artifacts_cleaned",
+                                  f"Removed {len(removed)} unregistered artifact(s) after a failed render.",
+                                  {"job_id":job["id"],"candidate_id":payload.get("candidate_id"),"files":removed})
+                            event_c.commit()
+                        finally:
+                            event_c.close()
+                except Exception as cleanup_error:
+                    print(f"[render-cleanup] Cleanup failed after job {job['id']}: {type(cleanup_error).__name__}: {cleanup_error}",file=sys.stderr)
         return True
     def analyze(self,job):
         if not self.ffmpeg or not self.ffprobe: raise RuntimeError("FFmpeg/FFprobe not configured. Set GCF_FFMPEG_PATH and GCF_FFPROBE_PATH.")

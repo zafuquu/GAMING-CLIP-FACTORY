@@ -55,6 +55,8 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         assert render["qc_status"]=="PASS"
         assert render["width"]==1080 and render["height"]==1920
         assert Path(render["output_path"]).is_file()
+        assert worker._cleanup_unregistered_render_artifacts(cid)==[]
+        assert Path(render["output_path"]).is_file(), "Cleanup must preserve the registered successful render."
         assert render["file_size"]>0
         assert render["audio_codec"]=="aac"
         assert render["thumbnail_width"]==720 and render["thumbnail_height"]==1280
@@ -436,3 +438,89 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             ).fetchone()[0]
         assert public_jobs == 0
         assert client.get("/api/publishing/status").json()["public_publishing_enabled"] is False
+
+
+def test_failed_render_qc_removes_unregistered_output_and_preserves_source(tmp_path, monkeypatch):
+    """If FFmpeg succeeds but the output probe/QC fails, orphan media must be removed."""
+    import app.worker as worker_module
+
+    root=tmp_path/"cleanup-project"
+    data=root/"data"
+    media=data/"media"
+    media.mkdir(parents=True,exist_ok=True)
+    cfg=Settings(root,data,media,data/"factory.sqlite3","fake-ffmpeg","fake-ffprobe",30)
+    with TestClient(create_app(settings=cfg,start_worker=False)) as client:
+        source=client.post("/api/sources",json={
+            "source_url":"https://example.com/synthetic-cleanup-fixture",
+            "platform":"test",
+            "title":"Synthetic cleanup fixture",
+        })
+        assert source.status_code==201,source.text
+        source_id=source.json()["id"]
+        rights=client.put(f"/api/sources/{source_id}/rights",json={
+            "status":"AUTHORIZED",
+            "license_type":"Synthetic CI fixture",
+            "permission_evidence":"No third-party media; bytes are a local fake input for mocked FFprobe/FFmpeg.",
+            "editing_allowed":True,
+            "commercial_use_allowed":True,
+            "reviewed_by_owner":True,
+        })
+        assert rights.status_code==200,rights.text
+
+        source_path=media/"fake_source.mp4"
+        source_bytes=b"synthetic source fixture"
+        source_path.write_bytes(source_bytes)
+        imported=client.post("/api/media/import",json={"source_id":source_id,"path":source_path.name})
+        assert imported.status_code==201,imported.text
+        media_id=imported.json()["id"]
+        candidate_id="cleanup-candidate"
+        job_id="cleanup-render-job"
+        stamp=datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute(
+                "INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (candidate_id,media_id,1.0,5.0,"test_fixture","QC failure cleanup fixture","APPROVED",stamp),
+            )
+            db.execute(
+                "INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (job_id,"RENDER_CANDIDATE","QUEUED",source_id,media_id,json.dumps({"candidate_id":candidate_id}),stamp,stamp),
+            )
+            # Make this injected failure terminal on the first attempt so the test can
+            # assert both job/candidate failure state as well as artifact cleanup.
+            db.execute("UPDATE jobs SET max_attempts=1 WHERE id=?",(job_id,))
+
+        def fake_media_command(args, timeout, cwd=None):
+            executable=Path(args[0]).name.lower()
+            target=Path(args[-1]).resolve()
+            if executable=="fake-ffprobe":
+                if target==source_path.resolve():
+                    return subprocess.CompletedProcess(args,0,stdout=json.dumps({
+                        "format":{"format_name":"mp4","duration":"8","size":str(len(source_bytes))},
+                        "streams":[
+                            {"codec_type":"video","codec_name":"h264","width":320,"height":180,"avg_frame_rate":"30/1"},
+                            {"codec_type":"audio","codec_name":"aac"},
+                        ],
+                    }),stderr="")
+                # FFmpeg created an artifact, but it lacks the expected video stream/dimensions.
+                return subprocess.CompletedProcess(args,0,stdout=json.dumps({
+                    "format":{"duration":"4"},
+                    "streams":[{"codec_type":"audio","codec_name":"aac"}],
+                }),stderr="")
+            if executable=="fake-ffmpeg" and "-c:v" in args:
+                target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes(b"partial output created before mocked QC failure")
+                return subprocess.CompletedProcess(args,0,stdout="",stderr="")
+            raise AssertionError(f"Unexpected mocked media command: {args}")
+
+        monkeypatch.setattr(worker_module,"run",fake_media_command)
+        worker=Worker(cfg.database_path,"fake-ffmpeg","fake-ffprobe",30,media_root=media)
+        assert worker.one() is True
+        failed_job=next(j for j in client.get("/api/jobs").json() if j["id"]==job_id)
+        assert failed_job["status"]=="FAILED",failed_job
+        assert "missing expected 1080x1920 video" in failed_job["error"]
+        failed_candidate=next(c for c in client.get("/api/candidates").json() if c["id"]==candidate_id)
+        assert failed_candidate["state"]=="RENDER_FAILED"
+        outputs=data/"outputs"
+        leftovers=[p.name for p in outputs.iterdir() if p.is_file() and p.name.startswith(candidate_id+"_")]
+        assert leftovers==[],f"Failed render left unregistered files behind: {leftovers}"
+        assert source_path.read_bytes()==source_bytes,"Cleanup must never remove or mutate the original source media."
