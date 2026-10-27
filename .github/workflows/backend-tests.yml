@@ -92,25 +92,18 @@ jobs:
             $launcher.Refresh()
             if ($launcher.ExitCode -ne 0) { throw "scripts/start.bat exited with code $($launcher.ExitCode)." }
 
-            $health = Invoke-RestMethod -TimeoutSec 10 "http://127.0.0.1:8765/api/health"
-            if ($health.status -ne "ok") { throw "Health endpoint did not report status=ok." }
-
-            $home = Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 "http://127.0.0.1:8765/"
-            if ($home.StatusCode -ne 200 -or $home.Content -notmatch '<div id="root"') {
-              throw "The API did not serve the production React dashboard."
-            }
-
-            $readiness = Invoke-RestMethod -TimeoutSec 10 "http://127.0.0.1:8765/api/readiness"
-            if (-not $readiness.ready) {
-              $detail = ($readiness.checks.PSObject.Properties | ForEach-Object {
-                "$($_.Name)=$($_.Value.ready):$($_.Value.reason)"
-              }) -join "; "
-              throw "One-click startup returned degraded readiness: $detail"
-            }
-            foreach ($check in @("database","ffmpeg","ffprobe","database_directory","media_root","output_directory","worker")) {
-              if (-not $readiness.checks.$check.ready) { throw "Readiness check '$check' failed." }
-            }
-            Write-Host "PASS: start.bat launched the API, built dashboard, FFmpeg/FFprobe, writable paths and worker."
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -ne 0) { throw "The local API health probe failed." }
+            & $pythonPath "scripts\local_http.py" dashboard
+            if ($LASTEXITCODE -ne 0) { throw "The production dashboard probe failed." }
+            & $pythonPath "scripts\local_http.py" readiness --require-ready
+            if ($LASTEXITCODE -ne 0) { throw "One-click startup returned degraded local readiness." }
+            & cmd.exe /c "scripts\stop.bat"
+            if ($LASTEXITCODE -ne 0) { throw "scripts/stop.bat failed." }
+            Start-Sleep -Seconds 2
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -eq 0) { throw "The API still responds after scripts/stop.bat." }
+            Write-Host "PASS: one-click start, dashboard/readiness validation and clean stop all succeeded."
           }
           finally {
             # The launcher intentionally creates a separate backend window. Tear down only
