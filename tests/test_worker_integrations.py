@@ -153,11 +153,96 @@ def _attach_qc_render(db_path: Path, output_path: Path, state="UPLOAD_PENDING", 
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             ("render-1","candidate-1","media-1",str(output_path),output_path.stat().st_size,sha,5.0,1080,1920,"h264","aac","PASS",'{"passed":true}',stamp))
         db.execute("""UPDATE published_videos SET output_path=?,rendered_output_id='render-1',qc_status='PASS',
-            publishing_status=?,scheduled_publish_at=?,remote_processing_status='succeeded' WHERE id='publication-1'""",
-            (str(output_path),state,scheduled_at))
+            publishing_status=?,scheduled_publish_at=?,remote_processing_status='succeeded',
+            youtube_video_id=CASE WHEN ?='UPLOAD_PENDING' THEN NULL ELSE youtube_video_id END
+            WHERE id='publication-1'""",
+            (str(output_path),state,scheduled_at,state))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('youtube_uploads_enabled','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
         db.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
         db.execute("UPDATE jobs SET status='FAILED' WHERE id='processing-check'")
+
+def _attach_auto_upload_watch(db_path: Path, media_id="media-1", source_id="source-1", watch_id="watch-1", auto_upload_private=1):
+    stamp=now()
+    with sqlite3.connect(db_path) as db:
+        db.execute("""INSERT INTO media_folder_watches
+            (id,source_id,relative_path,enabled,auto_analyze,auto_render,auto_upload_private,recursive,
+             scan_interval_seconds,next_scan_at,last_scan_at,last_error,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (watch_id,source_id,"incoming",1,1,1,auto_upload_private,0,60,None,None,"",stamp,stamp))
+        db.execute("""INSERT INTO watched_media_files
+            (id,watch_id,relative_path,observed_size,observed_mtime_ns,stable_since,first_seen_at,last_seen_at,status,media_id,error)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            ("watched-1",watch_id,"incoming/authorized.mp4",10,1,stamp,stamp,stamp,"IMPORTED",media_id,""))
+        db.execute("UPDATE settings SET value='false',updated_at=? WHERE key='global_paused'",(stamp,))
+
+
+def _queue_mock_upload(db_path: Path, payload):
+    stamp=now()
+    with sqlite3.connect(db_path) as db:
+        db.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)""",
+            ("upload-job","UPLOAD_YOUTUBE","QUEUED","source-1","media-1",json.dumps(payload),stamp,stamp))
+
+
+def test_auto_private_upload_cancels_if_watch_is_disabled_after_render(tmp_path,monkeypatch):
+    db_path=tmp_path/"auto-upload-watch-disabled.sqlite3"
+    _seed_youtube_processing_db(db_path)
+    output=tmp_path/"data"/"outputs"/"upload.mp4"
+    _attach_qc_render(db_path,output,state="UPLOAD_PENDING")
+    _attach_auto_upload_watch(db_path,auto_upload_private=0)
+    payload={"published_video_id":"publication-1","publish_at":None,"tags":[],
+             "publication_mode":"private","automatic_private_upload":True,"folder_watch_id":"watch-1"}
+    _queue_mock_upload(db_path,payload)
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    calls=[]
+    monkeypatch.setattr(worker_module,"upload_video",lambda *a,**k:calls.append(a))
+    worker=Worker(db_path,None,None,timeout=5)
+    monkeypatch.setattr(Worker,"check_storage_safety",lambda self:{"blocked":False})
+    assert worker.one() is True
+    with sqlite3.connect(db_path) as db:
+        publication=db.execute("SELECT publishing_status,youtube_video_id FROM published_videos WHERE id='publication-1'").fetchone()
+        job=db.execute("SELECT status,error FROM jobs WHERE id='upload-job'").fetchone()
+    assert publication==("CANCELLED",None)
+    assert job[0]=="CANCELLED"
+    assert "disabled" in job[1].lower()
+    assert calls==[], "A disabled private-auto-upload watch must not call YouTube."
+
+
+def test_auto_private_upload_rechecks_render_hash_after_thumbnail_preparation(tmp_path,monkeypatch):
+    import hashlib
+    db_path=tmp_path/"auto-upload-hash-recheck.sqlite3"
+    _seed_youtube_processing_db(db_path)
+    output=tmp_path/"data"/"outputs"/"upload.mp4"
+    _attach_qc_render(db_path,output,state="UPLOAD_PENDING")
+    _attach_auto_upload_watch(db_path,auto_upload_private=1)
+    poster=tmp_path/"poster.jpg"
+    poster.write_bytes(b"mock poster")
+    cover=tmp_path/"cover.jpg"
+    cover.write_bytes(b"mock cover")
+    with sqlite3.connect(db_path) as db:
+        db.execute("UPDATE rendered_outputs SET thumbnail_path=? WHERE id='render-1'",(str(poster),))
+    payload={"published_video_id":"publication-1","publish_at":None,"tags":[],
+             "publication_mode":"private","automatic_private_upload":True,"folder_watch_id":"watch-1"}
+    _queue_mock_upload(db_path,payload)
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS","true")
+    calls=[]
+    monkeypatch.setattr(worker_module,"upload_video",lambda *a,**k:calls.append(a))
+    def mutate_during_cover(poster_path,title,game,destination):
+        output.write_bytes(b"mutated output that no longer matches the stored QC digest")
+        return {"path":str(cover),"sha256":hashlib.sha256(cover.read_bytes()).hexdigest(),
+                "width":1280,"height":720,"file_size":cover.stat().st_size,"design_version":"test"}
+    monkeypatch.setattr(worker_module,"generate_shorts_thumbnail",mutate_during_cover)
+    worker=Worker(db_path,None,None,timeout=5)
+    monkeypatch.setattr(Worker,"check_storage_safety",lambda self:{"blocked":False})
+    assert worker.one() is True
+    with sqlite3.connect(db_path) as db:
+        publication=db.execute("SELECT publishing_status,youtube_video_id FROM published_videos WHERE id='publication-1'").fetchone()
+        job=db.execute("SELECT status,error FROM jobs WHERE id='upload-job'").fetchone()
+    assert publication==("FAILED",None)
+    assert job[0]=="FAILED"
+    assert "changed" in job[1].lower() or "hash" in job[1].lower()
+    assert calls==[], "YouTube upload must not start after the output changes after thumbnail preparation."
+
 
 def test_global_pause_defers_youtube_upload_before_network_request(tmp_path,monkeypatch):
     from datetime import datetime, timedelta, timezone
