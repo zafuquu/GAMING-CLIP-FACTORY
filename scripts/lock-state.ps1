@@ -29,8 +29,27 @@ foreach ($required in @($pythonLock, $npmLock)) {
     }
 }
 
-$pythonHash = (Get-FileHash -LiteralPath $pythonLock -Algorithm SHA256).Hash.ToLowerInvariant()
-$npmHash = (Get-FileHash -LiteralPath $npmLock -Algorithm SHA256).Hash.ToLowerInvariant()
+function Get-GcfSha256 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LiteralPath
+    )
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
+# Use the .NET hashing API rather than Get-FileHash so the launcher does not
+# depend on PowerShell module auto-loading in a user's Windows environment.
+$pythonHash = Get-GcfSha256 -LiteralPath $pythonLock
+$npmHash = Get-GcfSha256 -LiteralPath $npmLock
 $expected = "python=$pythonHash" + [Environment]::NewLine + "npm=$npmHash"
 
 if ($Mode -eq "test") {
