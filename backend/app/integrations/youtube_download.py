@@ -29,14 +29,21 @@ def validate_youtube_video_url(value: str) -> str:
     host = parsed.hostname.lower().rstrip(".")
     if host not in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtube-nocookie.com"}:
         raise ValueError("Only youtube.com and youtu.be video URLs are supported.")
+    query = parse_qs(parsed.query)
+    # Reject playlist-bearing URLs rather than silently converting them to a video
+    # URL: callers explicitly requested a single-video acquisition workflow.
+    if "list" in query or "playlist" in query:
+        raise ValueError("Playlist URLs are not supported; provide a single video URL.")
     video_id = ""
     if host == "youtu.be":
         video_id = parsed.path.strip("/").split("/")[0]
     else:
         if parsed.path == "/watch":
-            video_id = parse_qs(parsed.query).get("v", [""])[0]
+            video_id = query.get("v", [""])[0]
         else:
-            match = re.fullmatch(r"/(?:shorts|live|embed)/([A-Za-z0-9_-]{11})/?", parsed.path)
+            # Live streams are intentionally excluded; this adapter downloads
+            # ordinary videos and Shorts only, not live or live-from-start media.
+            match = re.fullmatch(r"/(?:shorts|embed)/([A-Za-z0-9_-]{11})/?", parsed.path)
             video_id = match.group(1) if match else ""
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise ValueError("URL must identify one YouTube video, not a playlist, channel, or search page.")
