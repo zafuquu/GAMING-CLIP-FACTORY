@@ -6,7 +6,7 @@ The repository checks in four standard Python locks and four optional speech-rec
 
 1. Commit the manifest edits to a working branch: `backend/requirements.txt`, `backend/requirements-ml.txt`, and/or `frontend/package.json`.
 2. In GitHub Actions, run **Refresh dependency locks** on that branch. It uses pinned `pip-tools==7.6.2` and generates one standard lock plus one ML lock for Windows/Linux and Python 3.11/3.12. It also generates the frontend npm lock.
-3. Download all five workflow artifacts: `dependency-locks-linux-py311`, `dependency-locks-linux-py312`, `dependency-locks-win-py311`, `dependency-locks-win-py312`, and `dependency-locks-frontend`. Extract each artifact into the repository root, preserving the `backend/` and `frontend/` paths.
+3. Download all five workflow artifacts: `dependency-locks-linux-py311`, `dependency-locks-linux-py312`, `dependency-locks-win-py311`, `dependency-locks-win-py312`, and `dependency-locks-frontend`. Each artifact preserves repository paths, so extract each archive at the repository root to replace its files under `backend/` or `frontend/`.
 4. Review the resulting manifest/lock diffs and dependency licenses/security notices. The ML lock must preserve the same pins as the standard lock and only add the optional ML stack.
 5. Commit the manifests and every refreshed lock together. Do not merge if the lock-validation step or any Windows/Linux Python test matrix job fails.
 
