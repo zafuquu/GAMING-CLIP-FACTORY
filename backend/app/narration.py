@@ -139,8 +139,12 @@ def synthesize_piper(text: str, output_path: str | Path) -> dict:
             cwd=str(config["executable"].parent),
         )
     except subprocess.TimeoutExpired as exc:
+        try: temp_path.unlink(missing_ok=True)
+        except OSError: pass
         raise NarrationError(f"Local Piper synthesis exceeded its {config['timeout_seconds']} second timeout.") from exc
     except OSError as exc:
+        try: temp_path.unlink(missing_ok=True)
+        except OSError: pass
         raise NarrationError(f"Could not launch the configured local Piper executable ({type(exc).__name__}).") from exc
     try:
         if completed.returncode!=0:
