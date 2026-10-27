@@ -140,6 +140,15 @@ class Worker(threading.Thread):
                                 c.execute("UPDATE published_videos SET publishing_status=?,updated_at=? WHERE id=? AND publishing_status IN ('UPLOAD_PENDING','UPLOADING')",(failure_state,t,published_id))
                     except (ValueError, TypeError):
                         pass
+                if job["job_type"] == "SYNTHESIZE_NARRATION":
+                    try:
+                        plan_id=json.loads(job["payload_json"] or "{}").get("content_plan_id")
+                        if plan_id:
+                            plan_state="FAILED" if status=="FAILED" else "QUEUED" if status=="QUEUED" else "FAILED"
+                            c.execute("UPDATE content_plans SET narration_audio_status=?,narration_audio_error=?,updated_at=? WHERE id=? AND narration_audio_status<>'READY'",
+                                      (plan_state,str(e)[:1500],t,plan_id))
+                    except (ValueError,TypeError,sqlite3.Error):
+                        pass
                 if status == "FAILED" and job["job_type"] == "ANALYZE_CANDIDATE_VISION":
                     try:
                         cid=json.loads(job["payload_json"] or "{}").get("candidate_id")
