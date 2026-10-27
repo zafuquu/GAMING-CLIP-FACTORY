@@ -91,15 +91,13 @@ class YouTubeVideoDownloader:
             size = actual.stat().st_size
             if size <= 0 or size > self.max_bytes:
                 raise YouTubeDownloadError("Downloaded file is empty or exceeds the configured maximum size.")
-            if actual != destination:
-                if destination.exists():
-                    destination.unlink()
-                actual.replace(destination)
+            # Preserve the actual container extension. A WebM file must never be
+            # renamed to .mp4 without remuxing; FFmpeg/FFprobe handle supported input containers.
             return {
                 "source_url": normalized,
-                "file_path": str(destination),
-                "file_name": destination.name,
-                "downloaded_bytes": destination.stat().st_size,
+                "file_path": str(actual),
+                "file_name": actual.name,
+                "downloaded_bytes": size,
                 "provider": "yt-dlp",
                 "version": self._version(),
             }
@@ -108,7 +106,7 @@ class YouTubeVideoDownloader:
             raise
         finally:
             for candidate in candidates:
-                if candidate != destination:
+                if candidate != actual:
                     try:
                         candidate.unlink(missing_ok=True)
                     except OSError:
