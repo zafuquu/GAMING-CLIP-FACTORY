@@ -112,6 +112,7 @@ jobs:
             foreach ($proc in $backendCommands) {
               Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
             }
+          }
 
   frontend-build:
     runs-on: ubuntu-latest
