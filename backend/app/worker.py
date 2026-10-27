@@ -316,23 +316,47 @@ class Worker(threading.Thread):
         return True
     def analyze(self,job):
         if not self.ffmpeg or not self.ffprobe: raise RuntimeError("FFmpeg/FFprobe not configured. Set GCF_FFMPEG_PATH and GCF_FFPROBE_PATH.")
+        # Read the job inputs and close SQLite immediately. FFprobe/FFmpeg can take
+        # minutes on long recordings; no write transaction may remain open during them,
+        # otherwise rights changes, pause controls and dashboard writes can time out.
         c=connect(self.db)
         try:
             m=c.execute("SELECT m.*,p.status AS rights_status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(job["media_id"],)).fetchone()
             if not m: raise FileNotFoundError("Media record missing")
-            if m["rights_status"]!="AUTHORIZED" or expiry_passed(m["expires_at"]): raise PermissionError("Rights gate blocked analysis: current AUTHORIZED permission is required")
-            path=Path(m["original_path"])
-            if not path.is_file(): raise FileNotFoundError("Media file missing")
-            probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(path)],min(60,self.timeout))
-            data=json.loads(probe.stdout); fmt=data.get("format",{}); duration=float(fmt.get("duration",0))
-            if duration<=0: raise RuntimeError("Could not verify positive media duration")
-            meta={"format_name":fmt.get("format_name"),"duration_seconds":duration,"size_bytes":path.stat().st_size,"streams":[{"type":s.get("codec_type"),"codec":s.get("codec_name"),"width":s.get("width"),"height":s.get("height"),"fps":s.get("avg_frame_rate")} for s in data.get("streams",[])]}
+            m=dict(m)
+        finally:
+            c.close()
+        if m["rights_status"]!="AUTHORIZED" or expiry_passed(m["expires_at"]):
+            raise PermissionError("Rights gate blocked analysis: current AUTHORIZED permission is required")
+        path=Path(m["original_path"]).resolve()
+        if not path.is_file(): raise FileNotFoundError("Media file missing")
+        source_stat_before=path.stat()
+        probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(path)],min(60,self.timeout))
+        data=json.loads(probe.stdout); fmt=data.get("format",{}); duration=float(fmt.get("duration",0))
+        if duration<=0: raise RuntimeError("Could not verify positive media duration")
+        meta={"format_name":fmt.get("format_name"),"duration_seconds":duration,"size_bytes":source_stat_before.st_size,"streams":[{"type":s.get("codec_type"),"codec":s.get("codec_name"),"width":s.get("width"),"height":s.get("height"),"fps":s.get("avg_frame_rate")} for s in data.get("streams",[])]}
+        p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),"-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
+        source_stat_after=path.stat()
+        if (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns):
+            raise RuntimeError("Source media changed during analysis. Let the file finish copying/recording and retry.")
+        ts=[]
+        for hit in SCENE.finditer(p.stderr):
+            t=float(hit.group(1))
+            if 0<t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
+
+        # Reacquire a short write transaction after media processing and recheck permission;
+        # revocation/expiry during a long FFmpeg scan must not get ignored.
+        c=connect(self.db)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            current=c.execute("SELECT m.*,p.status AS rights_status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(job["media_id"],)).fetchone()
+            if not current: raise FileNotFoundError("Media record disappeared during analysis.")
+            if current["rights_status"]!="AUTHORIZED" or expiry_passed(current["expires_at"]):
+                raise PermissionError("Rights gate blocked analysis: permission was revoked or expired while media was being analyzed.")
+            if Path(current["original_path"]).resolve()!=path:
+                raise RuntimeError("Media source path changed during analysis; refusing to attach results to a different file.")
+            m=dict(current)
             c.execute("UPDATE media_assets SET probe_json=?,state='PROBED' WHERE id=?",(json.dumps(meta),m["id"]))
-            p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),"-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
-            ts=[]
-            for hit in SCENE.finditer(p.stderr):
-                t=float(hit.group(1))
-                if 0<t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
             added=0
             for t in ts:
                 start=round(max(0,t-5),3); end=round(min(duration,t+5),3)
