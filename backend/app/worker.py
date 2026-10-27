@@ -10,7 +10,7 @@ from .twitch_user_auth import TwitchUserNotConfigured
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, ThumbnailUploadError, set_custom_thumbnail, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
-from .highlight_detector import parse_timed_metric, rank_highlight_windows
+from .highlight_detector import parse_timed_metric, rank_highlight_windows, is_render_worthy_vision_assessment
 from .render_profiles import build_video_filter, profile_warning
 from .vision import assess_candidate_images, VisionNotConfigured, vision_sampling_fractions
 from .narration import synthesize_piper, NarrationNotConfigured, NarrationError, narration_status as get_narration_status, validate_script
@@ -524,9 +524,15 @@ class Worker(threading.Thread):
                     # including failed/completed jobs. Re-analysis or restart cannot consume
                     # another batch and silently exceed the per-file cap.
                     remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
-                    eligible=c.execute("""SELECT id FROM candidate_moments
-                        WHERE media_id=? AND state='NEEDS_REVIEW' AND auto_rendered=0
-                        ORDER BY COALESCE(ranking_score,0) DESC,start_seconds ASC,created_at ASC
+                    # Signal-only scores cannot authorize unattended rendering.
+                    # The local vision job queues a render only after the semantic gate passes.
+                    eligible=c.execute("""SELECT cm.id FROM candidate_moments cm
+                        JOIN candidate_vision_assessments va ON va.candidate_id=cm.id
+                        WHERE cm.media_id=? AND cm.state='NEEDS_REVIEW' AND cm.auto_rendered=0
+                          AND va.status='COMPLETED' AND va.is_actionable_highlight=1
+                          AND va.highlight_score>=0.75 AND va.confidence>=0.75
+                          AND va.quality_issues_json='[]'
+                        ORDER BY va.highlight_score DESC,va.confidence DESC,COALESCE(cm.ranking_score,0) DESC
                         LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
                     for candidate in eligible:
                         updated=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(candidate["id"],))
@@ -2133,9 +2139,42 @@ class Worker(threading.Thread):
                 "vision_assessment_method":"local-vision-model-estimate","vision_score_calibrated":False,
                 "vision_frame_times_seconds":frame_times,"vision_relative_frame_times_seconds":relative_frame_times,"vision_sample_count":len(frame_times)})
             c.execute("UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",(combined,json.dumps(components),cid))
+            # Opt-in unattended rendering is allowed only after the conservative
+            # semantic gate passes. Signal-only heuristics never select content for
+            # automatic rendering; the rendered artifact still requires QC and owner review.
+            auto_render_queued=False
+            if is_render_worthy_vision_assessment(result):
+                watch=c.execute("""SELECT w.id,w.enabled,w.auto_analyze,w.auto_render,
+                    p.status AS rights_status,p.expires_at
+                    FROM media_folder_watches w
+                    JOIN watched_media_files f ON f.watch_id=w.id
+                    JOIN source_permissions p ON p.source_id=w.source_id
+                    WHERE w.source_id=? AND f.media_id=?""",(row["source_id"],row["media_id"])).fetchone()
+                paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+                already_auto_rendered=int(c.execute("SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",(row["media_id"],)).fetchone()[0])
+                if (watch and bool(watch["enabled"]) and bool(watch["auto_analyze"]) and bool(watch["auto_render"])
+                    and watch["rights_status"]=="AUTHORIZED" and not expiry_passed(watch["expires_at"])
+                    and not (paused and paused["value"]=="true")
+                    and already_auto_rendered < AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA):
+                    changed=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(cid,))
+                    if changed.rowcount==1:
+                        render_job_id=str(uuid4()); render_stamp=now()
+                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                            VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
+                            (render_job_id,row["source_id"],row["media_id"],json.dumps({
+                                "candidate_id":cid,"render_profile":"fit_pad",
+                                "auto_render_reason":"authorized_folder_watch_vision_gate",
+                                "folder_watch_id":watch["id"],"human_final_review_required":True,
+                                "vision_gate":{"event_type":result["event_type"],"highlight_score":result["highlight_score"],
+                                    "confidence":result["confidence"],"quality_issues":result["quality_issues"]},
+                            }),render_stamp,render_stamp))
+                        auto_render_queued=True
+                        event(c,"INFO","folder_watch.auto_render_queued","Queued a vision-qualified candidate for local rendering; owner review remains required.",
+                            {"candidate_id":cid,"media_id":row["media_id"],"rights_rechecked":True,"public_publish_queued":False,
+                             "human_final_review_required":True,"vision_gate_passed":True})
             summary={"candidate_id":cid,"assessment_id":assessment_id,"model_name":result["model_name"],"event_type":result["event_type"],
                 "highlight_score":result["highlight_score"],"confidence":confidence,"combined_ranking_score":combined,
-                "score_calibrated":False,"automatic_approval":False,"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
+                "score_calibrated":False,"automatic_approval":False,"auto_render_queued":auto_render_queued,"vision_render_gate_passed":is_render_worthy_vision_assessment(result),"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","vision.assessment_completed","Local vision assessment saved as a review aid; candidate remains human-review-only.",{"job_id":job["id"],**summary})
             c.commit()
