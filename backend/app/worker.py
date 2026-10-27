@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event, session
 from .integrations.twitch import TwitchHelix
+from .integrations.twitch_download import TwitchClipDownloader, TwitchClipDownloadError
+from .twitch_user_auth import TwitchUserNotConfigured
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, ThumbnailUploadError, set_custom_thumbnail, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
@@ -255,6 +257,8 @@ class Worker(threading.Thread):
                 self.analyze_candidate_vision(job)
             elif job["job_type"] == "DISCOVER_TWITCH_CLIPS":
                 self.discover_twitch(job)
+            elif job["job_type"] == "DOWNLOAD_TWITCH_CLIP":
+                self.download_twitch_clip(job)
             elif job["job_type"] == "DISCOVER_YOUTUBE_VIDEOS":
                 self.discover_youtube(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
@@ -943,6 +947,81 @@ class Worker(threading.Thread):
             c.execute("UPDATE settings SET value=?,updated_at=? WHERE key='twitch_discovery_next_at'",(next_time,t))
             event(c,"INFO","discovery.scheduled_job_queued","Scheduled Twitch metadata discovery job queued.",{"job_id":jid,"queries":queries,"next_run":next_time})
             c.commit()
+        finally:
+            c.close()
+
+    def download_twitch_clip(self, job):
+        """Fetch one Twitch clip through the official API after a fresh rights check."""
+        payload=json.loads(job["payload_json"] or "{}")
+        sid=str(payload.get("source_id") or job["source_id"] or "")
+        if not sid:
+            raise ValueError("Twitch clip download job is missing source_id.")
+        if not self.ffprobe:
+            raise RuntimeError("FFprobe is required to verify downloaded Twitch clips.")
+        c=connect(self.db)
+        destination=None
+        try:
+            row=c.execute("""SELECT s.id,s.source_url,s.title,s.game,s.platform,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not row:
+                raise FileNotFoundError("Twitch source no longer exists.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked Twitch download: current AUTHORIZED permission is required.")
+            source_url=str(row["source_url"])
+            from .integrations.twitch_download import clip_slug_from_url
+            slug=clip_slug_from_url(source_url)
+            downloader=TwitchClipDownloader()
+            destination_dir=self.media_root/"downloads"
+            destination_dir.mkdir(parents=True,exist_ok=True)
+            destination=destination_dir/f"twitch_{slug}_{uuid4().hex[:12]}.mp4"
+            details=downloader.download(source_url,destination)
+            if not destination.is_file() or destination.stat().st_size<=0:
+                raise RuntimeError("Twitch download did not create a nonempty local file.")
+            probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(destination)],min(60,self.timeout))
+            probe_data=json.loads(probe.stdout)
+            streams=probe_data.get("streams") or []
+            video=next((stream for stream in streams if stream.get("codec_type")=="video"),None)
+            if not video:
+                raise RuntimeError("Downloaded Twitch file has no valid video stream.")
+            duration=float((probe_data.get("format") or {}).get("duration") or 0)
+            if duration<=0 or duration>180:
+                raise RuntimeError("Downloaded Twitch clip duration was invalid or unexpectedly exceeded 180 seconds.")
+            digest=hashlib.sha256()
+            with destination.open("rb") as handle:
+                for block in iter(lambda:handle.read(1024*1024),b""):
+                    digest.update(block)
+            file_hash=digest.hexdigest()
+            source_stat=destination.stat()
+            c.execute("BEGIN IMMEDIATE")
+            latest=c.execute("""SELECT s.source_url,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not latest or latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights gate blocked Twitch download persistence: source permission was revoked or expired.")
+            if latest["source_url"]!=source_url:
+                raise PermissionError("Twitch source URL changed during download; the media was not registered.")
+            duplicate=c.execute("SELECT id FROM media_assets WHERE source_id=? AND sha256=?",(sid,file_hash)).fetchone()
+            if duplicate:
+                raise ValueError("This exact Twitch clip file is already registered for the source.")
+            mid=str(uuid4()); stamp=now()
+            c.execute("""INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,probe_json,state,created_at)
+                VALUES(?,?,?,?,?,?,?,'IMPORTED',?)""",
+                (mid,sid,str(destination),destination.name,source_stat.st_size,file_hash,json.dumps(probe_data),stamp))
+            summary={"media_id":mid,"source_id":sid,"source_url":source_url,"file_name":destination.name,
+                "file_size":source_stat.st_size,"sha256":file_hash,"duration_seconds":duration,
+                "width":video.get("width"),"height":video.get("height"),"download_provider":"twitch_official_clips_api",
+                "clip_id":details.get("clip_id"),"broadcaster_id":details.get("broadcaster_id"),
+                "broadcaster_name":details.get("broadcaster_name"),"rights_rechecked":True}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                (json.dumps(summary),stamp,stamp,job["id"]))
+            event(c,"INFO","media.twitch_clip_downloaded","Official Twitch clip downloaded and registered as local media.",{"job_id":job["id"],**summary})
+            c.commit()
+        except Exception:
+            if c.in_transaction:
+                c.rollback()
+            if destination is not None:
+                try: destination.unlink(missing_ok=True)
+                except OSError: pass
+            raise
         finally:
             c.close()
 
