@@ -25,7 +25,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - Public metadata search does not supply legal permission to republish footage. Owner must provide/prove rights or provide authorized local files; source media is not downloaded by current provider integrations.
 - Scene-change and sparse-frame vision estimates do not reliably detect gameplay events across games. Vision scores are subjective and uncalibrated; game-specific accuracy needs labeled, rights-cleared validation clips.
 - Transcript correction beyond candidate-relative captions, narration pronunciation/emotion/timing controls, richer templates/compositions, automated visual safe-area checks and advanced repair/quarantine remain incomplete. Local script-to-WAV synthesis is implemented but requires a configured Piper executable and voice. A custom cover is a deterministic title layout, not AI-generated artwork; the actual YouTube account must be eligible for custom thumbnail uploads.
-- Remotion is not integrated; compatibility and licensing need review.
+- The optional Remotion render engine is available on the `feat/remotion-render-engine` integration branch; keep FFmpeg as the default until the Remotion smoke and worker acceptance tests pass for your environment.
 - No real provider credentials, creator permission evidence or YouTube channel has been validated end-to-end in this repository.
 - The user's Windows installation/FFmpeg build still needs a local acceptance run; hosted CI is not a substitute.
 
@@ -36,6 +36,20 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 - Provider credentials only for integrations you enable.
 
 No API credentials, OAuth files, model weights or FFmpeg binaries are committed. Review the actual FFmpeg license/notices; do not redistribute binaries without checking obligations.
+
+## Optional Remotion renderer
+
+The default render engine remains FFmpeg. To test the optional Remotion engine on Windows:
+
+1. Install Node.js 20.19+ or 22.13+ (the Remotion renderer is separate from the dashboard dependencies).
+2. From the repository root, run `scripts\\setup-remotion.bat`. It installs the pinned Remotion package versions and renders a short, self-generated test clip. The command exits nonzero if the test fails.
+3. If the synthetic render and QC checks pass, set `GCF_RENDER_ENGINE=remotion` in `.env` and restart the app. Keep `GCF_RENDER_ENGINE=ffmpeg` to use the existing renderer.
+4. Open Readiness at `http://127.0.0.1:8765/api/readiness`; when Remotion is selected, the report checks Node.js, the renderer entry point, and the installed Remotion packages.
+5. Import a locally available `.mp4` or `.webm` source that you are authorized to edit. Approve a candidate and render. The worker still checks permissions, source identity, MP4 dimensions/codecs, duration, decode errors, and black/frozen-frame heuristics.
+
+This Remotion path is local-only: it does not generate a poster/thumbnail or mix narration. It renders the vertical gameplay composition and timed captions; FFmpeg/FFprobe remain required for source analysis and final QC. Browser codec support varies, so H.264/AAC MP4 sources are recommended. Other containers should use the FFmpeg engine.
+
+**Licensing:** Remotion's license terms depend on who uses it and how the application is distributed. Individuals and organizations of up to three people may qualify for the free license, while larger teams and some automated-rendering product use cases require a paid license. Review the current [Remotion license and pricing](https://www.remotion.dev/docs/license/pricing) and [license FAQ](https://convert.remotion.dev/docs/license/faq) before commercial distribution.
 
 ## Windows quick start
 
