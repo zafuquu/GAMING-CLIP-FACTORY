@@ -103,8 +103,10 @@ def load_user_token(session=None) -> dict:
                     f"Twitch token refresh failed with HTTP {response.status_code}; reconnect Twitch."
                 )
             payload = response.json()
-            payload.setdefault("scope", token.get("scope") or [])
-            payload.setdefault("refresh_token", refresh)
+            if not payload.get("scope"):
+                payload["scope"] = token.get("scope") or []
+            if not payload.get("refresh_token"):
+                payload["refresh_token"] = refresh
             token = _save_token(payload, client_id, str(token.get("user_id") or ""))
         except requests.RequestException as exc:
             raise TwitchUserNotConfigured(f"Twitch token refresh failed: {type(exc).__name__}") from exc
