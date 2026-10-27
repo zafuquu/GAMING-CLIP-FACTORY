@@ -290,7 +290,9 @@ def create_app(settings=None,start_worker=True):
         for name, directory in (
             ("database_directory", cfg.database_path.parent),
             ("media_root", cfg.media_root),
-            ("output_directory", cfg.database_path.parent / "outputs"),
+            # Rendering and generated covers use data_dir/outputs, which may differ
+            # from the configured SQLite database's parent directory.
+            ("output_directory", cfg.data_dir / "outputs"),
         ):
             probe = None
             try:

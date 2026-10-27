@@ -110,7 +110,7 @@ def test_readiness_reports_live_background_worker(tmp_path):
 def test_readiness_reports_healthy_media_toolchain(tmp_path,monkeypatch):
     from types import SimpleNamespace
     root=tmp_path/"ready-project"; data=root/"data"; media=data/"media"
-    cfg=Settings(root,data,media,data/"test.sqlite3","ffmpeg-test","ffprobe-test",5)
+    database_root=root/"sqlite"; cfg=Settings(root,data,media,database_root/"test.sqlite3","ffmpeg-test","ffprobe-test",5)
     def fake_run(args,**kwargs):
         assert args[1]=="-version"
         assert kwargs.get("shell") is False
@@ -127,6 +127,8 @@ def test_readiness_reports_healthy_media_toolchain(tmp_path,monkeypatch):
         assert payload["checks"]["ffmpeg"]["version"]=="ffmpeg-test version 7.1.2"
         assert payload["checks"]["ffprobe"]["version"]=="ffprobe-test version 7.1.2"
         assert all(payload["checks"][k]["ready"] for k in ("database","ffmpeg","ffprobe","database_directory","media_root","output_directory"))
+        assert (data/"outputs").is_dir()
+        assert not (database_root/"outputs").exists()
 
 def test_new_source_starts_unknown_and_duplicate_blocked(tmp_path):
     c,_=setup_client(tmp_path); sid=add_source(c)
