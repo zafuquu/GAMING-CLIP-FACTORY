@@ -8,7 +8,7 @@ from .integrations.youtube import upload_video, fetch_video_analytics, UploadRec
 from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
 from .render_profiles import build_video_filter, profile_warning
-from .vision import assess_candidate_images, VisionNotConfigured
+from .vision import assess_candidate_images, VisionNotConfigured, vision_sampling_fractions
 from .narration import synthesize_piper, NarrationNotConfigured, NarrationError, narration_status as get_narration_status, validate_script
 from .script_writer import generate_narration_draft, script_drafting_status as get_script_drafting_status
 
@@ -1266,7 +1266,9 @@ class Worker(threading.Thread):
             assessment_id=old_assessment["id"] if old_assessment else str(uuid4())
         finally:
             c.close()
-        frame_times=[round(start+(end-start)*fraction,3) for fraction in (0.2,0.5,0.8)]
+        frame_fractions=vision_sampling_fractions()
+        frame_times=[round(start+(end-start)*fraction,3) for fraction in frame_fractions]
+        relative_frame_times=[round(frame_time-start,3) for frame_time in frame_times]
         images=[]
         with tempfile.TemporaryDirectory(prefix="gcf-vision-") as temp:
             for index,frame_time in enumerate(frame_times):
@@ -1276,7 +1278,7 @@ class Worker(threading.Thread):
                 if not frame.is_file() or frame.stat().st_size<=0:
                     raise RuntimeError(f"FFmpeg did not extract candidate sample frame at {frame_time:.3f}s.")
                 images.append(frame.read_bytes())
-        result=assess_candidate_images(images,str(row["game"] or ""),str(row["source_title"] or ""),transcript_excerpt)
+        result=assess_candidate_images(images,str(row["game"] or ""),str(row["source_title"] or ""),transcript_excerpt,frame_times_seconds=relative_frame_times)
         t=now()
         c=connect(self.db)
         try:
@@ -1309,11 +1311,11 @@ class Worker(threading.Thread):
             components.update({"vision_model":result["model_name"],"vision_event_type":result["event_type"],
                 "vision_confidence":confidence,"vision_highlight_score":result["highlight_score"],
                 "vision_assessment_method":"local-vision-model-estimate","vision_score_calibrated":False,
-                "vision_frame_times_seconds":frame_times})
+                "vision_frame_times_seconds":frame_times,"vision_relative_frame_times_seconds":relative_frame_times,"vision_sample_count":len(frame_times)})
             c.execute("UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",(combined,json.dumps(components),cid))
             summary={"candidate_id":cid,"assessment_id":assessment_id,"model_name":result["model_name"],"event_type":result["event_type"],
                 "highlight_score":result["highlight_score"],"confidence":confidence,"combined_ranking_score":combined,
-                "score_calibrated":False,"automatic_approval":False,"sampled_frame_times_seconds":frame_times}
+                "score_calibrated":False,"automatic_approval":False,"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","vision.assessment_completed","Local vision assessment saved as a review aid; candidate remains human-review-only.",{"job_id":job["id"],**summary})
             c.commit()
