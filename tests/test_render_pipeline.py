@@ -300,12 +300,9 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
 
         # Step 4 — signal-only candidates must never be auto-rendered. This fixture
         # includes a deliberate audio-energy event, but without a completed semantic
-        # vision assessment it must stay in NEEDS_REVIEW until the owner approves it.
+        # vision assessment it must stay in NEEDS_REVIEW.
         assert worker.one() is True
-        analysis_job = next(
-            job for job in client.get("/api/jobs").json()
-            if job["id"] == analysis_row[0]
-        )
+        analysis_job = next(job for job in client.get("/api/jobs").json() if job["id"] == analysis_row[0])
         assert analysis_job["status"] == "COMPLETED", analysis_job.get("error")
         analysis_summary = json.loads(analysis_job["payload_json"])
         assert analysis_summary["auto_render_queued"] == 0, analysis_summary
@@ -326,26 +323,56 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             and job["status"] == "QUEUED"
         ], "No candidate may auto-render without passing semantic vision review."
 
+        # Seed a completed, strong, evidence-grounded assessment to exercise the
+        # actual worker's post-assessment auto-render gate without requiring Ollama in CI.
         selected = candidates[0]
-        decision = client.post(
-            f"/api/candidates/{selected['id']}/decision",
-            json={"decision": "approve", "notes": "Owner-approved synthetic acceptance fixture"},
+        stamp = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute(
+                """INSERT INTO candidate_vision_assessments(
+                    id,candidate_id,model_name,status,gameplay_context,event_type,visible_event,
+                    is_actionable_highlight,highlight_score,confidence,evidence_json,
+                    quality_issues_json,frame_times_json,raw_response_json,error,created_at,updated_at
+                ) VALUES(?,?,?,'COMPLETED',?,?,?,?,?,?,?,?,?,?, '',?,?)""",
+                (
+                    "vision-gate-ci-assessment", selected["id"], "ci-mocked-local-vision",
+                    "Visible gameplay elimination", "elimination", "Visible elimination indicator",
+                    1, 0.91, 0.89, json.dumps(["Visible elimination indicator in HUD"]),
+                    "[]", "[]", "{}", stamp, stamp,
+                ),
+            )
+            db.execute(
+                """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                   VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
+                (
+                    "vision-qualified-auto-render", source_id, media_id,
+                    json.dumps({"folder_watch_id": watch_id}), stamp, stamp,
+                ),
+            )
+        assert worker.one() is True
+        qualified_job = next(
+            job for job in client.get("/api/jobs").json() if job["id"] == "vision-qualified-auto-render"
         )
-        assert decision.status_code == 202, decision.text
-        render_job_id = decision.json()["job_id"]
+        assert qualified_job["status"] == "COMPLETED", qualified_job.get("error")
+        qualified_summary = json.loads(qualified_job["payload_json"])
+        assert qualified_summary["auto_render_queued"] == 1, qualified_summary
+
+        render_jobs = [
+            job for job in client.get("/api/jobs").json()
+            if job["media_id"] == media_id and job["job_type"] == "RENDER_CANDIDATE"
+            and job["status"] == "QUEUED"
+        ]
+        assert len(render_jobs) == 1
+        render_job_id = render_jobs[0]["id"]
         assert worker.one() is True
         final_jobs = {job["id"]: job for job in client.get("/api/jobs").json()}
         assert final_jobs[render_job_id]["status"] == "COMPLETED", final_jobs[render_job_id].get("error")
 
-        approved = [
+        selected_after_render = next(
             candidate for candidate in client.get("/api/candidates").json()
-            if candidate["media_id"] == media_id and candidate["state"] == "APPROVED"
-        ]
-        selected_after_render = next(candidate for candidate in client.get("/api/candidates").json() if candidate["id"] == selected["id"])
-        assert selected_after_render["state"] in {"APPROVED", "RENDERED"}, selected_after_render
-        render_jobs = [job for job in client.get("/api/jobs").json() if job["id"] == render_job_id]
-        assert len(render_jobs) == 1
-
+            if candidate["id"] == selected["id"]
+        )
+        assert selected_after_render["state"] == "RENDERED_QC_PASSED", selected_after_render
         render = next(
             output for output in client.get("/api/renders").json()
             if output["candidate_id"] == selected["id"]
@@ -358,7 +385,7 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert Path(render["thumbnail_path"]).is_file()
         assert render["file_size"] == Path(render["output_path"]).stat().st_size
 
-        # Re-analysis is idempotent and cannot promote heuristic-only candidates.
+        # Re-analysis is idempotent and cannot exceed the lifetime auto-render cap.
         repeat_analysis_id = "repeat-auto-render-cap"
         repeat_stamp = "2000-01-01T00:00:00+00:00"
         with sqlite3.connect(cfg.database_path) as db:
@@ -375,13 +402,13 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert repeat_job["status"] == "COMPLETED", repeat_job.get("error")
         repeat_summary = json.loads(repeat_job["payload_json"])
         assert repeat_summary["auto_render_queued"] == 0, repeat_summary
-        assert repeat_summary["auto_rendered_historically"] == 0, repeat_summary
+        assert repeat_summary["auto_rendered_historically"] == 1, repeat_summary
         with sqlite3.connect(cfg.database_path) as db:
             auto_rendered_count = db.execute(
                 "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
                 (media_id,),
             ).fetchone()[0]
-        assert auto_rendered_count == 0, "Manual approval must not be counted as an unattended render."
+        assert auto_rendered_count == 1, "Persistent candidate markers must enforce the lifetime per-media cap."
         # Step 5 — the real render completion path should enqueue exactly one private upload
         # for this media after a QC-PASS output and all live rights/settings checks.
         # The per-media cap prevents one long recording from flooding the channel.
