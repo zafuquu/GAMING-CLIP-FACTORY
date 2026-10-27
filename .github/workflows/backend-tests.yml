@@ -77,11 +77,14 @@ jobs:
           $launcher = $null
           try {
             $launcher = Start-Process -FilePath (Join-Path $env:WINDIR "System32\cmd.exe") -ArgumentList @("/c","scripts\start.bat") -WorkingDirectory $repoRoot -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-            if (-not $launcher.WaitForExit(600000)) {
+            if (-not $launcher.WaitForExit(180000)) {
               Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue
-              if (Test-Path $stdout) { Get-Content $stdout }
-              if (Test-Path $stderr) { Get-Content $stderr }
-              throw "scripts/start.bat did not exit within ten minutes."
+              Write-Host "Launcher stdout captured before timeout:"
+              if (Test-Path $stdout) { Get-Content -Tail 160 $stdout }
+              Write-Host "Launcher stderr captured before timeout:"
+              if (Test-Path $stderr) { Get-Content -Tail 160 $stderr }
+              Write-Error "scripts/start.bat did not exit within three minutes."
+              throw "Inspect the captured output above; the smoke test will not wait indefinitely."
             }
 
             if (Test-Path $stdout) { Get-Content $stdout }
