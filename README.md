@@ -49,7 +49,7 @@ The default render engine remains FFmpeg. To test the optional Remotion engine o
 
 This Remotion path is local-only: it does not generate a poster/thumbnail or mix narration. It renders the vertical gameplay composition and timed captions; FFmpeg/FFprobe remain required for source analysis and final QC. Browser codec support varies, so H.264/AAC MP4 sources are recommended. Other containers should use the FFmpeg engine.
 
-**No-subscription target:** The app's normal pipeline is local FFmpeg/FFprobe + local Python + the local Remotion runtime; it does not require cloud rendering, paid AI APIs, a YouTube subscription, or a paid downloader. Remotion's official terms currently describe a free license for eligible individuals/small teams, but they also list a paid "Remotion for Automators" tier for automated video-creation tools. As this project is an automated clip factory, confirm that your personal/local use qualifies for the free license before enabling Remotion for anything beyond your own individual workflow. If you must guarantee zero licensing cost in all circumstances, leave GCF_RENDER_ENGINE=ffmpeg; FFmpeg remains a free, supported renderer. Review the current [Remotion license and pricing](https://www.remotion.dev/docs/license/pricing) and [license FAQ](https://convert.remotion.dev/docs/license/faq).
+**No-subscription target:** No paid AI API, cloud renderer, paid downloader, thumbnail service, or voice service is required. FFmpeg/FFprobe, Python, Node.js, and the local application run on your computer. Remotion's current official [license FAQ](https://convert.remotion.dev/docs/license/faq) explicitly says eligible individuals can use the Free License for automation and commercial use without signing up; the paid "Remotion for Automators" plan applies to users who require a Company License. This integration is designed for one individual using their own local workflow, so no monthly Remotion subscription should be necessary under the Free License, provided you remain eligible under the terms. If your organization is larger than the free-license limit or you distribute/operate the app for others under a different arrangement, re-check the terms. To keep a strictly no-subscription fallback regardless of Remotion licensing, leave `GCF_RENDER_ENGINE=ffmpeg`; FFmpeg remains the default and is fully local. See the current [Remotion license and pricing](https://www.remotion.dev/docs/license/pricing).
 
 ## Windows quick start
 
@@ -80,9 +80,9 @@ The worker checks free space on the database/output volume before folder scans o
 
 Create a Twitch developer app. Set GCF_TWITCH_CLIENT_ID, GCF_TWITCH_CLIENT_SECRET, and GCF_TWITCH_REDIRECT_URI=http://localhost:8766/callback in .env. Register that exact redirect URI in the developer console, then restart the app. The standard discovery feature uses a free app access token and returns metadata only; it never changes source rights.
 
-To authorize official clip downloads from channels where your account is the broadcaster or editor, run this command from the repository's backend directory:
+To authorize official clip downloads from channels where your account is the broadcaster or editor, run this command from the repository root on Windows:
 
-    python -m app.twitch_user_auth
+    .venv\\Scripts\\python.exe -m app.twitch_user_auth
 
 A browser opens Twitch's OAuth consent screen. The user access token and refresh token are stored in the operating-system keyring; they are not written to the repository or printed. In Sources & Rights, register or select the Twitch clip URL and document editing/commercial permission. Then, in Media Library, choose that authorized source and click **Fetch selected authorized Twitch clip**. The official Twitch API creates a short-lived download URL, which the worker streams to disk, validates with FFprobe, hashes, and registers as local media. Only then can you queue analysis.
 
