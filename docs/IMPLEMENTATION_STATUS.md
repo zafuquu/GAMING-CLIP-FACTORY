@@ -27,7 +27,7 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 The latest verified main-branch run is #381 on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. It passed all six jobs: Python 3.11/3.12 on Windows and Ubuntu, frontend build, and Windows one-click start/readiness/restart/stop smoke test. That commit includes the supervised auto-production change from [PR #6](https://github.com/zafuquu/GAMING-CLIP-FACTORY/pull/6). [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814).
 
-A separate reproducible-dependencies branch now contains four hash-pinned backend locks and four optional ML locks (Windows/Linux × Python 3.11/3.12), an npm lockfile, Windows lock-fingerprint checks and updated CI action versions. **Those changes are not merged or production-verified yet; only the latest PR checks can validate them.** Do not treat run #381 as evidence for dependency-lock changes made afterward.
+A separate reproducible-dependencies branch now contains four hash-pinned backend locks and four optional ML locks (Windows/Linux × Python 3.11/3.12), an npm lockfile, startup fingerprints for both manifests and selected lockfiles, fail-closed dependency validation, a CI lock consistency check in every matrix cell, an updated Node 24 Actions toolchain, and a manually dispatched lock-refresh workflow with a maintenance guide. **Those changes are not merged or production-verified yet; only the latest PR checks can validate them.** Do not treat run #381 as evidence for dependency-lock changes made afterward.
 
 CI does not verify the user's local Windows configuration, real provider credentials, actual source rights or a live YouTube channel upload. Those remain end-to-end acceptance requirements.
 
