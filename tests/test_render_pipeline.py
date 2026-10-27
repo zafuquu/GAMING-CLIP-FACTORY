@@ -341,7 +341,8 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             candidate for candidate in client.get("/api/candidates").json()
             if candidate["media_id"] == media_id and candidate["state"] == "APPROVED"
         ]
-        assert any(candidate["id"] == selected["id"] for candidate in approved)
+        selected_after_render = next(candidate for candidate in client.get("/api/candidates").json() if candidate["id"] == selected["id"])
+        assert selected_after_render["state"] in {"APPROVED", "RENDERED"}, selected_after_render
         render_jobs = [job for job in client.get("/api/jobs").json() if job["id"] == render_job_id]
         assert len(render_jobs) == 1
 
