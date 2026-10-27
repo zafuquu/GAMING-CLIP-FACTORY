@@ -1,11 +1,18 @@
-name: Live YouTube to Shorts acceptance (one-off)
+name: Live YouTube to Shorts acceptance
 
 on:
-  push:
-    branches: ["feat/youtube-highlight-intelligence"]
-    paths:
-      - "scripts/live_youtube_e2e.py"
-      - ".github/workflows/live-youtube-e2e.yml"
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: "HTTPS URL of a video you own or have explicit editing permission for"
+        required: true
+        type: string
+        default: "https://www.youtube.com/watch?v=W8bIC5C8FgU"
+      owner_authorized:
+        description: "Confirm that you own this video or have explicit permission to download/edit it"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,6 +23,7 @@ concurrency:
 
 jobs:
   live-youtube-e2e-windows:
+    if: ${{ inputs.owner_authorized == true }}
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -43,13 +51,13 @@ jobs:
       - name: Install Remotion dependencies
         working-directory: remotion
         run: npm install --no-audit --no-fund
-      - name: Download actual owner-provided YouTube video, analyze it, and render a Short
+      - name: Download the authorized video, analyze it, and render a Short
         shell: pwsh
         env:
           GCF_E2E_REPORT_PATH: ${{ github.workspace }}\live-youtube-e2e-report.json
-        run: |
-          $env:GCF_E2E_YOUTUBE_URL = "https://www.youtube.com/watch?v=W8bIC5C8FgU"
-          python scripts/live_youtube_e2e.py
+          GCF_E2E_YOUTUBE_URL: ${{ inputs.youtube_url }}
+          GCF_E2E_OWNER_CONFIRMED: ${{ inputs.owner_authorized }}
+        run: python scripts/live_youtube_e2e.py
       - name: Upload only the JSON acceptance report (never the source or rendered video)
         if: always() && hashFiles('live-youtube-e2e-report.json') != ''
         uses: actions/upload-artifact@v4
