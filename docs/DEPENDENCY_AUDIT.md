@@ -1,5 +1,9 @@
 # Dependency audit
 
+## Dependency reproducibility
+
+The lock matrix has one hash-pinned backend file for each supported runtime: `backend/requirements-lock-{linux,win}-{py311,py312}.txt`. Optional speech-recognition locks follow the same naming pattern as `requirements-ml-lock-{linux,win}-{py311,py312}.txt`, constrained to the matching standard lock because Faster-Whisper/CTranslate2 adds platform-specific wheels and dependencies. The Windows installer selects the matching lock based on the Python in `.venv`; CI selects by matrix cell; the frontend is installed from `frontend/package-lock.json` via `npm ci`. Never use a generic platform-agnostic hash lock for these dependencies. Keep the lock matrix updated whenever `requirements.txt`, `requirements-ml.txt` or `package.json` changes. Locking does not replace license, security-advisory or runtime-compatibility review.
+
 ## Required Python runtime
 
 - FastAPI, Pydantic v2, Uvicorn: API and request validation.

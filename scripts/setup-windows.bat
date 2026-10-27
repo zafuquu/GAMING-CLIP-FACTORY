@@ -54,15 +54,8 @@ if errorlevel 1 (
   goto fail
 )
 :dependencies
-".venv\Scripts\python.exe" -m pip install --upgrade pip
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\install-dependencies.ps1"
 if errorlevel 1 goto fail
-".venv\Scripts\python.exe" -m pip install -r backend\requirements.txt
-if errorlevel 1 goto fail
-pushd frontend
-call npm install --no-audit --no-fund
-set "NPM_STATUS=%ERRORLEVEL%"
-popd
-if not "%NPM_STATUS%"=="0" goto fail
 echo Setup complete.
 exit /b 0
 

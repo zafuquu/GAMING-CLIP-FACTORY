@@ -25,9 +25,9 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Latest verification evidence
 
-The latest verified `main` baseline before the supervised auto-production work is GitHub Actions run #364 on commit `9f4917a92053cd47a939050ec918cae8a71c7ca1`. It passed all six jobs: Python 3.11/3.12 on Windows and Ubuntu, frontend build, and the Windows one-click start/readiness/restart/stop smoke test. [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40478057648).
+The latest verified main-branch run is #381 on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. It passed all six jobs: Python 3.11/3.12 on Windows and Ubuntu, frontend build, and Windows one-click start/readiness/restart/stop smoke test. That commit includes the supervised auto-production change from [PR #6](https://github.com/zafuquu/GAMING-CLIP-FACTORY/pull/6). [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814).
 
-The open supervised auto-production change adds the migration for persistent per-candidate auto-render markers, a repeated-analysis lifetime-cap regression, a long-analysis SQLite-lock/revocation regression, and a synthetic watched-folder workflow through rendering/QC and a mocked private YouTube lifecycle. **Only the latest checks on [PR #6](https://github.com/zafuquu/GAMING-CLIP-FACTORY/pull/6) can validate that unmerged code.** Do not treat the earlier main run as evidence for changes made afterward.
+A separate reproducible-dependencies branch now contains four hash-pinned backend locks and four optional ML locks (Windows/Linux × Python 3.11/3.12), an npm lockfile, Windows lock-fingerprint checks and updated CI action versions. **Those changes are not merged or production-verified yet; only the latest PR checks can validate them.** Do not treat run #381 as evidence for dependency-lock changes made afterward.
 
 CI does not verify the user's local Windows configuration, real provider credentials, actual source rights or a live YouTube channel upload. Those remain end-to-end acceptance requirements.
 
