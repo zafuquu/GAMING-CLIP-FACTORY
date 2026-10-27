@@ -5,6 +5,10 @@ import sqlite3
 import subprocess
 import sys
 import json
+import hashlib
+import math
+import struct
+import wave
 import pytest
 from fastapi.testclient import TestClient
 
@@ -68,6 +72,43 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         assert "1\n00:00:00,500 --> 00:00:01,500\nNice shot!\n" in subtitle
         candidates=client.get("/api/candidates").json()
         assert next(x for x in candidates if x["id"]==cid)["state"]=="RENDERED_QC_PASSED"
+
+        # Voiceover sidecar can be mixed into gameplay audio with the selected render profile.
+        voice_cid="ci-candidate-narration"
+        voice_jid="ci-render-job-narration"
+        voice_path=data/"outputs"/"ci-narration.wav"
+        voice_path.parent.mkdir(parents=True,exist_ok=True)
+        sample_rate=22050
+        with wave.open(str(voice_path),"wb") as voice:
+            voice.setnchannels(1)
+            voice.setsampwidth(2)
+            voice.setframerate(sample_rate)
+            frames=[]
+            for i in range(int(sample_rate*1.5)):
+                sample=int(5000*math.sin(2*math.pi*220*i/sample_rate))
+                frames.append(struct.pack("<h",sample))
+            voice.writeframes(b"".join(frames))
+        voice_sha=hashlib.sha256(voice_path.read_bytes()).hexdigest()
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                       (voice_cid,mid,1.0,5.0,"test_fixture","Narration mixer CI candidate","APPROVED",stamp))
+            db.execute("""INSERT INTO content_plans(id,candidate_id,chosen_format,title,narration_text,created_at,updated_at,
+                narration_audio_path,narration_audio_sha256,narration_audio_duration_seconds,narration_audio_status)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                ("ci-narration-plan",voice_cid,"gameplay_highlight","Narration test clip","Watch the rotate.",stamp,stamp,
+                 str(voice_path),voice_sha,1.5,"READY"))
+            db.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                       (voice_jid,"RENDER_CANDIDATE","QUEUED",sid,mid,json.dumps({"candidate_id":voice_cid,"render_profile":"fit_pad"}),stamp,stamp))
+        assert worker.one() is True
+        voice_job=next(x for x in client.get("/api/jobs").json() if x["id"]==voice_jid)
+        assert voice_job["status"]=="COMPLETED",voice_job.get("error")
+        voice_render=next(x for x in client.get("/api/renders").json() if x["candidate_id"]==voice_cid)
+        assert voice_render["qc_status"]=="PASS",voice_render["qc_report"]
+        assert voice_render["audio_codec"]=="aac"
+        assert voice_render["qc_report"]["narration_mixed"] is True
+        assert voice_render["qc_report"]["narration_audio_sha256"]==voice_sha
+        assert 1.0<=voice_render["qc_report"]["narration_audio_duration_seconds"]<=2.0
+        assert Path(voice_render["output_path"]).is_file()
 
         blur_cid="ci-candidate-blur-fill"
         blur_jid="ci-render-job-blur-fill"
