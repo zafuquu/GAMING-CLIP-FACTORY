@@ -16,8 +16,6 @@ export type GameplayProps = {
   captions: Caption[];
 };
 
-const FPS = 30;
-
 export const GameplayClip: React.FC<GameplayProps> = ({
   sourceFile,
   sourceFps,
