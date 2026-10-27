@@ -1,4 +1,4 @@
-import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3, wave
+import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3, wave, shutil
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -56,7 +56,63 @@ class Worker(threading.Thread):
                 finally: c.close()
                 worked=False
             if not worked: self.stop_event.wait(1)
+    def check_storage_safety(self):
+        """Fail closed on low/unreadable output-volume capacity; recovery never auto-resumes work."""
+        enabled=os.getenv("GCF_DISK_SAFETY_ENABLED","true").strip().lower()=="true"
+        try:
+            threshold_gb=max(0.0,min(1024.0,float(os.getenv("GCF_MIN_FREE_DISK_GB","3"))))
+        except (TypeError,ValueError):
+            threshold_gb=3.0
+        if not enabled or threshold_gb<=0:
+            return {"enabled":enabled,"threshold_gb":threshold_gb,"disk_state":"DISABLED","free_gb":None,"blocked":False}
+        disk_state="OK"; free_bytes=None; total_bytes=None; reason=""
+        try:
+            usage=shutil.disk_usage(self.db.parent)
+            free_bytes=int(usage.free); total_bytes=int(usage.total)
+            free_gb=free_bytes/(1024**3)
+            if free_gb<threshold_gb:
+                disk_state="LOW"
+                reason=f"Free disk space is {free_gb:.2f} GB; configured minimum is {threshold_gb:.2f} GB."
+        except OSError as exc:
+            free_gb=None
+            disk_state="ERROR"
+            reason=f"Disk capacity could not be verified ({type(exc).__name__}); processing is paused fail-closed."
+        stamp=now()
+        c=connect(self.db)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            values={r["key"]:r["value"] for r in c.execute("SELECT key,value FROM settings WHERE key IN ('storage_safety_status','low_disk_pause_active','global_paused','system_pause_reason')")}
+            previous=values.get("storage_safety_status","UNKNOWN")
+            pause_active=values.get("low_disk_pause_active")=="true"
+            if disk_state in {"LOW","ERROR"}:
+                c.execute("INSERT INTO settings(key,value,updated_at) VALUES('global_paused','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
+                c.execute("INSERT INTO settings(key,value,updated_at) VALUES('low_disk_pause_active','true',?) ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at",(stamp,))
+                c.execute("INSERT INTO settings(key,value,updated_at) VALUES('system_pause_reason',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",("low_disk" if disk_state=="LOW" else "storage_check_failed",stamp))
+                if previous!=disk_state or not pause_active:
+                    event(c,"ERROR","storage.safety_pause",reason,{"disk_state":disk_state,"free_gb":round(free_gb,3) if free_gb is not None else None,"threshold_gb":threshold_gb})
+            else:
+                if previous in {"LOW","ERROR"} or pause_active:
+                    c.execute("INSERT INTO settings(key,value,updated_at) VALUES('low_disk_pause_active','false',?) ON CONFLICT(key) DO UPDATE SET value='false',updated_at=excluded.updated_at",(stamp,))
+                    current_reason=values.get("system_pause_reason","")
+                    if current_reason in {"low_disk","storage_check_failed"}:
+                        c.execute("INSERT INTO settings(key,value,updated_at) VALUES('system_pause_reason','low_disk_recovered_waiting_for_manual_resume',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(stamp,))
+                    event(c,"WARNING","storage.capacity_recovered","Disk capacity is back above the configured threshold. Processing remains paused until the owner explicitly resumes it.",{"free_gb":round(free_gb,3),"threshold_gb":threshold_gb,"global_pause_remains":values.get("global_paused")=="true"})
+            c.execute("INSERT INTO settings(key,value,updated_at) VALUES('storage_safety_status',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(disk_state,stamp))
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
+        return {"enabled":True,"threshold_gb":threshold_gb,"disk_state":disk_state,
+                "free_gb":round(free_gb,3) if free_gb is not None else None,
+                "total_gb":round(total_bytes/(1024**3),3) if total_bytes is not None else None,
+                "blocked":disk_state in {"LOW","ERROR"},"reason":reason}
+
     def one(self):
+        storage=self.check_storage_safety()
+        if storage["blocked"]:
+            return False
         self.scan_due_folder_watches()
         c=connect(self.db); job=None
         try:
