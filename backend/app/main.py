@@ -353,7 +353,7 @@ def create_app(settings=None,start_worker=True):
                 "entrypoint_exists":remotion_script.is_file(),
                 "renderer_package_installed":renderer_package.is_file(),
                 "bundler_package_installed":bundler_package.is_file(),
-                **({"reason":"run_scripts\\setup-remotion.bat_then_restart_the_app"} if not remotion_ready else {}),
+                **({"reason":"Run scripts\\\\setup-remotion.bat, then restart the app."} if not remotion_ready else {}),
             }
         else:
             checks["remotion"]={"ready":True,"required":False,"selected":False}
