@@ -425,6 +425,9 @@ def create_app(settings=None,start_worker=True):
                 upload_enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
                 if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or not upload_enabled or upload_enabled["value"]!="true":
                     raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
+                youtube_ready=connected_status()
+                if not youtube_ready.get("connected"):
+                    raise HTTPException(503,detail="Private auto-upload requires a connected YouTube channel: "+str(youtube_ready.get("reason") or "connection check failed"))
             existing=c.execute("SELECT id,relative_path,source_id FROM media_folder_watches").fetchall()
             new_parts=PurePosixPath(data.relative_path).parts
             for item in existing:
@@ -465,6 +468,9 @@ def create_app(settings=None,start_worker=True):
             effective_auto_analyze=bool(values.get("auto_analyze",row["auto_analyze"]))
             effective_auto_render=bool(values.get("auto_render",row["auto_render"]))
             effective_auto_upload_private=bool(values.get("auto_upload_private",row["auto_upload_private"]))
+            if values.get("auto_render") is False and effective_auto_upload_private:
+                values["auto_upload_private"]=False
+                effective_auto_upload_private=False
             if effective_auto_render and not effective_auto_analyze:
                 raise HTTPException(422,detail="Supervised auto-render requires automatic analysis to remain enabled.")
             if effective_auto_upload_private and not effective_auto_render:
@@ -473,6 +479,9 @@ def create_app(settings=None,start_worker=True):
                 upload_enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
                 if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or not upload_enabled or upload_enabled["value"]!="true":
                     raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
+                youtube_ready=connected_status()
+                if not youtube_ready.get("connected"):
+                    raise HTTPException(503,detail="Private auto-upload requires a connected YouTube channel: "+str(youtube_ready.get("reason") or "connection check failed"))
             if values.get("enabled") is True:
                 target_parts=PurePosixPath(row["relative_path"]).parts
                 siblings=c.execute("SELECT id,relative_path FROM media_folder_watches WHERE id<>?",(watch_id,)).fetchall()
