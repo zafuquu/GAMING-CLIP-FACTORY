@@ -531,7 +531,8 @@ class Worker(threading.Thread):
                         WHERE cm.media_id=? AND cm.state='NEEDS_REVIEW' AND cm.auto_rendered=0
                           AND va.status='COMPLETED' AND va.is_actionable_highlight=1
                           AND va.highlight_score>=0.75 AND va.confidence>=0.75
-                          AND va.quality_issues_json='[]'
+                          AND va.event_type IN ('clutch','elimination','victory','near_death','team_fight','skill_play')
+                          AND va.quality_issues_json='[]' AND va.evidence_json<>'[]'
                         ORDER BY va.highlight_score DESC,va.confidence DESC,COALESCE(cm.ranking_score,0) DESC
                         LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
                     for candidate in eligible:
