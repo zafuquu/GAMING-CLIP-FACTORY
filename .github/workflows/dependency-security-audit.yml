@@ -4,6 +4,14 @@ on:
   schedule:
     - cron: "47 5 * * 1"
   workflow_dispatch:
+  push:
+    branches: [docs-security-maintenance]
+    paths:
+      - "backend/requirements*.txt"
+      - "frontend/package.json"
+      - "frontend/package-lock.json"
+      - ".github/workflows/dependency-security-audit.yml"
+      - ".github/dependabot.yml"
   pull_request:
     paths:
       - "backend/requirements*.txt"
