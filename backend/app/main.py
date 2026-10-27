@@ -564,9 +564,12 @@ def create_app(settings=None,start_worker=True):
             if row["narration_audio_status"]=="READY" and row["narration_audio_sha256"]:
                 # Same script and existing generated audio: do not synthesize the same audio repeatedly.
                 plan=c.execute("SELECT narration_audio_path FROM content_plans WHERE id=?",(row["content_plan_id"],)).fetchone()
-                audio=Path(plan["narration_audio_path"]) if plan and plan["narration_audio_path"] else None
+                audio=Path(plan["narration_audio_path"]).resolve() if plan and plan["narration_audio_path"] else None
+                if audio:
+                    try: audio.relative_to((cfg.database_path.parent/"outputs").resolve())
+                    except ValueError: audio=None
                 if audio and audio.is_file():
-                    actual=hashlib.sha256(audio.read_bytes()).hexdigest()
+                    actual=digest(audio)
                     if actual==row["narration_audio_sha256"]:
                         return {"id":None,"status":"ALREADY_READY","content_plan_id":row["content_plan_id"],"audio_hash":actual}
             c.execute("UPDATE content_plans SET narration_audio_status='QUEUED',narration_audio_error='',updated_at=? WHERE id=?",(t,row["content_plan_id"]))
