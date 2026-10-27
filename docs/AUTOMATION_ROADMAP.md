@@ -4,14 +4,14 @@ This roadmap separates code that exists from owner configuration and live accept
 
 ## Current alpha: implemented in code
 
-- FastAPI and React dashboard, SQLite migrations 001–009, persistent jobs and startup recovery.
+- FastAPI and React dashboard, SQLite migrations 001–012, persistent jobs and startup recovery.
 - Rights registry and repeated expiry/revocation checks; discovered sources remain UNKNOWN.
 - Scheduled Twitch Helix and YouTube Data API metadata-only discovery; providers do not download source footage.
 - FFmpeg scene-change candidate generation, optional Faster-Whisper transcripts, timed captions and transcript-grounded draft metadata.
 - Optional local Ollama-compatible vision assessment using up to three sampled frames; structured evidence/uncalibrated score, mandatory human review.
-- Candidate review/approval, editable candidate-relative captions, vertical rendering with fit-and-pad or blurred-backdrop profile, SRT caption sidecar/burn-in and QC PASS/REVIEW.
+- Candidate review/approval, editable candidate-relative captions, vertical rendering with fit-and-pad or blurred-backdrop profile, SRT caption sidecar/burn-in and QC PASS/REVIEW. A deterministic title-led Shorts cover is generated from the actual rendered poster.
 - Generated portrait poster frames, hash/dimension verification and browser preview.
-- YouTube Desktop OAuth in OS keyring with scope-version validation, private upload, processing polling/recheck, reconciliation, Analytics snapshots and separate public-release environment gate.
+- YouTube Desktop OAuth in OS keyring with scope-version validation, private upload, processing polling/recheck, official custom-thumbnail upload/retry after successful processing, reconciliation, Analytics snapshots and separate public-release environment gate.
 - Opt-in recurring Analytics collection and same-window game/format comparison; a group is highlighted only with at least three videos and an observed average-view-percentage metric.
 - Public release begins from a private upload, rechecks current rights, output hash/size/QC, processing state and scheduled time; owners can cancel/reschedule.
 - Global pause checks queue admission and outbound YouTube mutations. Queue transitions use immediate SQLite write locks; a partial unique index prevents multiple publication records for one render.
@@ -38,7 +38,7 @@ This roadmap separates code that exists from owner configuration and live accept
 
 ### Phase 2 — quality rendering
 
-- Full caption editing/review plus transcript correction and subtitle safe-area/readability checks.
+- Full caption editing/review plus transcript correction and subtitle safe-area/readability checks. Custom cover upload code exists; real channel eligibility and successful account acceptance remain to be verified.
 - More render profiles and optional region-of-interest layouts, with no forced crop unless chosen by a documented focus strategy.
 - Loudness/clipping checks, missing-stream checks, artifact size/duration policies, quarantine and bounded repair.
 - Custom thumbnail/layout assets and automated visual safe-area tests.
