@@ -4,7 +4,7 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 
 ## Implemented in code
 
-- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–018, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
+- FastAPI local API, React dashboard, SQLite persistence, numbered migrations 001–019, persistent job queue and startup recovery. Migrations reject duplicate version prefixes and apply each schema file plus its version marker atomically.
 - One-click Windows startup through `scripts/start.bat`: checks runtime and dependency health, repairs missing environment dependencies, builds the optimized frontend, starts/reuses the API and opens a same-origin local dashboard. `/api/readiness` reports database, FFmpeg/FFprobe, writable paths and worker liveness. The Windows launch path still requires acceptance on the actual target PC.
 - Source rights registry with evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
 - Local media registration restricted to the configured media root with file checks, SHA-256 and duplicate prevention.
@@ -13,7 +13,8 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 - Optional Faster-Whisper transcription, timed phrase segments, deterministic transcript-grounded content drafts and caption timing.
 - Optional local Ollama-compatible vision assessment sampling configurable 3 or 5 frames with candidate-relative timestamps, saving structured evidence and an uncalibrated score. Local inference is preferred, feature is off by default and never auto-approves.
 - Candidate review/approval, editable candidate-relative captions, H.264/AAC 1080×1920 fit-and-pad or blurred-backdrop rendering, optional SRT subtitle burn-in and output hashes.
-- Opt-in supervised folder auto-production: stable files can be imported/analyzed, and up to three candidates per media file can be automatically rendered locally after current rights/watch/pause checks. The lifetime cap is stored on candidate records so repeated analysis cannot create extra batches. Unselected candidates remain in manual review; rendered outputs still need human inspection. No upload/public release is enabled by this setting.
+- Opt-in supervised folder auto-production: stable files can be imported/analyzed, and up to three candidates per media file can be automatically rendered locally after current rights/watch/pause checks. The lifetime cap is stored on candidate records so repeated analysis cannot create extra batches. Unselected candidates remain in manual review; rendered outputs still need human inspection.
+- Separate opt-in `auto_upload_private` folder-watch setting (migration 019, pending full CI on the combined branch): requires current rights, connected YouTube OAuth and both environment and dashboard/database upload gates. After a QC-PASS render, rights and source identity are rechecked before the output and one private-upload job are recorded atomically. The worker checks current watch consent, rights, pause and rendered-output hash again before the provider request. It queues at most one private upload per source recording and does not schedule public release.
 - Local portrait poster frame extraction at 720×1280, poster dimensions/hash and browser preview; deterministic title-led Shorts cover generation from the real rendered frame, artifact hash/dimension validation, official YouTube thumbnail upload after processing, owner retry/regeneration and separate thumbnail-specific status/error tracking.
 - QC checks for probe/decode, dimensions, duration, codecs/audio, black-frame and frozen-frame heuristics. Warnings become REVIEW; only PASS is eligible for YouTube.
 - Browser preview for PASS and REVIEW outputs, transcript/content-plan/vision evidence exposed in API/dashboard.
@@ -24,13 +25,9 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 - Bounded subprocess timeouts/retries, job recovery, migration collision/rollback tests and current CI.
 
 ## Latest verification evidence
+The latest pre-dependency-hardening main baseline is run #381 on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. The platform-specific lock matrix and Windows setup path were then verified in [run #411](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40485109430) at dependency-lock branch head `9e8e8c172670dd6d5920c472ab20f1c20e37f51c`, all six jobs passing, and merged to main as `2946cba2ef683c61f0b61678c8fd83c97b349b3d`.
 
-The latest verified main-branch run is #381 on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. It passed all six jobs: Python 3.11/3.12 on Windows and Ubuntu, frontend build, and Windows one-click start/readiness/restart/stop smoke test. That commit includes the supervised auto-production change from [PR #6](https://github.com/zafuquu/GAMING-CLIP-FACTORY/pull/6). [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814).
-
-A separate reproducible-dependencies branch now contains four hash-pinned backend locks and four optional ML locks (Windows/Linux × Python 3.11/3.12), an npm lockfile, Windows lock-fingerprint checks and updated CI action versions. **Those changes are not merged or production-verified yet; only the latest PR checks can validate them.** Do not treat run #381 as evidence for dependency-lock changes made afterward.
-
-CI does not verify the user's local Windows configuration, real provider credentials, actual source rights or a live YouTube channel upload. Those remain end-to-end acceptance requirements.
-
+The private-auto-upload feature adds synthetic end-to-end coverage for QC-PASS → one private upload job, no public-release job, opt-in/OAuth/configuration gates, cancellation if the watch is disabled, and output-hash revalidation before upload. The earlier feature-only branch passed six-job CI at `794dd17d353b0a0033dc4ed83f115e9d1c31ec55` (run [#410](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40484717891)); because that branch predates the dependency-lock merge, the new combined feature branch must pass its own full matrix before merge.
 ## Configuration and acceptance still required
 
 - Twitch developer-app credentials and/or YouTube Data API key.

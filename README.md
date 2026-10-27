@@ -4,14 +4,14 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## What is implemented now
 
-- Local app: FastAPI, SQLite numbered migrations 001–018, React/TypeScript/Vite dashboard, loopback API.
+- Local app: FastAPI, SQLite numbered migrations 001–019, React/TypeScript/Vite dashboard, loopback API.
 - Source discovery: Twitch Helix clip metadata and YouTube Data API public video metadata search, including persisted schedules. These store URLs/metadata only; they do not download platform footage. New sources always start with rights UNKNOWN.
 - Rights registry: documented permission evidence, editing/commercial-use permission, owner review and expiry checks. Expired/revoked rights block processing and publishing.
 - Local media intake: configured media-root containment, file checks, SHA-256 and duplicate protection.
 - Analysis: FFprobe metadata and FFmpeg scene-change candidates. These are heuristics, not a semantic gameplay-event detector.
 - Optional local speech recognition: Faster-Whisper produces transcript/timed segments. A deterministic transcript-grounded content director drafts format/title/description/tags and caption timing. Owners can also write an exact script and explicitly synthesize it through a configured local Piper CLI/voice model; generated WAVs are hashed, previewed and mixed into renders with gameplay-audio ducking. The app does not invent or auto-synthesize scripts.
 - Optional local vision assessment: Ollama-compatible vision model samples a configurable 3 or 5 frames per candidate, passes candidate-relative timestamps to the model, and returns structured evidence. Scores are uncalibrated and never auto-approve; remote endpoints are blocked by default.
-- Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering. **Opt-in supervised auto-production** on an explicitly configured authorized folder can automatically render up to three scene-change candidates per stable media file. The local QC-passed clips land in the review queue; you still inspect the finished video and decide whether to upload. This does not auto-upload or publish, and manual candidate approval remains the default.
+- Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering. **Opt-in supervised auto-production** on an explicitly configured authorized folder can automatically render up to three scene-change candidates per stable media file. The default stops at local rendering for owner review. As a separate explicit opt-in, a watch can automatically upload at most one QC-PASS clip per source recording as **private** after YouTube OAuth is connected and both the environment and dashboard upload gates are enabled. This never schedules public release; the owner must inspect the private upload before deciding whether to make it public. Manual candidate review and manual upload remain the default.
 - Local rendering: H.264/AAC 1080×1920 MP4. Owner chooses fit-and-pad or blurred-backdrop composition; both preserve the full foreground gameplay frame without forcing a center crop. Timed caption sidecars are saved and may be burned in if the FFmpeg subtitle filter exists.
 - Local poster and designed cover: the pipeline extracts a 720×1280 poster from the render, creates a title-led 9:16 JPEG Shorts cover from the actual frame, records hash/dimensions and uploads it with the official YouTube thumbnail API after processing succeeds. Cover generation/upload has its own visible status, retry path and failure handling; it does not falsify video-upload success.
 - Automated QC: FFprobe checks dimensions/duration/codecs/audio; FFmpeg decode scan and black/frozen-frame heuristics produce PASS or REVIEW. REVIEW outputs may be previewed but only PASS outputs can be queued for YouTube.
@@ -56,9 +56,9 @@ The worker checks free space on the database/output volume before folder scans o
 3. Only mark AUTHORIZED after evidence, editing/commercial flags and owner review are complete. Expired permissions fail closed.
 4. Place authorized files within the media root and register their relative path.
 5. Analyze the source; optionally run local transcription/vision. Scene-change and model-based results are estimates.
-6. By default, review candidates/captions and approve or reject them individually. For a watched folder, you may explicitly enable supervised auto-production to render a capped batch (maximum three scene-change candidates per file) without per-candidate clicks.
-7. Inspect the finished MP4/poster and QC result in the dashboard. Supervised auto-production stops at local rendering; it never uploads/publishes automatically. REVIEW outputs cannot be uploaded; only PASS qualifies.
-8. For YouTube, connect the intended channel and test private upload, processing status and reconciliation. Uploads start private. Public releases require a separate environment gate and current-rights/QC/hash checks at release time.
+6. By default, review candidates/captions and approve or reject them individually. A watched folder can explicitly opt in to supervised auto-render (up to three scene-change candidates per stable file). A separate private-auto-upload option is disabled by default and requires connected YouTube OAuth plus both the environment and dashboard/database upload gates.
+7. When private auto-upload is enabled, the first QC-PASS render from a source recording can be queued for private YouTube upload. The cap is one automatic upload per imported recording, rights and artifact integrity are rechecked, and no public-release job is created. QC REVIEW/failed renders remain local.
+8. Inspect the finished clip and private YouTube upload before any public release. Public release remains separately gated and manually supervised; keep `GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING=false` during acceptance testing.
 
 ## Provider setup
 
@@ -121,7 +121,7 @@ Frontend:
     npm ci
     npm run build
 
-Main’s last verified pre-lock run is [GitHub Actions run #381](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40481320814) on commit `78ffc5cfea7a22a0158a602ba7afbaab0aae2e2a`. The separate dependency-lock PR is validating one hash-locked requirements file per OS/Python pair plus `npm ci`; those changes are not considered verified until the latest PR head passes all six jobs. CI uses mocked YouTube provider calls and does not certify a real credentialed channel.
+Platform-specific hash-pinned backend/optional-ML locks, `frontend/package-lock.json`, `npm ci`, and Windows dependency-fingerprint checks are merged on `main` as `2946cba2ef683c61f0b61678c8fd83c97b349b3d`. The exact dependency-lock branch passed all six jobs in [run #411](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40485109430), including the real one-click Windows startup/readiness/restart/stop smoke. The private-auto-upload feature is being validated on a separate branch based on this updated baseline. CI uses synthetic media and a mocked YouTube provider; it does not certify a real credentialed channel.
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
 
