@@ -326,19 +326,53 @@ def create_app(settings=None,start_worker=True):
             "enabled": worker_enabled,
             "required": worker_enabled,
         }
+        render_engine=os.getenv("GCF_RENDER_ENGINE","ffmpeg").strip().lower()
+        if render_engine not in {"ffmpeg","remotion"}:
+            checks["render_engine"]={"ready":False,"selected":render_engine,"reason":"unsupported_render_engine"}
+        elif render_engine=="remotion":
+            node_executable=os.getenv("GCF_NODE_PATH") or shutil.which("node")
+            remotion_script=Path(os.getenv("GCF_REMOTION_SCRIPT_PATH") or cfg.project_root/"remotion"/"render.mjs").expanduser().resolve()
+            remotion_dir=remotion_script.parent
+            renderer_package=remotion_dir/"node_modules"/"@remotion"/"renderer"/"package.json"
+            bundler_package=remotion_dir/"node_modules"/"@remotion"/"bundler"/"package.json"
+            node_version=None
+            node_ready=False
+            if node_executable:
+                try:
+                    node_result=subprocess.run([node_executable,"--version"],capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=5,shell=False)
+                    node_version=(node_result.stdout or node_result.stderr).strip()[:80]
+                    node_ready=node_result.returncode==0
+                except (OSError,subprocess.TimeoutExpired):
+                    node_ready=False
+            remotion_ready=bool(node_ready and remotion_script.is_file() and renderer_package.is_file() and bundler_package.is_file())
+            checks["remotion"]={
+                "ready":remotion_ready,
+                "required":True,
+                "node_ready":node_ready,
+                "node_version":node_version,
+                "entrypoint_exists":remotion_script.is_file(),
+                "renderer_package_installed":renderer_package.is_file(),
+                "bundler_package_installed":bundler_package.is_file(),
+                **({"reason":"run_scripts\\setup-remotion.bat_then_restart_the_app"} if not remotion_ready else {}),
+            }
+        else:
+            checks["remotion"]={"ready":True,"required":False,"selected":False}
         required = ("database", "ffmpeg", "ffprobe", "database_directory", "media_root", "output_directory", "worker")
+        if render_engine=="remotion" or render_engine not in {"ffmpeg","remotion"}:
+            required=required+("remotion" if render_engine=="remotion" else "render_engine",)
         ready = all(checks.get(name, {}).get("ready", False) for name in required)
         return {
             "ready": ready,
             "status": "ready" if ready else "degraded",
             "checks": checks,
             "mode": "supervised",
+            "render_engine":render_engine,
             "public_publishing": "enabled_by_explicit_policy" if os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING", "").strip().lower() == "true" else "disabled_by_default",
         }
 
     @app.get("/api/config")
     def config():
-        return {"project_root":str(cfg.project_root),"media_root":str(cfg.media_root),"ffmpeg_available":bool(cfg.ffmpeg_path),"ffprobe_available":bool(cfg.ffprobe_path),"publishing_configured":bool(os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true"),"mode":"supervised"}
+        return {"project_root":str(cfg.project_root),"media_root":str(cfg.media_root),"ffmpeg_available":bool(cfg.ffmpeg_path),"ffprobe_available":bool(cfg.ffprobe_path),"render_engine":os.getenv("GCF_RENDER_ENGINE","ffmpeg").strip().lower(),"publishing_configured":bool(os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true"),"mode":"supervised"}
     @app.get("/api/dashboard")
     def dashboard():
         with connect(cfg.database_path) as c:
