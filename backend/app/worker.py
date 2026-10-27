@@ -163,7 +163,7 @@ class Worker(threading.Thread):
                         candidate_id=json.loads(job["payload_json"] or "{}").get("candidate_id")
                         if candidate_id:
                             c.execute("""UPDATE content_plans SET narration_draft_status='FAILED',narration_draft_error=?,updated_at=?
-                                WHERE candidate_id=? AND narration_draft_status='GENERATING'""",(str(e)[:1500],t,candidate_id))
+                                WHERE candidate_id=? AND narration_draft_status IN ('QUEUED','GENERATING')""",(str(e)[:1500],t,candidate_id))
                     except (ValueError,TypeError,sqlite3.Error):
                         pass
                 if status == "FAILED" and job["job_type"] == "ANALYZE_CANDIDATE_VISION":
@@ -1339,7 +1339,7 @@ class Worker(threading.Thread):
             t=now()
             c.execute("""UPDATE content_plans SET narration_draft_text=?,narration_draft_status='GENERATED_UNREVIEWED',
                 narration_draft_model=?,narration_draft_evidence_json=?,narration_draft_generated_at=?,
-                narration_draft_error='',narration_script_reviewed=0,updated_at=? WHERE id=?""",
+                narration_draft_error='',updated_at=? WHERE id=?""",
                 (generated["script"],generated["model_name"],json.dumps({
                     "hook":generated["hook"],
                     "evidence_used":generated["evidence_used"],
