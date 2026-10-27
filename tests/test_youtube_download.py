@@ -163,7 +163,7 @@ def test_youtube_download_worker_registers_verified_video_and_allows_analysis(tm
         assert media[0]["file_size"] == fixture.stat().st_size
         assert media[0]["rights_status"] == "AUTHORIZED"
         assert Path(media[0]["original_path"]).is_file()
-        assert Path(media[0]["probe"]["streams"][0]["codec_type"] == "video" and media[0]["original_path"]).is_file()
+        assert any(stream.get("codec_type") == "video" for stream in media[0]["probe"]["streams"])
         analysis = client.post(f"/api/media/{media[0]['id']}/analyze")
         assert analysis.status_code == 202, analysis.text
         with sqlite3.connect(cfg.database_path) as db:
