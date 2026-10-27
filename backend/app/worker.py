@@ -765,7 +765,7 @@ class Worker(threading.Thread):
                     if not existing:
                         parsed=datetime.fromisoformat(scheduled_at.replace("Z","+00:00"))
                         if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
-                        due=max(parsed,datetime.now(timezone.utc)).isoformat(timespec="seconds")
+                        due=max(parsed,datetime.now(timezone.utc)).isoformat(timespec="microseconds")
                         scheduled_job_id=str(uuid4())
                         c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at,next_attempt_at)
                             VALUES(?,'PUBLISH_YOUTUBE','QUEUED',?,?, ?,?,?,?)""",
