@@ -61,13 +61,21 @@ jobs:
           --strip-extras
           --output-file=backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
           backend/requirements-ml.txt
+      - name: Stage lock files with repository paths
+        shell: pwsh
+        env:
+          OS_KEY: ${{ matrix.os_key }}
+          PYTHON_KEY: ${{ matrix.python_key }}
+        run: |
+          $destination = Join-Path $PWD "lock-artifacts\backend"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Copy-Item -LiteralPath "backend\requirements-lock-$env:OS_KEY-$env:PYTHON_KEY.txt" -Destination $destination
+          Copy-Item -LiteralPath "backend\requirements-ml-lock-$env:OS_KEY-$env:PYTHON_KEY.txt" -Destination $destination
       - name: Upload this OS/Python lock pair
         uses: actions/upload-artifact@v7
         with:
           name: dependency-locks-${{ matrix.os_key }}-${{ matrix.python_key }}
-          path: |
-            backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
-            backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+          path: lock-artifacts/
           if-no-files-found: error
           retention-days: 14
 
@@ -83,10 +91,16 @@ jobs:
       - name: Update lock from package.json
         working-directory: frontend
         run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Stage npm lock with repository path
+        shell: pwsh
+        run: |
+          $destination = Join-Path $PWD "lock-artifacts\frontend"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          Copy-Item -LiteralPath "frontend\package-lock.json" -Destination $destination
       - name: Upload npm lock
         uses: actions/upload-artifact@v7
         with:
           name: dependency-locks-frontend
-          path: frontend/package-lock.json
+          path: lock-artifacts/
           if-no-files-found: error
           retention-days: 14
