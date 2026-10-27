@@ -76,9 +76,12 @@ if errorlevel 1 (
 :build_dashboard
 findstr /R /C:"^[ ]*GCF_RENDER_ENGINE=remotion[ ]*$" ".env" >nul
 if errorlevel 1 goto remotion_ready
-if exist "remotion\node_modules\@remotion\renderer\package.json" goto remotion_ready
+if not exist "remotion\node_modules\@remotion\renderer\package.json" goto setup_remotion_runtime
+if not exist "remotion\node_modules\@remotion\bundler\package.json" goto setup_remotion_runtime
+goto remotion_ready
+:setup_remotion_runtime
 echo.
-echo Remotion is selected but its runtime is missing. Installing and smoke-testing it now...
+echo Remotion is selected but its runtime is missing or incomplete. Installing and smoke-testing it now...
 call scripts\setup-remotion.bat
 if errorlevel 1 goto fail
 :remotion_ready
