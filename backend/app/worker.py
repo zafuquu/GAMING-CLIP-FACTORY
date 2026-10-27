@@ -1424,6 +1424,57 @@ class Worker(threading.Thread):
             image_hash=hashlib.sha256(image_path.read_bytes()).hexdigest()
             if image_hash!=row["custom_thumbnail_sha256"]:
                 raise PermissionError("Custom thumbnail changed during preparation.")
+
+            # The owner can disable uploads while this worker validates the image. Re-read
+            # the master setting, global pause and publication identity at the last local
+            # boundary before the non-idempotent thumbnail-upload request.
+            current=c.execute("""SELECT youtube_video_id,custom_thumbnail_sha256,publishing_status
+                FROM published_videos WHERE id=?""",(published_id,)).fetchone()
+            if (not current or current["youtube_video_id"]!=row["youtube_video_id"]
+                or current["custom_thumbnail_sha256"]!=row["custom_thumbnail_sha256"]):
+                t=now()
+                c.execute("UPDATE jobs SET status='CANCELLED',error='Thumbnail upload cancelled because the publication identity or thumbnail changed during preparation.',updated_at=?,finished_at=? WHERE id=?",(t,t,job["id"]))
+                event(c,"WARNING","youtube.thumbnail_upload_cancelled",
+                    "Thumbnail upload cancelled before the provider request because the publication identity or thumbnail changed.",
+                    {"job_id":job["id"],"published_video_id":published_id,"provider_request_started":False})
+                c.commit()
+                return
+
+            uploads_gate=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            uploads_enabled_now=bool(
+                uploads_gate and uploads_gate["value"]=="true"
+                and os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()=="true"
+            )
+            if not uploads_enabled_now:
+                t=now()
+                c.execute("""UPDATE published_videos
+                    SET custom_thumbnail_status='GENERATED',
+                        custom_thumbnail_error='Thumbnail upload cancelled before the provider request because YouTube uploads were disabled. The local cover is preserved.',
+                        updated_at=?
+                    WHERE id=? AND youtube_video_id=? AND custom_thumbnail_sha256=?""",
+                    (t,published_id,row["youtube_video_id"],row["custom_thumbnail_sha256"]))
+                c.execute("""UPDATE jobs SET status='CANCELLED',
+                    error='YouTube uploads were disabled during thumbnail preparation; no provider request was sent.',
+                    updated_at=?,finished_at=? WHERE id=?""",(t,t,job["id"]))
+                event(c,"WARNING","youtube.thumbnail_upload_cancelled",
+                    "Thumbnail upload cancelled at the final owner-controlled upload gate; local cover preserved.",
+                    {"job_id":job["id"],"published_video_id":published_id,
+                     "provider_request_started":False,"local_cover_preserved":True})
+                c.commit()
+                return
+
+            pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if pause and pause["value"]=="true":
+                t=now()
+                due=(datetime.now(timezone.utc)+__import__("datetime").timedelta(seconds=15)).isoformat(timespec="seconds")
+                c.execute("UPDATE jobs SET status='QUEUED',error='Global pause prevented thumbnail upload at the final gate; waiting for resume.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(t,due,job["id"]))
+                c.execute("UPDATE published_videos SET custom_thumbnail_status='SET_PENDING',updated_at=? WHERE id=?",(t,published_id))
+                event(c,"WARNING","youtube.thumbnail_deferred_by_pause",
+                    "Global pause prevented the thumbnail provider request at the final gate.",
+                    {"job_id":job["id"],"published_video_id":published_id,"next_attempt_at":due})
+                c.commit()
+                return
+
             video_id=row["youtube_video_id"]
             thumbnail_path=str(image_path)
             thumb_hash=row["custom_thumbnail_sha256"]
