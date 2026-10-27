@@ -67,6 +67,7 @@ jobs:
         shell: pwsh
         env:
           GCF_STARTUP_SKIP_BROWSER: "true"
+          GCF_STARTUP_NO_PAUSE: "true"
         run: |
           $repoRoot = (Get-Location).Path
           $pythonPath = Join-Path $repoRoot ".venv\Scripts\python.exe"
