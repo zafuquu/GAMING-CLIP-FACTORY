@@ -1008,7 +1008,7 @@ class Worker(threading.Thread):
             if scheduled_time.tzinfo is None:
                 scheduled_time=scheduled_time.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc)<scheduled_time:
-                due=scheduled_time.astimezone(timezone.utc).isoformat(timespec="seconds")
+                due=scheduled_time.astimezone(timezone.utc).isoformat(timespec="microseconds")
                 c.execute("UPDATE jobs SET status='QUEUED',error='Release time has not arrived; requeued for scheduled time.',updated_at=?,finished_at=NULL,next_attempt_at=? WHERE id=?",(now(),due,job["id"]))
                 c.commit()
                 return
