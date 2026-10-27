@@ -13,6 +13,7 @@ from .integrations.youtube import connected_status, youtube_service, youtube_dis
 from .vision import vision_status
 from .content_director import plan_candidate
 from .narration import narration_status as get_narration_status, validate_script, NarrationNotConfigured
+from .script_writer import script_drafting_status as get_script_drafting_status
 
 class SourceIn(BaseModel):
     source_url: AnyHttpUrl
@@ -181,6 +182,7 @@ class ContentPlanEditIn(BaseModel):
     description: str | None = Field(default=None,max_length=5000)
     tags: list[str] | None = Field(default=None,max_length=30)
     narration_text: str | None = Field(default=None,max_length=1500)
+    narration_script_reviewed: bool | None = None
     @model_validator(mode="after")
     def normalize_content_plan(self):
         if self.title is not None:
@@ -193,6 +195,8 @@ class ContentPlanEditIn(BaseModel):
         if self.narration_text is not None:
             raw=self.narration_text
             self.narration_text=validate_script(raw) if raw.strip() else ""
+        if self.narration_script_reviewed is True and not (self.narration_text and self.narration_text.strip()):
+            raise ValueError("To mark a narration script reviewed, include the exact non-empty script text in the request.")
         return self
 
 class PauseIn(BaseModel): paused: bool
@@ -514,15 +518,24 @@ def create_app(settings=None,start_worker=True):
             new_description=data.description if data.description is not None else plan["description"]
             new_tags=data.tags if data.tags is not None else json.loads(plan["tags_json"] or "[]")
             script_changed=new_script!=old_script
+            reviewed_before=bool(plan["narration_script_reviewed"])
+            reviewed_now=bool(data.narration_script_reviewed) if data.narration_script_reviewed is not None else (False if script_changed else reviewed_before)
+            draft_state=plan["narration_draft_status"] or "NOT_GENERATED"
+            if reviewed_now and draft_state in {"GENERATED_UNREVIEWED","EDITED"}:
+                draft_state="REVIEWED"
+            elif script_changed and draft_state in {"GENERATING","GENERATED_UNREVIEWED"}:
+                draft_state="EDITED"
             if script_changed:
                 c.execute("""UPDATE content_plans SET title=?,description=?,tags_json=?,narration_text=?,
+                    narration_script_reviewed=?,narration_draft_status=?,
                     narration_audio_path=NULL,narration_audio_sha256=NULL,narration_audio_duration_seconds=NULL,
                     narration_audio_status='NOT_GENERATED',narration_audio_error='',narration_audio_generated_at=NULL,
                     status='DRAFT',updated_at=? WHERE id=?""",
-                    (new_title,new_description,json.dumps(new_tags),new_script,t,plan["id"]))
+                    (new_title,new_description,json.dumps(new_tags),new_script,int(reviewed_now),draft_state,t,plan["id"]))
             else:
-                c.execute("UPDATE content_plans SET title=?,description=?,tags_json=?,narration_text=?,status='DRAFT',updated_at=? WHERE id=?",
-                    (new_title,new_description,json.dumps(new_tags),new_script,t,plan["id"]))
+                c.execute("""UPDATE content_plans SET title=?,description=?,tags_json=?,narration_text=?,
+                    narration_script_reviewed=?,narration_draft_status=?,status='DRAFT',updated_at=? WHERE id=?""",
+                    (new_title,new_description,json.dumps(new_tags),new_script,int(reviewed_now),draft_state,t,plan["id"]))
             if script_changed:
                 event(c,"INFO","narration.script_changed","Owner edited the narration script; any previous synthesized audio was invalidated.",{
                     "candidate_id":cid,"content_plan_id":plan["id"],"script_characters":len(new_script)})
@@ -531,6 +544,43 @@ def create_app(settings=None,start_worker=True):
         return {"candidate_id":cid,"content_plan_id":plan["id"],"title":new_title,"description":new_description,
                 "tags":new_tags,"narration_text":new_script,"narration_audio_status":"NOT_GENERATED" if script_changed else plan["narration_audio_status"],
                 "saved":True,"script_changed":script_changed}
+
+
+    @app.post("/api/candidates/{cid}/narration/draft",status_code=202)
+    def queue_narration_script_draft(cid: str):
+        status=get_script_drafting_status()
+        if not status.get("ready"):
+            raise HTTPException(503,detail=status.get("reason") or "Local narration script drafting is not ready.")
+        t=now(); jid=str(uuid4())
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            row=c.execute("""SELECT cm.id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at
+                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Candidate not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Rights gate blocked narration drafting: current AUTHORIZED permission is required.")
+            if row["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
+                raise HTTPException(409,detail=f"Narration drafting is not allowed for candidate state {row['state']}.")
+            has_transcript=c.execute("""SELECT 1 FROM transcript_segments ts JOIN transcripts tr ON tr.id=ts.transcript_id
+                WHERE tr.media_id=? AND ts.end_seconds>? AND ts.start_seconds<? LIMIT 1""",(row["media_id"],0,1e12)).fetchone()
+            has_vision=c.execute("SELECT 1 FROM candidate_vision_assessments WHERE candidate_id=? AND status='COMPLETED' LIMIT 1",(cid,)).fetchone()
+            if not has_transcript and not has_vision:
+                raise HTTPException(409,detail="Narration drafting requires a stored transcript or completed vision assessment; run analysis first.")
+            active=c.execute("SELECT id FROM jobs WHERE job_type='DRAFT_NARRATION_SCRIPT' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+cid+"%",)).fetchone()
+            if active:
+                return {"id":active["id"],"status":"ALREADY_QUEUED","candidate_id":cid}
+            plan=c.execute("SELECT id FROM content_plans WHERE candidate_id=?",(cid,)).fetchone()
+            if plan:
+                c.execute("UPDATE content_plans SET narration_draft_status='QUEUED',narration_draft_error='',updated_at=? WHERE id=?",(t,plan["id"]))
+            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'DRAFT_NARRATION_SCRIPT','QUEUED',?,?, ?,?,?)",
+                (jid,row["source_id"],row["media_id"],json.dumps({"candidate_id":cid}),t,t))
+            event(c,"INFO","narration.draft_queued","Local evidence-grounded narration drafting queued; script synthesis still requires owner review.",{"job_id":jid,"candidate_id":cid,"model":status["model"]})
+        return {"id":jid,"status":"QUEUED","candidate_id":cid,"model":status["model"],"owner_review_required":True,"automatic_synthesis":False}
 
     @app.post("/api/candidates/{cid}/narration",status_code=202)
     def queue_candidate_narration(cid: str):
@@ -544,7 +594,7 @@ def create_app(settings=None,start_worker=True):
             if paused and paused["value"]=="true":
                 raise HTTPException(423,detail="Global pause is enabled.")
             row=c.execute("""SELECT cm.id,cm.media_id,cm.state,m.source_id,p.status AS rights_status,p.expires_at,
-                cp.id AS content_plan_id,cp.narration_text,cp.narration_audio_status,cp.narration_audio_sha256
+                cp.id AS content_plan_id,cp.narration_text,cp.narration_script_reviewed,cp.narration_audio_status,cp.narration_audio_sha256
                 FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
                 JOIN source_permissions p ON p.source_id=m.source_id
                 JOIN content_plans cp ON cp.candidate_id=cm.id WHERE cm.id=?""",(cid,)).fetchone()
@@ -552,6 +602,8 @@ def create_app(settings=None,start_worker=True):
                 raise HTTPException(404,detail="Candidate or saved content plan not found. Save a narration script first.")
             if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
                 raise HTTPException(409,detail="Rights gate blocked narration: current AUTHORIZED permission is required.")
+            if not bool(row["narration_script_reviewed"]):
+                raise HTTPException(409,detail="Read and explicitly approve the exact narration script before synthesis.")
             if row["state"] not in {"NEEDS_REVIEW","APPROVED","RENDER_FAILED"}:
                 raise HTTPException(409,detail=f"Narration cannot be generated from candidate state {row['state']}.")
             script=str(row["narration_text"] or "")
@@ -782,6 +834,7 @@ def create_app(settings=None,start_worker=True):
         return {
             "twitch":{"configured":bool(os.getenv("GCF_TWITCH_CLIENT_ID") and os.getenv("GCF_TWITCH_CLIENT_SECRET")),"scheduled_enabled":values.get("twitch_discovery_enabled")=="true","game_queries":twitch_queries,"interval_minutes":int(values.get("twitch_discovery_interval_minutes","60")),"next_run":values.get("twitch_discovery_next_at")},
             "transcription":{"enabled":os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true","dependency_installed":importlib.util.find_spec("faster_whisper") is not None,"model_path_configured":bool(os.getenv("GCF_WHISPER_MODEL_PATH")),"model_download_allowed":os.getenv("GCF_WHISPER_ALLOW_MODEL_DOWNLOAD","").lower()=="true","device":os.getenv("GCF_WHISPER_DEVICE","cpu")},
+            "script_drafting":get_script_drafting_status(),
             "narration":get_narration_status(),
             "vision":vision_status(),
             "youtube":{"credentials_present":youtube_credentials_present,"oauth_ready":youtube_oauth_available(),"analytics_schedule_enabled":values.get("youtube_analytics_schedule_enabled")=="true","analytics_schedule_interval_minutes":int(values.get("youtube_analytics_schedule_interval_minutes","1440")),"analytics_schedule_window_days":int(values.get("youtube_analytics_schedule_window_days","7")),"analytics_schedule_next_at":values.get("youtube_analytics_schedule_next_at"),"public_discovery_configured":youtube_discovery_available(),"scheduled_discovery_enabled":values.get("youtube_discovery_enabled")=="true","discovery_queries":youtube_queries,"discovery_interval_minutes":int(values.get("youtube_discovery_interval_minutes","60")),"discovery_next_run":values.get("youtube_discovery_next_at"),"api_key_discovery_configured":bool(os.getenv("GCF_YOUTUBE_API_KEY","").strip()),"upload_gate_configured":os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()=="true","uploads_enabled":values.get("youtube_uploads_enabled")=="true","scheduled_public_gate_configured":os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()=="true","public_publishing_enabled":False},
