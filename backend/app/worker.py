@@ -475,7 +475,7 @@ class Worker(threading.Thread):
             raise RuntimeError("Render job is missing candidate_id.")
         c=connect(self.db)
         try:
-            row=c.execute("""SELECT cm.*,m.original_path,m.file_name,m.source_id,p.status AS rights_status,p.expires_at,
+            row=c.execute("""SELECT cm.*,m.original_path,m.file_name,m.file_size,m.source_id,p.status AS rights_status,p.expires_at,
                 cp.narration_text,cp.narration_audio_path,cp.narration_audio_sha256,
                 cp.narration_audio_duration_seconds,cp.narration_audio_status,
                 cp.title AS content_title,cp.description AS content_description,cp.tags_json AS content_tags_json,
