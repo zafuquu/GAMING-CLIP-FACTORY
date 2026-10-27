@@ -6,7 +6,7 @@ The API returns short-lived CDN URLs; this module validates the host and streams
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import re
 
 import requests
@@ -126,6 +126,7 @@ class TwitchClipDownloader:
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_suffix(destination.suffix + ".part")
         partial.unlink(missing_ok=True)
+        response = None
         try:
             response = self.session.get(
                 download_url,
@@ -140,7 +141,7 @@ class TwitchClipDownloader:
                 location = response.headers.get("Location")
                 if not location:
                     raise TwitchClipDownloadError("Twitch CDN issued an invalid redirect.")
-                next_url = _cdn_url(requests.compat.urljoin(download_url, location))
+                next_url = _cdn_url(urljoin(download_url, location))
                 response.close()
                 response = self.session.get(next_url, stream=True, timeout=(10.0, 60.0), allow_redirects=False)
                 download_url = next_url
