@@ -1,4 +1,4 @@
-import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3
+import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3, wave
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
