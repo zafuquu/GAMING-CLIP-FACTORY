@@ -71,7 +71,6 @@ jobs:
         run: |
           $repoRoot = (Get-Location).Path
           $pythonPath = Join-Path $repoRoot ".venv\Scripts\python.exe"
-          $backendBatch = Join-Path $repoRoot "scripts\run-backend.bat"
           $stdout = Join-Path $env:RUNNER_TEMP "gcf-start.stdout.log"
           $stderr = Join-Path $env:RUNNER_TEMP "gcf-start.stderr.log"
           $launcher = $null
@@ -98,6 +97,34 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "The production dashboard probe failed." }
             & $pythonPath "scripts\local_http.py" readiness --require-ready
             if ($LASTEXITCODE -ne 0) { throw "One-click startup returned degraded local readiness." }
+
+            # A second launch must reuse the existing healthy API, not start a duplicate worker.
+            $secondStdout = Join-Path $env:RUNNER_TEMP "gcf-restart.stdout.log"
+            $secondStderr = Join-Path $env:RUNNER_TEMP "gcf-restart.stderr.log"
+            $secondLauncher = Start-Process -FilePath (Join-Path $env:WINDIR "System32\cmd.exe") -ArgumentList @("/c","scripts\start.bat") -WorkingDirectory $repoRoot -PassThru -RedirectStandardOutput $secondStdout -RedirectStandardError $secondStderr
+            if (-not $secondLauncher.WaitForExit(180000)) {
+              Stop-Process -Id $secondLauncher.Id -Force -ErrorAction SilentlyContinue
+              if (Test-Path $secondStdout) { Get-Content -Tail 100 $secondStdout }
+              if (Test-Path $secondStderr) { Get-Content -Tail 100 $secondStderr }
+              throw "Second scripts/start.bat invocation timed out."
+            }
+            $secondLauncher.Refresh()
+            if ($secondLauncher.ExitCode -ne 0) {
+              if (Test-Path $secondStdout) { Get-Content $secondStdout }
+              if (Test-Path $secondStderr) { Get-Content $secondStderr }
+              throw "Second scripts/start.bat invocation exited with code $($secondLauncher.ExitCode)."
+            }
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -ne 0) { throw "API health failed after a repeated launch." }
+            $runningBackends = @(Get-CimInstance Win32_Process | Where-Object {
+              $_.ExecutablePath -and
+              ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq [System.IO.Path]::GetFullPath($pythonPath)) -and
+              $_.CommandLine -match '(?:^|\s)-m\s+app(?:\s|$)'
+            })
+            if ($runningBackends.Count -ne 1) {
+              throw "Repeated startup should leave exactly one backend process; found $($runningBackends.Count)."
+            }
+
             & cmd.exe /c "scripts\stop.bat"
             if ($LASTEXITCODE -ne 0) { throw "scripts/stop.bat failed." }
             Start-Sleep -Seconds 2
@@ -110,19 +137,13 @@ jobs:
           finally {
             # The launcher intentionally creates a separate backend window. Tear down only
             # this checkout's worker processes so the hosted runner is always left clean.
-            $escapedBatch = [regex]::Escape($backendBatch)
-            $processes = Get-CimInstance Win32_Process
-            $pythonProcesses = $processes | Where-Object {
-              $_.ExecutablePath -eq $pythonPath -and $_.CommandLine -match '-m\s+app'
+            $pythonProcesses = Get-CimInstance Win32_Process | Where-Object {
+              $_.ExecutablePath -and
+              ([System.IO.Path]::GetFullPath($_.ExecutablePath) -ieq [System.IO.Path]::GetFullPath($pythonPath)) -and
+              $_.CommandLine -match '(?:^|\s)-m\s+app(?:\s|$)'
             }
             foreach ($proc in $pythonProcesses) {
-              Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
-            }
-            $backendCommands = Get-CimInstance Win32_Process | Where-Object {
-              $_.Name -ieq "cmd.exe" -and $_.CommandLine -match $escapedBatch
-            }
-            foreach ($proc in $backendCommands) {
-              Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+              & (Join-Path $env:WINDIR "System32\taskkill.exe") /PID $proc.ProcessId /T /F | Out-Null
             }
           }
 
