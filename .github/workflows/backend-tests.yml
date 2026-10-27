@@ -175,3 +175,19 @@ jobs:
       - name: Typecheck and build dashboard
         working-directory: frontend
         run: npm run build
+
+  workflow-lint:
+    name: Validate GitHub Actions workflow definitions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+      - name: Install pinned actionlint
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - name: Lint every workflow, including new maintenance workflows
+        run: |
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          "$(go env GOPATH)/bin/actionlint" -color -shellcheck= -pyflakes= .github/workflows/*.yml
