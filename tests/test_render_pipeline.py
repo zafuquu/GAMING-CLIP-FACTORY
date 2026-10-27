@@ -129,3 +129,212 @@ def test_authorized_clip_renders_and_passes_qc_when_ffmpeg_available(tmp_path,mo
         assert Path(blur_render["output_path"]).is_file()
         assert blur_render["qc_report"]["layout"]=="blur_fill"
         assert "full source frame preserved" in blur_render["qc_report"]["profile_notes"][0]
+
+
+
+def test_mock_production_flow_analysis_review_render_private_upload_and_processing(
+    tmp_path, monkeypatch
+):
+    """Exercise the real local pipeline with synthetic footage and a mocked YouTube API."""
+    import app.main as main_module
+    import app.worker as worker_module
+
+    monkeypatch.setenv("GCF_BURN_CAPTIONS", "false")
+    monkeypatch.setenv("GCF_ENABLE_YOUTUBE_UPLOADS", "true")
+    monkeypatch.setenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING", "false")
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        pytest.skip("FFmpeg/FFprobe are required for the synthetic production-flow test")
+
+    root = tmp_path / "mock-production"
+    data = root / "data"
+    media = data / "media"
+    cfg = Settings(root, data, media, data / "factory.sqlite3", ffmpeg, ffprobe, 90)
+    upload_calls = []
+
+    class MockRequest:
+        def __init__(self, response):
+            self.response = response
+
+        def execute(self):
+            return self.response
+
+    class MockVideos:
+        def list(self, **kwargs):
+            assert kwargs.get("part") == "processingDetails,status"
+            assert kwargs.get("id") == "mockVideo123"
+            return MockRequest({
+                "items": [{
+                    "id": "mockVideo123",
+                    "processingDetails": {"processingStatus": "succeeded"},
+                    "status": {"privacyStatus": "private"},
+                }]
+            })
+
+    class MockYouTube:
+        def videos(self):
+            return MockVideos()
+
+    def fake_upload_video(path, title, description, tags):
+        assert Path(path).is_file()
+        assert title == "CI mock production clip"
+        assert description == "Synthetic footage; no third-party content."
+        assert tags == ["automation-test"]
+        upload_calls.append(Path(path))
+        return {
+            "video_id": "mockVideo123",
+            "url": "https://www.youtube.com/watch?v=mockVideo123",
+        }
+
+    monkeypatch.setattr(main_module, "connected_status", lambda: {"connected": True})
+    monkeypatch.setattr(worker_module, "upload_video", fake_upload_video)
+    monkeypatch.setattr(worker_module, "youtube_service", lambda: MockYouTube())
+
+    with TestClient(create_app(settings=cfg, start_worker=False)) as client:
+        # Step 1 — register synthetic footage and require explicit documented authorization.
+        source_response = client.post(
+            "/api/sources",
+            json={
+                "source_url": "https://example.com/mock-production-source",
+                "platform": "synthetic-ci",
+                "title": "Synthetic production acceptance footage",
+                "creator": "CI fixture",
+                "game": "synthetic-test",
+            },
+        )
+        assert source_response.status_code == 201, source_response.text
+        source_id = source_response.json()["id"]
+        assert source_response.json()["rights_status"] == "UNKNOWN"
+
+        rights_response = client.put(
+            f"/api/sources/{source_id}/rights",
+            json={
+                "status": "AUTHORIZED",
+                "license_type": "Synthetic footage generated for CI",
+                "permission_evidence": "Created by FFmpeg within this isolated test; no third-party material",
+                "editing_allowed": True,
+                "commercial_use_allowed": True,
+                "reviewed_by_owner": True,
+            },
+        )
+        assert rights_response.status_code == 200, rights_response.text
+
+        # Step 2 — generate 16 seconds of moving test patterns with unmistakable scene cuts.
+        # The moving box prevents the deterministic QC freeze detector from flagging each scene.
+        input_path = media / "mock_gameplay.mp4"
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-f", "lavfi", "-i",
+            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=red@0.60:t=fill",
+            "-f", "lavfi", "-i",
+            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=lime@0.60:t=fill",
+            "-f", "lavfi", "-i",
+            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=blue@0.60:t=fill",
+            "-f", "lavfi", "-i",
+            "testsrc2=size=320x180:rate=24:duration=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=yellow@0.60:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=16",
+            "-filter_complex", "[0:v][1:v][2:v][3:v]concat=n=4:v=1:a=0[v]",
+            "-map", "[v]", "-map", "4:a", "-t", "16",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "96k", str(input_path),
+        ]
+        subprocess.run(command, capture_output=True, text=True, timeout=90, check=True)
+
+        import_response = client.post(
+            "/api/media/import",
+            json={"source_id": source_id, "path": input_path.name},
+        )
+        assert import_response.status_code == 201, import_response.text
+        media_id = import_response.json()["id"]
+
+        # Step 3 — public API queues analysis; worker finds scene candidates automatically.
+        analysis_response = client.post(f"/api/media/{media_id}/analyze")
+        assert analysis_response.status_code == 202, analysis_response.text
+        worker = Worker(cfg.database_path, ffmpeg, ffprobe, 90, media_root=media)
+        assert worker.one() is True
+        analysis_job = next(
+            job for job in client.get("/api/jobs").json()
+            if job["id"] == analysis_response.json()["id"]
+        )
+        assert analysis_job["status"] == "COMPLETED", analysis_job.get("error")
+        candidates = [
+            candidate for candidate in client.get("/api/candidates").json()
+            if candidate["media_id"] == media_id
+        ]
+        assert candidates, "Scene-change analysis should create at least one candidate for the generated cuts."
+        assert all(candidate["state"] == "NEEDS_REVIEW" for candidate in candidates)
+        assert all(candidate["detector"] == "ffmpeg_scene_change" for candidate in candidates)
+
+        # Step 4 — candidates cannot go to render until the owner approves one.
+        selected = candidates[0]
+        blocked_without_approval = client.post(
+            f"/api/candidates/{selected['id']}/decision",
+            json={"decision": "approve", "render_profile": "fit_pad"},
+        )
+        assert blocked_without_approval.status_code == 202, blocked_without_approval.text
+        render_job_id = blocked_without_approval.json()["job_id"]
+        assert worker.one() is True
+        render_job = next(
+            job for job in client.get("/api/jobs").json() if job["id"] == render_job_id
+        )
+        assert render_job["status"] == "COMPLETED", render_job.get("error")
+        render = next(
+            output for output in client.get("/api/renders").json()
+            if output["candidate_id"] == selected["id"]
+        )
+        assert render["qc_status"] == "PASS", render.get("qc_report")
+        assert render["width"] == 1080 and render["height"] == 1920
+        assert render["video_codec"] == "h264"
+        assert render["audio_codec"] == "aac"
+        assert Path(render["output_path"]).is_file()
+        assert Path(render["thumbnail_path"]).is_file()
+        assert render["file_size"] == Path(render["output_path"]).stat().st_size
+
+        # Step 5 — simulate the owner enabling uploads after the normal OAuth setup.
+        # Only the provider network operation is mocked; the real rights/QC/hash/API gates run.
+        enable_response = client.post("/api/publishing/enable", json={"enabled": True})
+        assert enable_response.status_code == 200, enable_response.text
+        queue_upload_response = client.post(
+            "/api/publishing/schedule",
+            json={
+                "rendered_output_id": render["id"],
+                "title": "CI mock production clip",
+                "description": "Synthetic footage; no third-party content.",
+                "tags": ["automation-test"],
+                "publication_mode": "private",
+            },
+        )
+        assert queue_upload_response.status_code == 202, queue_upload_response.text
+        assert queue_upload_response.json()["privacy_status"] == "private"
+        assert worker.one() is True
+        assert len(upload_calls) == 1
+
+        publication_id = queue_upload_response.json()["published_video_id"]
+        publication = next(
+            row for row in client.get("/api/publishing/videos").json()
+            if row["id"] == publication_id
+        )
+        assert publication["youtube_video_id"] == "mockVideo123"
+        assert publication["publishing_status"] == "PROCESSING"
+        assert publication["custom_thumbnail_available"] is True
+
+        # Step 6 — exercise the real processing-state handler against a mocked successful
+        # YouTube read. A private upload remains private: no public release job may be queued.
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute(
+                "UPDATE jobs SET next_attempt_at=NULL WHERE job_type='CHECK_YOUTUBE_PROCESSING' AND status='QUEUED'"
+            )
+        assert worker.one() is True
+        publication = next(
+            row for row in client.get("/api/publishing/videos").json()
+            if row["id"] == publication_id
+        )
+        assert publication["remote_processing_status"] == "succeeded"
+        assert publication["publishing_status"] == "READY_PRIVATE"
+        with sqlite3.connect(cfg.database_path) as db:
+            public_jobs = db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE job_type='PUBLISH_YOUTUBE' AND status IN ('QUEUED','RUNNING')"
+            ).fetchone()[0]
+        assert public_jobs == 0
+        assert client.get("/api/publishing/status").json()["public_publishing_enabled"] is False
