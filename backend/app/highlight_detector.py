@@ -102,7 +102,7 @@ def rank_highlight_windows(
     scene_change_seconds: Sequence[float],
     audio_rms_samples: Sequence[tuple[float, float]],
     *,
-    target_seconds: float = 24.0,
+    target_seconds: float = 15.0,
     max_candidates: int = 25,
 ) -> list[dict]:
     """Propose diverse Shorts-ready windows around scene changes/audio peaks.
