@@ -880,6 +880,29 @@ class Worker(threading.Thread):
             if not row: raise FileNotFoundError("Publishing record or linked rendered output not found.")
             if row["render_qc"]!="PASS" or row["qc_status"]!="PASS": raise PermissionError("Upload blocked: render must have QC PASS.")
             if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]): raise PermissionError("Upload blocked: current AUTHORIZED permission is required.")
+            if payload.get("automatic_private_upload"):
+                watch_id=payload.get("folder_watch_id")
+                watch=c.execute("""SELECT w.enabled,w.auto_analyze,w.auto_render,w.auto_upload_private,
+                    p.status AS current_rights_status,p.expires_at AS current_rights_expires_at
+                    FROM media_folder_watches w
+                    JOIN watched_media_files f ON f.watch_id=w.id AND f.media_id=?
+                    JOIN source_permissions p ON p.source_id=w.source_id
+                    WHERE w.id=? AND w.source_id=?""",
+                    (row["media_id"],watch_id,row["source_id"])).fetchone() if watch_id else None
+                watch_still_authorized=bool(watch and bool(watch["enabled"]) and bool(watch["auto_analyze"])
+                    and bool(watch["auto_render"]) and bool(watch["auto_upload_private"])
+                    and watch["current_rights_status"]=="AUTHORIZED"
+                    and not expiry_passed(watch["current_rights_expires_at"]))
+                if not watch_still_authorized:
+                    # The owner may disable auto-upload after rendering but before the
+                    # network operation. Cancel the queued remote action, keep the local
+                    # render, and do not let generic retry handling revive the upload.
+                    t=now()
+                    c.execute("UPDATE published_videos SET publishing_status='CANCELLED',updated_at=? WHERE id=? AND youtube_video_id IS NULL",(t,published_id))
+                    c.execute("UPDATE jobs SET status='CANCELLED',error='Automatic private upload was disabled or its authorized folder watch/rights changed before upload.',updated_at=?,finished_at=? WHERE id=?",(t,t,job["id"]))
+                    event(c,"WARNING","youtube.auto_private_upload_cancelled","Automatic private upload was cancelled because the originating authorized watch is no longer enabled for this action.",{"job_id":job["id"],"published_video_id":published_id,"folder_watch_id":watch_id,"local_render_preserved":True})
+                    c.commit()
+                    return
             enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
             if not enabled or enabled["value"]!="true" or os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true":
                 raise PermissionError("YouTube uploads are disabled. Owner must configure and enable them explicitly.")
@@ -953,6 +976,29 @@ class Worker(threading.Thread):
                 JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?""",(row["media_id"],)).fetchone()
             if not latest or latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
                 raise PermissionError("Rights gate blocked upload: permission expired or was revoked during preparation.")
+            # Re-hash after thumbnail preparation: the output may have changed after the
+            # first integrity check, and remote upload is non-idempotent.
+            if not output.is_file() or output.stat().st_size!=row["render_size"]:
+                raise PermissionError("Upload blocked: rendered output disappeared or changed size during preparation.")
+            final_digest=hashlib.sha256()
+            with output.open("rb") as stream:
+                for block in iter(lambda:stream.read(1024*1024),b""): final_digest.update(block)
+            if final_digest.hexdigest()!=row["render_sha"]:
+                raise PermissionError("Upload blocked: rendered output hash changed during preparation.")
+            if payload.get("automatic_private_upload"):
+                watch_id=payload.get("folder_watch_id")
+                watch=c.execute("""SELECT w.enabled,w.auto_analyze,w.auto_render,w.auto_upload_private,
+                    p.status AS current_rights_status,p.expires_at AS current_rights_expires_at
+                    FROM media_folder_watches w
+                    JOIN watched_media_files f ON f.watch_id=w.id AND f.media_id=?
+                    JOIN source_permissions p ON p.source_id=w.source_id
+                    WHERE w.id=? AND w.source_id=?""",
+                    (row["media_id"],watch_id,row["source_id"])).fetchone() if watch_id else None
+                if not (watch and bool(watch["enabled"]) and bool(watch["auto_analyze"])
+                    and bool(watch["auto_render"]) and bool(watch["auto_upload_private"])
+                    and watch["current_rights_status"]=="AUTHORIZED"
+                    and not expiry_passed(watch["current_rights_expires_at"])):
+                    raise PermissionError("Automatic private upload cancelled: originating folder watch or rights changed during preparation.")
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
             if pause and pause["value"]=="true":
                 t=now()
