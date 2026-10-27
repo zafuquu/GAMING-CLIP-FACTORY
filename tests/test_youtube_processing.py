@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 import sqlite3
 import sys
+import pytest
 from fastapi.testclient import TestClient
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -39,8 +40,9 @@ class _Request:
     def __init__(self,payload): self.payload=payload
     def execute(self): return self.payload
 class _Videos:
-    def __init__(self,payload): self.payload=payload
+    def __init__(self,payload): self.payload=payload; self.calls=[]
     def list(self,**kwargs):
+        self.calls.append(kwargs)
         assert kwargs["part"]=="processingDetails,status"
         return _Request(self.payload)
 class _YouTubeService:
@@ -299,10 +301,8 @@ def test_scheduled_public_worker_refuses_modified_render_hash(tmp_path,monkeypat
     fake=_MutationYouTubeService({"items":[{"id":"youtube-id-123","processingDetails":{"processingStatus":"succeeded"},"status":{"privacyStatus":"private"}}]})
     monkeypatch.setattr(worker_module,"youtube_service",lambda:fake)
     _public_job(cfg,pub_id,scheduled)
-    Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":scheduled.isoformat()})})
-    with sqlite3.connect(cfg.database_path) as db:
-        status=db.execute("SELECT status FROM jobs WHERE id='public-release-job'").fetchone()[0]
-    assert status=="FAILED"
+    with pytest.raises(PermissionError,match="hash"):
+        Worker(cfg.database_path,None,None,5).publish_youtube({"id":"public-release-job","payload_json":json.dumps({"published_video_id":pub_id,"publish_at":scheduled.isoformat()})})
     assert fake.video_api.updates==[]
     assert fake.video_api.calls==[]
     client.__exit__(None,None,None)
