@@ -241,3 +241,13 @@ def test_local_narration_draft_is_disabled_by_default(monkeypatch):
             game="Valorant",source_title="Match",candidate_duration=10,
             transcript_segments=[{"segment_index":1,"start_seconds":1,"end_seconds":2,"text":"Nice angle"}],
         )
+
+def test_script_drafting_status_falls_back_for_bad_timeout(monkeypatch):
+    import app.script_writer as writer
+    monkeypatch.setenv("GCF_ENABLE_SCRIPT_DRAFTING","true")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_BASE_URL","http://127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_MODEL","test-model")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_TIMEOUT_SECONDS","not-an-integer")
+    status=writer.script_drafting_status()
+    assert status["ready"] is True
+    assert status["timeout_seconds"]==120
