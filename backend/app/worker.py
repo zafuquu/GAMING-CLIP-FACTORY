@@ -607,10 +607,22 @@ class Worker(threading.Thread):
                 else:
                     args += ["-map","0:a?"]
             args += ["-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
-            run(args,self.timeout)
-            source_stat_after=source.stat()
-            if (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns):
-                raise RuntimeError("Source media changed during rendering. The output will not be registered; let the source file finish copying and retry.")
+            try:
+                run(args,self.timeout)
+            except Exception:
+                # Failed/timed-out encodes must not leave an untracked partial MP4 behind.
+                try: output.unlink(missing_ok=True)
+                except OSError: pass
+                raise
+            try:
+                source_stat_after=source.stat()
+            except OSError:
+                source_stat_after=None
+            if (source_stat_after is None or
+                (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns)):
+                try: output.unlink(missing_ok=True)
+                except OSError: pass
+                raise RuntimeError("Source media disappeared or changed during rendering. The output will not be registered; let the source file finish copying and retry.")
             if not output.is_file() or output.stat().st_size <= 0:
                 raise RuntimeError("FFmpeg reported success but produced no nonempty file.")
             rendered_probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(output)],min(60,self.timeout))
@@ -700,12 +712,18 @@ class Worker(threading.Thread):
                 try: thumbnail.unlink(missing_ok=True)
                 except OSError: pass
                 raise PermissionError("Rights gate blocked render persistence: source permission was revoked or expired while rendering.")
-            if Path(latest["original_path"]).resolve()!=source or int(latest["file_size"])!=source.stat().st_size:
+            try:
+                final_source_stat=source.stat()
+            except OSError:
+                final_source_stat=None
+            if (Path(latest["original_path"]).resolve()!=source or final_source_stat is None
+                or int(latest["file_size"])!=final_source_stat.st_size
+                or (final_source_stat.st_size,final_source_stat.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns)):
                 try: output.unlink(missing_ok=True)
                 except OSError: pass
                 try: thumbnail.unlink(missing_ok=True)
                 except OSError: pass
-                raise PermissionError("Source media identity changed during rendering; the output was not registered.")
+                raise PermissionError("Source media identity or file signature changed during rendering; the output was not registered.")
             c.execute("""INSERT INTO rendered_outputs(id,candidate_id,media_id,output_path,file_size,sha256,duration_seconds,width,height,video_codec,audio_codec,qc_status,qc_report_json,created_at,render_profile,thumbnail_path,thumbnail_sha256,thumbnail_width,thumbnail_height)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(out_id,cid,row["media_id"],str(output),output.stat().st_size,h.hexdigest(),duration,video["width"],video["height"],video.get("codec_name","unknown"),audio.get("codec_name") if audio else None,qc_status,json.dumps(report),t,render_profile,thumbnail_path,thumbnail_hash,thumbnail_width,thumbnail_height))
             candidate_state="RENDERED_QC_PASSED" if qc_status=="PASS" else "RENDERED_QC_REVIEW"
