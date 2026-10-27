@@ -1337,7 +1337,7 @@ def test_transcription_discards_results_if_rights_are_revoked_during_subprocess(
         ).fetchone()[0]
         media_state=db.execute("SELECT state FROM media_assets WHERE id=?",(media_id,)).fetchone()[0]
     assert job[0]=="FAILED"
-    assert "revoked or expired during transcription" in job[1].lower()
+    assert "were revoked during transcription" in job[1].lower()
     assert transcripts==0 and segments==0 and content_plans==0
     assert media_state=="IMPORTED"
     client.__exit__(None,None,None)
