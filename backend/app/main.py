@@ -637,6 +637,8 @@ def create_app(settings=None,start_worker=True):
                 plan=c.execute("SELECT * FROM content_plans WHERE candidate_id=?",(row["id"],)).fetchone()
                 if plan:
                     plan_data=dict(plan)
+                    narration_path=plan_data.pop("narration_audio_path",None)
+                    plan_data["narration_audio_available"]=bool(narration_path and Path(narration_path).is_file())
                     plan_data["tags"]=json.loads(plan_data.pop("tags_json") or "[]")
                     plan_data["evidence"]=json.loads(plan_data.pop("evidence_json") or "{}")
                     row["content_plan"]=plan_data
