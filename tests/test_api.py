@@ -45,6 +45,25 @@ def test_readiness_reports_missing_media_toolchain(tmp_path):
     assert payload["checks"]["output_directory"]["ready"] is True
     c.__exit__(None,None,None)
 
+def test_readiness_reports_healthy_media_toolchain(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    root=tmp_path/"ready-project"; data=root/"data"; media=data/"media"
+    cfg=Settings(root,data,media,data/"test.sqlite3","ffmpeg-test","ffprobe-test",5)
+    def fake_run(args,**kwargs):
+        assert args[1]=="-version"
+        assert kwargs.get("shell") is False
+        return SimpleNamespace(returncode=0,stdout=f"{args[0]} version 7.1.2",stderr="")
+    monkeypatch.setattr("app.main.subprocess.run",fake_run)
+    with TestClient(create_app(settings=cfg,start_worker=False)) as c:
+        response=c.get("/api/readiness")
+        assert response.status_code==200,response.text
+        payload=response.json()
+        assert payload["ready"] is True
+        assert payload["status"]=="ready"
+        assert payload["checks"]["ffmpeg"]["version"]=="ffmpeg-test version 7.1.2"
+        assert payload["checks"]["ffprobe"]["version"]=="ffprobe-test version 7.1.2"
+        assert all(payload["checks"][k]["ready"] for k in ("database","ffmpeg","ffprobe","database_directory","media_root","output_directory"))
+
 def test_new_source_starts_unknown_and_duplicate_blocked(tmp_path):
     c,_=setup_client(tmp_path); sid=add_source(c)
     assert c.get("/api/sources").json()[0]["rights_status"]=="UNKNOWN"
