@@ -71,8 +71,13 @@ async function main() {
     fail("Remotion refuses to overwrite an existing output file.");
   }
 
+  const sourceExtension = path.extname(sourcePath).toLowerCase();
+  if (![".mp4", ".webm"].includes(sourceExtension)) {
+    fail("Remotion browser rendering currently requires an .mp4 or .webm source file. Use GCF_RENDER_ENGINE=ffmpeg for other containers.");
+  }
+
   const tempPublicDir = await mkdtemp(path.join(path.dirname(sourcePath), ".gcf-remotion-public-"));
-  const sourceAlias = path.join(tempPublicDir, "clip.asset");
+  const sourceAlias = path.join(tempPublicDir, "clip" + sourceExtension);
   let succeeded = false;
 
   try {
