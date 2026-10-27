@@ -42,6 +42,90 @@ jobs:
       - name: Run API tests
         run: python -m pytest -q
 
+
+  windows-startup-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install FFmpeg for full local readiness
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
+          $env:Path = "$chocoBin;$env:Path"
+          $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          & (Join-Path $chocoBin "ffmpeg.exe") -version
+          & (Join-Path $chocoBin "ffprobe.exe") -version
+      - name: Exercise the actual one-click launcher
+        shell: pwsh
+        env:
+          GCF_STARTUP_SKIP_BROWSER: "true"
+          GCF_STARTUP_NO_PAUSE: "true"
+        run: |
+          $repoRoot = (Get-Location).Path
+          $pythonPath = Join-Path $repoRoot ".venv\Scripts\python.exe"
+          $backendBatch = Join-Path $repoRoot "scripts\run-backend.bat"
+          $stdout = Join-Path $env:RUNNER_TEMP "gcf-start.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "gcf-start.stderr.log"
+          $launcher = $null
+          try {
+            $launcher = Start-Process -FilePath (Join-Path $env:WINDIR "System32\cmd.exe") -ArgumentList @("/c","scripts\start.bat") -WorkingDirectory $repoRoot -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if (-not $launcher.WaitForExit(180000)) {
+              Stop-Process -Id $launcher.Id -Force -ErrorAction SilentlyContinue
+              Write-Host "Launcher stdout captured before timeout:"
+              if (Test-Path $stdout) { Get-Content -Tail 160 $stdout }
+              Write-Host "Launcher stderr captured before timeout:"
+              if (Test-Path $stderr) { Get-Content -Tail 160 $stderr }
+              Write-Error "scripts/start.bat did not exit within three minutes."
+              throw "Inspect the captured output above; the smoke test will not wait indefinitely."
+            }
+
+            if (Test-Path $stdout) { Get-Content $stdout }
+            if (Test-Path $stderr) { Get-Content $stderr }
+            $launcher.Refresh()
+            if ($launcher.ExitCode -ne 0) { throw "scripts/start.bat exited with code $($launcher.ExitCode)." }
+
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -ne 0) { throw "The local API health probe failed." }
+            & $pythonPath "scripts\local_http.py" dashboard
+            if ($LASTEXITCODE -ne 0) { throw "The production dashboard probe failed." }
+            & $pythonPath "scripts\local_http.py" readiness --require-ready
+            if ($LASTEXITCODE -ne 0) { throw "One-click startup returned degraded local readiness." }
+            & cmd.exe /c "scripts\stop.bat"
+            if ($LASTEXITCODE -ne 0) { throw "scripts/stop.bat failed." }
+            Start-Sleep -Seconds 2
+            & $pythonPath "scripts\local_http.py" health
+            if ($LASTEXITCODE -eq 0) { throw "The API still responds after scripts/stop.bat." }
+            # The nonzero probe is expected after shutdown; reset it so PowerShell does not fail the whole step.
+            $LASTEXITCODE = 0
+            Write-Host "PASS: one-click start, dashboard/readiness validation and clean stop all succeeded."
+          }
+          finally {
+            # The launcher intentionally creates a separate backend window. Tear down only
+            # this checkout's worker processes so the hosted runner is always left clean.
+            $escapedBatch = [regex]::Escape($backendBatch)
+            $processes = Get-CimInstance Win32_Process
+            $pythonProcesses = $processes | Where-Object {
+              $_.ExecutablePath -eq $pythonPath -and $_.CommandLine -match '-m\s+app'
+            }
+            foreach ($proc in $pythonProcesses) {
+              Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+            $backendCommands = Get-CimInstance Win32_Process | Where-Object {
+              $_.Name -ieq "cmd.exe" -and $_.CommandLine -match $escapedBatch
+            }
+            foreach ($proc in $backendCommands) {
+              Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+          }
+
   frontend-build:
     runs-on: ubuntu-latest
     steps:

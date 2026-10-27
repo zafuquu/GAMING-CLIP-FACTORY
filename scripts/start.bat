@@ -11,14 +11,17 @@ echo.
 
 where py >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Python 3.11+ is required. Install Python and enable the py launcher.
+  echo ERROR: Python Launcher is required. Install Python 3.11 or 3.12 and enable the py launcher.
   goto fail
 )
-py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>nul
+py -3.12 -c "import sys" >nul 2>nul
+if not errorlevel 1 goto python_ok
+py -3.11 -c "import sys" >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Python 3.11 or newer is required.
+  echo ERROR: Python 3.11 or 3.12 is required. Install one of these supported versions and retry.
   goto fail
 )
+:python_ok
 where node >nul 2>nul
 if errorlevel 1 (
   echo ERROR: Node.js is required for the dashboard build.
@@ -44,6 +47,8 @@ if not exist ".env" (
 )
 
 if not exist ".venv\Scripts\python.exe" goto setup
+".venv\Scripts\python.exe" -c "import sys; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
+if errorlevel 1 goto setup
 if not exist "frontend\node_modules\vite\bin\vite.js" goto setup
 ".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL" >nul 2>nul
 if errorlevel 1 goto setup
@@ -60,9 +65,9 @@ goto build_dashboard
 echo Installing or repairing application dependencies...
 call scripts\setup-windows.bat
 if errorlevel 1 goto fail
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL" >nul 2>nul
+".venv\Scripts\python.exe" -c "import sys,fastapi,uvicorn,pydantic,dotenv,requests,googleapiclient,google_auth_oauthlib,google_auth_httplib2,keyring,PIL; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Required Python packages are still unavailable after setup.
+  echo ERROR: Supported Python or required packages are still unavailable after setup.
   goto fail
 )
 
@@ -84,26 +89,26 @@ if not exist "frontend\dist\index.html" (
 
 echo.
 echo Checking whether the local API is already running...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/api/health; if($r.StatusCode -eq 200){exit 0}; exit 1 } catch { exit 1 }" >nul 2>nul
+".venv\Scripts\python.exe" scripts\local_http.py health >nul 2>nul
 if errorlevel 1 goto launch_backend
 
 echo API process is already responding. Checking whether it serves the production dashboard...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:8765/; if($r.StatusCode -eq 200 -and $r.Content -match '<div id=.root.'){exit 0}; exit 1 } catch { exit 1 }" >nul 2>nul
+".venv\Scripts\python.exe" scripts\local_http.py dashboard
 if errorlevel 1 (
   echo ERROR: An older API is running on port 8765 but does not serve the built dashboard.
-  echo Close the older Gaming Clip Factory backend window, then run start.bat again.
+  echo Stop the older Gaming Clip Factory API and run start.bat again.
   goto fail
 )
 echo Reusing the running local API.
 
 :wait_backend
 echo Waiting for the local app...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0;$i -lt 45;$i++){ try { $h=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/api/health; $home=Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:8765/; if($h.StatusCode -eq 200 -and $home.StatusCode -eq 200){$ok=$true;break} } catch {}; Start-Sleep -Seconds 1 }; if(-not $ok){Write-Error 'The API and production dashboard did not both become ready within 45 seconds. Inspect the backend window.'; exit 1 }"
+".venv\Scripts\python.exe" scripts\local_http.py wait
 if errorlevel 1 goto fail
 
 echo.
 echo Checking media pipeline readiness...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-RestMethod -TimeoutSec 5 http://127.0.0.1:8765/api/readiness; $r.checks.PSObject.Properties | ForEach-Object { if($_.Value.ready){Write-Host ('  OK    '+$_.Name)} else {Write-Host ('  CHECK '+$_.Name+' - '+$_.Value.reason)} }; if(-not $r.ready){Write-Host 'Media production is DEGRADED until all required tools and paths are valid.'} } catch { Write-Warning ('Readiness report unavailable: '+$_.Exception.Message) }"
+".venv\Scripts\python.exe" scripts\local_http.py readiness
 
 echo.
 echo Gaming Clip Factory AI is open.
@@ -111,19 +116,27 @@ echo Dashboard: http://127.0.0.1:8765
 echo API docs: http://127.0.0.1:8765/docs
 echo Readiness: http://127.0.0.1:8765/api/readiness
 echo Public YouTube publishing remains disabled unless explicitly configured.
-start "" "http://127.0.0.1:8765"
+if /I "%GCF_STARTUP_SKIP_BROWSER%"=="true" (
+  echo Browser launch skipped because GCF_STARTUP_SKIP_BROWSER=true.
+) else (
+  start "" "http://127.0.0.1:8765"
+)
 echo.
-echo Close the separate backend window to stop the local app.
+echo The backend runs in the background; use scripts\stop.bat to stop it.
 echo This launcher window can now be closed.
 exit /b 0
 
 :launch_backend
 echo Starting local API and production dashboard...
-start "Gaming Clip Factory AI - Backend" /D "%CD%" cmd /k ""%CD%\scripts\run-backend.bat""
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\launch-backend.ps1"
+if errorlevel 1 goto fail
 goto wait_backend
 
 :fail
 echo.
-echo Startup could not safely complete. See the message above and the backend window.
+echo Startup could not safely complete. See the message above.
+if exist "data\logs\backend.stdout.log" powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 40 -ErrorAction SilentlyContinue 'data\logs\backend.stdout.log'"
+if exist "data\logs\backend.stderr.log" powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 60 -ErrorAction SilentlyContinue 'data\logs\backend.stderr.log'"
+if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 1
 pause
 exit /b 1

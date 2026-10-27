@@ -39,11 +39,11 @@ No API credentials, OAuth files, model weights or FFmpeg binaries are committed.
 
 ## Windows quick start
 
-**First run:** install Python 3.11+ and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. It checks prerequisites, creates a default `.env` from `.env.example` if needed, installs missing dependencies, starts the backend/dashboard in separate windows, waits for both services, checks media-toolchain readiness, and opens the dashboard. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the app opens in degraded mode and analysis/rendering remain unavailable until they are installed/configured.
+**First run:** install Python 3.11+ and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. The launcher creates `.env` from `.env.example` only if missing, repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API, checks local readiness and opens the dashboard. The API runs as a background process; its logs are stored at `data\logs\backend.stdout.log` and `data\logs\backend.stderr.log`. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the readiness panel reports degraded status and media processing remains unavailable until those tools are installed/configured.
 
-**Later runs:** double-click `scripts\start.bat` again. To run components separately for debugging, use `scripts\run-backend.bat` and `scripts\run-dashboard.bat`.
+**Later runs:** double-click `scripts\start.bat` again. For development only, use `scripts\run-backend.bat` and `scripts\run-dashboard.bat` separately to run the Vite development server. To stop the background app, use `scripts\stop.bat`.
 
-Dashboard: http://127.0.0.1:5173; API: http://127.0.0.1:8765; API docs: http://127.0.0.1:8765/docs; liveness: http://127.0.0.1:8765/api/health; readiness report: http://127.0.0.1:8765/api/readiness.
+Dashboard: http://127.0.0.1:8765; API: http://127.0.0.1:8765; API docs: http://127.0.0.1:8765/docs; liveness: http://127.0.0.1:8765/api/health; readiness report: http://127.0.0.1:8765/api/readiness.
 
 ## Storage safety
 
