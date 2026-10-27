@@ -19,6 +19,13 @@ if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
     throw "The verified dependency lock for Windows/Python $version is missing: $lockPath"
 }
 
+# Never bless a stale/mismatched dependency matrix as installed.
+$validator = Join-Path $projectRoot "scripts\validate_dependency_locks.py"
+& $pythonPath $validator --os-key win --python-key $pythonKey
+if ($LASTEXITCODE -ne 0) {
+    throw "Dependency manifests and lock files disagree. Refresh and commit the complete lock matrix before starting."
+}
+
 Write-Output "Installing exact hashed dependencies from $lockPath"
 & $pythonPath -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "Could not upgrade pip." }
