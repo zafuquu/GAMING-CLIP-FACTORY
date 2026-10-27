@@ -16,7 +16,7 @@ This roadmap separates code that exists from owner configuration and live accept
 - Public release begins from a private upload, rechecks current rights, output hash/size/QC, processing state and scheduled time; owners can cancel/reschedule.
 - Global pause checks queue admission and outbound YouTube mutations. Queue transitions use immediate SQLite write locks; a partial unique index prevents multiple publication records for one render.
 - Migration runner rejects duplicate version numbers and atomically commits each migration with its version marker; tests cover rollback/duplicate numbers.
-- Latest previously verified hosted CI run 40432165750 passed all five jobs. Its Ubuntu/Python 3.12 job reported 127 passed and 1 deprecation warning; the next run validates the temporal-vision sample changes. https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40432165750.
+- Latest verified hosted CI run 40437190729 on commit `bdcab795` passed all five jobs (Windows/Linux, Python 3.11/3.12, frontend build). Ubuntu/Python 3.12 reported 130 passed and 1 warning; Ubuntu/Python 3.11 reported 130 passed and 2 warnings, including FFmpeg media integration. https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40437190729.
 
 ## Configuration required
 
@@ -45,7 +45,7 @@ This roadmap separates code that exists from owner configuration and live accept
 
 ### Phase 3 — reliable gameplay event understanding
 
-Scene-change detection and three sampled vision frames are not reliable enough to drive unattended selection. Add optional vision sampling over time, motion/audio cues, game-specific HUD understanding where supported, near-duplicate detection, explainable evidence and a calibrated scoring pipeline trained/evaluated on labeled rights-cleared footage. Low confidence must remain review-only; do not invent events.
+Scene-change detection and sparse 3/5-frame vision sampling are not reliable enough to drive unattended selection. Add optional vision sampling over time, motion/audio cues, game-specific HUD understanding where supported, near-duplicate detection, explainable evidence and a calibrated scoring pipeline trained/evaluated on labeled rights-cleared footage. Low confidence must remain review-only; do not invent events.
 
 ### Phase 4 — content direction/presentation
 
