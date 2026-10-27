@@ -84,6 +84,8 @@ def test_readiness_reports_missing_media_toolchain(tmp_path):
     assert payload["ready"] is False
     assert payload["status"]=="degraded"
     assert payload["checks"]["database"]["ready"] is True
+    assert payload["checks"]["worker"]["enabled"] is False
+    assert payload["checks"]["worker"]["required"] is False
     assert payload["checks"]["ffmpeg"]["ready"] is False
     assert payload["checks"]["ffprobe"]["ready"] is False
     assert payload["checks"]["database_directory"]["ready"] is True
@@ -106,6 +108,8 @@ def test_readiness_reports_healthy_media_toolchain(tmp_path,monkeypatch):
         payload=response.json()
         assert payload["ready"] is True
         assert payload["status"]=="ready"
+        assert payload["checks"]["worker"]["enabled"] is False
+        assert payload["checks"]["worker"]["ready"] is True
         assert payload["checks"]["ffmpeg"]["version"]=="ffmpeg-test version 7.1.2"
         assert payload["checks"]["ffprobe"]["version"]=="ffprobe-test version 7.1.2"
         assert all(payload["checks"][k]["ready"] for k in ("database","ffmpeg","ffprobe","database_directory","media_root","output_directory"))
