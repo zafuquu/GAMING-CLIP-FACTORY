@@ -1,0 +1,58 @@
+name: Remotion render smoke test
+
+on:
+  push:
+    branches: ["main", "feat/remotion-render-engine"]
+    paths:
+      - "remotion/**"
+      - "backend/app/worker.py"
+      - "backend/app/main.py"
+      - "scripts/setup-remotion.bat"
+      - ".github/workflows/remotion-render-smoke.yml"
+  pull_request:
+    paths:
+      - "remotion/**"
+      - "backend/app/worker.py"
+      - "backend/app/main.py"
+      - "scripts/setup-remotion.bat"
+      - ".github/workflows/remotion-render-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remotion-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  remotion-render-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.1"
+          cache: npm
+          cache-dependency-path: remotion/package-lock.json
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+      - name: Install exact top-level Remotion dependencies
+        working-directory: remotion
+        run: npm install --no-audit --no-fund
+      - name: Render a synthetic clip and validate its streams
+        working-directory: remotion
+        run: npm run test:render
+      - name: Upload generated dependency lock for review
+        if: always() && hashFiles('remotion/package-lock.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: remotion-package-lock
+          path: remotion/package-lock.json
+          if-no-files-found: error
+          retention-days: 7
