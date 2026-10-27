@@ -134,5 +134,5 @@ def test_validator_rejects_stale_npm_lock_root(tmp_path, monkeypatch):
     lock_data["packages"][""]["dependencies"]["react"] = "^18.0.0"
     package_lock.write_text(json.dumps(lock_data), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="root field 'dependencies'"):
+    with pytest.raises(ValueError, match="root 'dependencies'"):
         invoke_validator(tmp_path, monkeypatch)
