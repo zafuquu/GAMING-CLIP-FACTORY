@@ -67,7 +67,7 @@ if not errorlevel 1 (
   echo Backend is already responding at http://127.0.0.1:8765. Reusing it.
 ) else (
   echo Starting backend...
-  start "Gaming Clip Factory AI - Backend" cmd /k "cd /d ""%CD%"" ^&^& scripts\run-backend.bat"
+  start "Gaming Clip Factory AI - Backend" /D "%CD%" "%CD%\scripts\run-backend.bat"
 )
 
 echo Waiting for backend readiness...
@@ -83,7 +83,7 @@ if not errorlevel 1 (
   echo Dashboard is already responding at http://127.0.0.1:5173. Reusing it.
 ) else (
   echo Starting dashboard...
-  start "Gaming Clip Factory AI - Dashboard" cmd /k "cd /d ""%CD%\frontend"" ^&^& npm run dev"
+  start "Gaming Clip Factory AI - Dashboard" /D "%CD%\frontend" cmd /k "npm run dev"
 )
 
 echo Waiting for dashboard...
