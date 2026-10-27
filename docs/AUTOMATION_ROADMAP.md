@@ -4,11 +4,11 @@ This roadmap separates code that exists from owner configuration and live accept
 
 ## Current alpha: implemented in code
 
-- FastAPI and React dashboard, SQLite migrations 001–012, persistent jobs and startup recovery.
+- FastAPI and React dashboard, SQLite migrations 001–016, persistent jobs and startup recovery.
 - Rights registry and repeated expiry/revocation checks; discovered sources remain UNKNOWN.
 - Scheduled Twitch Helix and YouTube Data API metadata-only discovery; providers do not download source footage.
 - FFmpeg scene-change candidate generation, optional Faster-Whisper transcripts, timed captions and transcript-grounded draft metadata.
-- Optional local Ollama-compatible vision assessment using up to three sampled frames; structured evidence/uncalibrated score, mandatory human review.
+- Optional local Ollama-compatible vision assessment using configurable 3 or 5 sampled frames with candidate-relative timestamp context; structured evidence/uncalibrated score, mandatory human review.
 - Candidate review/approval, editable candidate-relative captions, vertical rendering with fit-and-pad or blurred-backdrop profile, SRT caption sidecar/burn-in and QC PASS/REVIEW. A deterministic title-led Shorts cover is generated from the actual rendered poster.
 - Generated portrait poster frames, hash/dimension verification and browser preview.
 - YouTube Desktop OAuth in OS keyring with scope-version validation, private upload, processing polling/recheck, official custom-thumbnail upload/retry after successful processing, reconciliation, Analytics snapshots and separate public-release environment gate.
@@ -16,7 +16,7 @@ This roadmap separates code that exists from owner configuration and live accept
 - Public release begins from a private upload, rechecks current rights, output hash/size/QC, processing state and scheduled time; owners can cancel/reschedule.
 - Global pause checks queue admission and outbound YouTube mutations. Queue transitions use immediate SQLite write locks; a partial unique index prevents multiple publication records for one render.
 - Migration runner rejects duplicate version numbers and atomically commits each migration with its version marker; tests cover rollback/duplicate numbers.
-- Latest hosted CI test steps passed on commit 63517f8f: Windows/Linux Python 3.11/3.12 and frontend build. Run 40358583264: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40358583264.
+- Latest previously verified hosted CI run 40432165750 passed all five jobs. Its Ubuntu/Python 3.12 job reported 127 passed and 1 deprecation warning; the next run validates the temporal-vision sample changes. https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40432165750.
 
 ## Configuration required
 
