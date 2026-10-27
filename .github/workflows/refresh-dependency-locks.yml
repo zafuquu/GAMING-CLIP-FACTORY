@@ -149,7 +149,14 @@ jobs:
           & (Join-Path $chocoBin "ffprobe.exe") -version
       - name: Install exact generated Python lock
         run: python -m pip install --require-hashes -r backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt
+      - name: Audit generated base and optional-ML locks before publication
+        timeout-minutes: 8
+        run: |
+          python -m pip install --upgrade pip-audit
+          python -m pip_audit --require-hashes --disable-pip -r backend/requirements-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt --strict
+          python -m pip_audit --require-hashes --disable-pip -r backend/requirements-ml-lock-${{ matrix.os_key }}-${{ matrix.python_key }}.txt --strict
       - name: Run tests against generated lock
+        timeout-minutes: 20
         run: python -m pytest -q
 
   frontend-build:
