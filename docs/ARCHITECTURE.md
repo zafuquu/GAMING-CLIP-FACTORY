@@ -5,8 +5,8 @@
 - React/TypeScript/Vite dashboard reads API data; SQLite is authoritative.
 - FastAPI binds to 127.0.0.1:8765 by default.
 - SQLite stores source rights, media assets, candidates, jobs, transcripts, content plans, captions, rendered outputs/posters, publishing records, Analytics snapshots, settings/schedules, discovery runs and system events.
-- Numbered migrations 001–013 are checked for unique version numbers and applied atomically with the schema-version marker. Migration tests cover duplicate numbering and rollback of a broken migration.
-- A single worker consumes persistent jobs. Critical queue admission/publication transitions use immediate SQLite write locks. FFmpeg subprocesses use argument arrays, shell=False and finite timeouts.
+- Numbered migrations 001–016 are checked for unique version numbers and applied atomically with the schema-version marker. Migration tests cover duplicate numbering and rollback of a broken migration.
+- A single worker consumes persistent jobs. Persisted discovery and Analytics schedules are checked every worker cycle before queue claims, so a busy job queue cannot starve scheduled runs; scheduler faults are logged without blocking local work. Critical queue admission/publication transitions use immediate SQLite write locks. FFmpeg subprocesses use argument arrays, shell=False and finite timeouts.
 - Restart recovery requeues interrupted local processing but marks uncertain external YouTube operations RECONCILE_REQUIRED instead of blindly retrying.
 
 ## Source lifecycle
@@ -20,7 +20,7 @@ Twitch Helix and YouTube Data API return public metadata only; they do not downl
 3. FFmpeg scene-change analysis creates candidate intervals marked NEEDS_REVIEW. Scene changes are heuristics, not evidence of gameplay meaning.
 4. Optional Faster-Whisper creates local speech transcripts and timestamps.
 5. Deterministic content planning uses source metadata/transcript evidence and does not invent narration or unsupported gameplay events.
-6. Optional local vision analysis samples three frames and stores structured visible-event/evidence estimates and an uncalibrated score. It never auto-approves.
+6. Optional local vision analysis samples 3 or 5 frames (default 5), passes candidate-relative timestamps with the images, and stores structured visible-event/evidence estimates, source timestamps and relative offsets. Scores are uncalibrated and it never auto-approves.
 7. Owner edits caption timings if needed and approves/rejects the candidate.
 8. Worker creates either a fit-and-pad 1080×1920 render or a blur-fill composition that places the full uncropped foreground frame over a blurred background. Timed captions may be burned in and SRT is retained when available.
 9. FFprobe/FFmpeg defect scans create QC. Black/frozen intervals or missing subtitle filters produce REVIEW; only PASS qualifies for publishing.
