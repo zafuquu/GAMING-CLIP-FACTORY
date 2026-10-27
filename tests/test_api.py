@@ -783,3 +783,71 @@ def test_editing_narration_script_invalidates_previous_audio(tmp_path,monkeypatc
     assert plan["narration_audio_sha256"] is None
     assert plan["narration_audio_duration_seconds"] is None
     c.__exit__(None,None,None)
+
+
+def test_local_script_drafting_is_opt_in(tmp_path,monkeypatch):
+    monkeypatch.delenv("GCF_ENABLE_SCRIPT_DRAFTING",raising=False)
+    c,_=setup_client(tmp_path)
+    response=c.post("/api/candidates/not-a-real-candidate/narration/draft")
+    assert response.status_code==503
+    c.__exit__(None,None,None)
+
+def test_script_drafting_requires_candidate_evidence(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_SCRIPT_DRAFTING","true")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_BASE_URL","http://127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_MODEL","test-model")
+    c,media=setup_client(tmp_path); sid=add_source(c); assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True); (media/"clip.mp4").write_bytes(b"test media bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"}); assert imported.status_code==201,imported.text
+    cid="script-draft-no-evidence"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (cid,imported.json()["id"],0.0,5.0,"test","No evidence candidate","NEEDS_REVIEW","2026-10-01T00:00:00+00:00"))
+    response=c.post(f"/api/candidates/{cid}/narration/draft")
+    assert response.status_code==409,response.text
+    c.__exit__(None,None,None)
+
+def test_script_drafting_queues_only_for_authorized_candidate_with_transcript(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_SCRIPT_DRAFTING","true")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_BASE_URL","http://127.0.0.1:11434/api/chat")
+    monkeypatch.setenv("GCF_SCRIPT_DRAFTER_MODEL","test-model")
+    c,media=setup_client(tmp_path); sid=add_source(c); assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True); (media/"clip.mp4").write_bytes(b"test media bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"}); assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]; cid="script-draft-with-evidence"; stamp="2026-10-01T00:00:00+00:00"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (cid,mid,0.0,5.0,"test","Transcript evidence candidate","NEEDS_REVIEW",stamp))
+        raw.execute("""INSERT INTO transcripts(id,media_id,language,language_probability,full_text,model_name,status,error,created_at,updated_at)
+                    VALUES(?,?,?,?,?,?,'COMPLETED','',?,?)""",("draft-api-transcript",mid,"en",0.95,"Watch this angle","test",stamp,stamp))
+        raw.execute("INSERT INTO transcript_segments(id,transcript_id,segment_index,start_seconds,end_seconds,text,confidence) VALUES(?,?,?,?,?,?,?)",
+                    ("draft-api-segment","draft-api-transcript",0,1.0,2.5,"Watch this angle",0.9))
+    response=c.post(f"/api/candidates/{cid}/narration/draft")
+    assert response.status_code==202,response.text
+    assert response.json()["owner_review_required"] is True
+    assert response.json()["automatic_synthesis"] is False
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        row=raw.execute("SELECT job_type,status FROM jobs WHERE id=?",(response.json()["id"],)).fetchone()
+    assert tuple(row)==("DRAFT_NARRATION_SCRIPT","QUEUED")
+    c.__exit__(None,None,None)
+
+def test_voice_synthesis_requires_explicit_script_review(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setattr(main_module,"get_narration_status",lambda:{"ready":True,"reason":None})
+    c,media=setup_client(tmp_path); sid=add_source(c); assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True); (media/"clip.mp4").write_bytes(b"test media bytes")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"}); assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]; cid="script-review-gate"; stamp="2026-10-01T00:00:00+00:00"
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        raw.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (cid,mid,0.0,5.0,"test","Voice script review","NEEDS_REVIEW",stamp))
+    saved=c.put(f"/api/candidates/{cid}/content-plan",json={"title":"Test voiceover","narration_text":"Watch this angle, then reset."})
+    assert saved.status_code==200,saved.text
+    blocked=c.post(f"/api/candidates/{cid}/narration")
+    assert blocked.status_code==409,blocked.text
+    approved=c.put(f"/api/candidates/{cid}/content-plan",json={"narration_text":"Watch this angle, then reset.","narration_script_reviewed":True})
+    assert approved.status_code==200,approved.text
+    queued=c.post(f"/api/candidates/{cid}/narration")
+    assert queued.status_code==202,queued.text
+    assert queued.json()["status"]=="QUEUED"
+    c.__exit__(None,None,None)
