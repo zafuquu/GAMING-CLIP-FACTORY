@@ -7,8 +7,20 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $marker = Join-Path $projectRoot ".venv\.gcf-dependency-locks.sha256"
-$pythonLock = Join-Path $projectRoot "backend\requirements-lock.txt"
+$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $npmLock = Join-Path $projectRoot "frontend\package-lock.json"
+if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
+    Write-Error "The application Python virtual environment is missing."
+    exit 2
+}
+$version = (& $pythonPath -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
+if ($LASTEXITCODE -ne 0) { Write-Error "Could not determine Python version."; exit 2 }
+switch ($version) {
+    "3.11" { $pythonKey = "py311" }
+    "3.12" { $pythonKey = "py312" }
+    default { Write-Error "Unsupported Python $version."; exit 2 }
+}
+$pythonLock = Join-Path $projectRoot "backend\requirements-lock-win-$pythonKey.txt"
 
 foreach ($required in @($pythonLock, $npmLock)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
