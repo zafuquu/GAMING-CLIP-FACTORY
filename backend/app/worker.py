@@ -1216,17 +1216,17 @@ class Worker(threading.Thread):
                     for block in iter(lambda:final_stream.read(1024*1024),b""): final_sha.update(block)
                 if final_sha.hexdigest()!=latest["render_sha"]:
                     raise PermissionError("Scheduled publication blocked: render hash changed immediately before public release.")
-            except OSError as exc:
-                stamp=now()
-                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason='Render could not be verified immediately before public release.',updated_at=? WHERE id=?",(stamp,published_id))
-                c.commit()
-                raise PermissionError("Scheduled publication blocked: rendered output could not be verified immediately before release.") from exc
             except PermissionError as exc:
                 stamp=now()
                 c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason=?,updated_at=? WHERE id=?",(str(exc)[:1000],stamp,published_id))
                 event(c,"ERROR","youtube.publication_blocked_qc","Final pre-mutation artifact integrity check blocked public release.",{"job_id":job["id"],"published_video_id":published_id,"reason":str(exc)[:300]})
                 c.commit()
                 raise
+            except OSError as exc:
+                stamp=now()
+                c.execute("UPDATE published_videos SET publishing_status='BLOCKED_QC',scheduled_publish_at=NULL,processing_failure_reason='Render could not be verified immediately before public release.',updated_at=? WHERE id=?",(stamp,published_id))
+                c.commit()
+                raise PermissionError("Scheduled publication blocked: rendered output could not be verified immediately before release.") from exc
             enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
             if not enabled or enabled["value"]!="true" or os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or os.getenv("GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING","").lower()!="true":
                 stamp=now()
