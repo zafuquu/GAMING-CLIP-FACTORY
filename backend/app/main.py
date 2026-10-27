@@ -410,6 +410,18 @@ def create_app(settings=None,start_worker=True):
             path.relative_to(root)
         except ValueError:
             raise HTTPException(400,detail="Watched folder must remain inside the configured media root.")
+        # The OAuth status probe calls YouTube over the network. Do it before taking
+        # SQLite's write lock so slow provider responses cannot block unrelated app writes.
+        if data.auto_upload_private:
+            if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()!="true":
+                raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
+            with connect(cfg.database_path) as gate_db:
+                gate=gate_db.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not gate or gate["value"]!="true":
+                raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
+            youtube_ready=connected_status()
+            if not youtube_ready.get("connected"):
+                raise HTTPException(503,detail="Private auto-upload requires a connected YouTube channel: "+str(youtube_ready.get("reason") or "connection check failed"))
         with session(cfg.database_path) as c:
             c.execute("BEGIN IMMEDIATE")
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
@@ -425,9 +437,6 @@ def create_app(settings=None,start_worker=True):
                 upload_enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
                 if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or not upload_enabled or upload_enabled["value"]!="true":
                     raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
-                youtube_ready=connected_status()
-                if not youtube_ready.get("connected"):
-                    raise HTTPException(503,detail="Private auto-upload requires a connected YouTube channel: "+str(youtube_ready.get("reason") or "connection check failed"))
             existing=c.execute("SELECT id,relative_path,source_id FROM media_folder_watches").fetchall()
             new_parts=PurePosixPath(data.relative_path).parts
             for item in existing:
@@ -454,6 +463,18 @@ def create_app(settings=None,start_worker=True):
         if not updates:
             raise HTTPException(400,detail="Provide at least one folder-watch setting to update.")
         t=now()
+        # Only a transition that explicitly enables the remote-upload flag needs a live
+        # OAuth probe. Never hold SQLite's write lock across the provider network call.
+        if updates.get("auto_upload_private") is True:
+            if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").strip().lower()!="true":
+                raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
+            with connect(cfg.database_path) as gate_db:
+                gate=gate_db.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
+            if not gate or gate["value"]!="true":
+                raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
+            youtube_ready=connected_status()
+            if not youtube_ready.get("connected"):
+                raise HTTPException(503,detail="Private auto-upload requires a connected YouTube channel: "+str(youtube_ready.get("reason") or "connection check failed"))
         with session(cfg.database_path) as c:
             c.execute("BEGIN IMMEDIATE")
             row=c.execute("""SELECT w.*,p.status AS rights_status,p.expires_at FROM media_folder_watches w
@@ -479,9 +500,6 @@ def create_app(settings=None,start_worker=True):
                 upload_enabled=c.execute("SELECT value FROM settings WHERE key='youtube_uploads_enabled'").fetchone()
                 if os.getenv("GCF_ENABLE_YOUTUBE_UPLOADS","").lower()!="true" or not upload_enabled or upload_enabled["value"]!="true":
                     raise HTTPException(403,detail="Private auto-upload requires YouTube uploads to be configured and explicitly enabled first.")
-                youtube_ready=connected_status()
-                if not youtube_ready.get("connected"):
-                    raise HTTPException(503,detail="Private auto-upload requires a connected YouTube channel: "+str(youtube_ready.get("reason") or "connection check failed"))
             if values.get("enabled") is True:
                 target_parts=PurePosixPath(row["relative_path"]).parts
                 siblings=c.execute("SELECT id,relative_path FROM media_folder_watches WHERE id<>?",(watch_id,)).fetchall()
@@ -496,7 +514,7 @@ def create_app(settings=None,start_worker=True):
             args.extend([t,t,watch_id])
             c.execute("UPDATE media_folder_watches SET "+", ".join(assignments)+" WHERE id=?",args)
             event(c,"INFO","folder_watch.updated","Local folder watch settings updated.",{"watch_id":watch_id,**values})
-        return {"id":watch_id,**updates,"updated_at":t}
+        return {"id":watch_id,**values,"updated_at":t}
 
     @app.post("/api/automation/folder-watches/{watch_id}/scan",status_code=202)
     def trigger_folder_watch_scan(watch_id: str):
