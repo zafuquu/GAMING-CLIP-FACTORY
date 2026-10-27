@@ -38,6 +38,10 @@ def escape_filter_path(path):
     return value
 
 SCENE=re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
+# Supervised folder auto-production is deliberately capped; scene changes are not a
+# calibrated highlight score, so excess candidates remain in the owner's review queue.
+AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA = 3
+
 def run(args,timeout,cwd=None):
     try: p=subprocess.run(args,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout,shell=False,cwd=str(cwd) if cwd else None)
     except subprocess.TimeoutExpired as e: raise RuntimeError(f"Command timed out after {timeout}s: {args[0]}") from e
@@ -312,32 +316,118 @@ class Worker(threading.Thread):
         return True
     def analyze(self,job):
         if not self.ffmpeg or not self.ffprobe: raise RuntimeError("FFmpeg/FFprobe not configured. Set GCF_FFMPEG_PATH and GCF_FFPROBE_PATH.")
+        # Read the job inputs and close SQLite immediately. FFprobe/FFmpeg can take
+        # minutes on long recordings; no write transaction may remain open during them,
+        # otherwise rights changes, pause controls and dashboard writes can time out.
         c=connect(self.db)
         try:
             m=c.execute("SELECT m.*,p.status AS rights_status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(job["media_id"],)).fetchone()
             if not m: raise FileNotFoundError("Media record missing")
-            if m["rights_status"]!="AUTHORIZED" or expiry_passed(m["expires_at"]): raise PermissionError("Rights gate blocked analysis: current AUTHORIZED permission is required")
-            path=Path(m["original_path"])
-            if not path.is_file(): raise FileNotFoundError("Media file missing")
-            probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(path)],min(60,self.timeout))
-            data=json.loads(probe.stdout); fmt=data.get("format",{}); duration=float(fmt.get("duration",0))
-            if duration<=0: raise RuntimeError("Could not verify positive media duration")
-            meta={"format_name":fmt.get("format_name"),"duration_seconds":duration,"size_bytes":path.stat().st_size,"streams":[{"type":s.get("codec_type"),"codec":s.get("codec_name"),"width":s.get("width"),"height":s.get("height"),"fps":s.get("avg_frame_rate")} for s in data.get("streams",[])]}
+            m=dict(m)
+        finally:
+            c.close()
+        if m["rights_status"]!="AUTHORIZED" or expiry_passed(m["expires_at"]):
+            raise PermissionError("Rights gate blocked analysis: current AUTHORIZED permission is required")
+        path=Path(m["original_path"]).resolve()
+        if not path.is_file(): raise FileNotFoundError("Media file missing")
+        source_stat_before=path.stat()
+        probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(path)],min(60,self.timeout))
+        data=json.loads(probe.stdout); fmt=data.get("format",{}); duration=float(fmt.get("duration",0))
+        if duration<=0: raise RuntimeError("Could not verify positive media duration")
+        meta={"format_name":fmt.get("format_name"),"duration_seconds":duration,"size_bytes":source_stat_before.st_size,"streams":[{"type":s.get("codec_type"),"codec":s.get("codec_name"),"width":s.get("width"),"height":s.get("height"),"fps":s.get("avg_frame_rate")} for s in data.get("streams",[])]}
+        p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),"-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
+        source_stat_after=path.stat()
+        if (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns):
+            raise RuntimeError("Source media changed during analysis. Let the file finish copying/recording and retry.")
+        ts=[]
+        for hit in SCENE.finditer(p.stderr):
+            t=float(hit.group(1))
+            if 0<t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
+
+        # Reacquire a short write transaction after media processing and recheck permission;
+        # revocation/expiry during a long FFmpeg scan must not get ignored.
+        c=connect(self.db)
+        try:
+            c.execute("BEGIN IMMEDIATE")
+            current=c.execute("SELECT m.*,p.status AS rights_status,p.expires_at FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id WHERE m.id=?",(job["media_id"],)).fetchone()
+            if not current: raise FileNotFoundError("Media record disappeared during analysis.")
+            if current["rights_status"]!="AUTHORIZED" or expiry_passed(current["expires_at"]):
+                raise PermissionError("Rights gate blocked analysis: permission was revoked or expired while media was being analyzed.")
+            if Path(current["original_path"]).resolve()!=path:
+                raise RuntimeError("Media source path changed during analysis; refusing to attach results to a different file.")
+            m=dict(current)
             c.execute("UPDATE media_assets SET probe_json=?,state='PROBED' WHERE id=?",(json.dumps(meta),m["id"]))
-            p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),"-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
-            ts=[]
-            for hit in SCENE.finditer(p.stderr):
-                t=float(hit.group(1))
-                if 0<t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
             added=0
             for t in ts:
                 start=round(max(0,t-5),3); end=round(min(duration,t+5),3)
                 if end-start<3: continue
                 cur=c.execute("INSERT OR IGNORE INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,? ,?,'NEEDS_REVIEW',?)",(str(uuid4()),m["id"],start,end,"ffmpeg_scene_change","Scene-change heuristic only; human review required.",now()))
                 added+=cur.rowcount
-            summary={"duration_seconds":duration,"candidate_count":added,"note":"Scene changes are not semantic highlight detection."}; t=now()
+
+            # Explicitly enabled folder watches can auto-render a small local batch after
+            # rechecking the watch and current source rights. This skips the per-candidate
+            # click but never publishes: QC-passed renders still require owner inspection.
+            auto_render_queued=0
+            already_auto_rendered=int(c.execute(
+                "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
+                (m["id"],),
+            ).fetchone()[0])
+            try:
+                analysis_payload=json.loads(job["payload_json"] or "{}")
+                folder_watch_id=analysis_payload.get("folder_watch_id")
+            except (ValueError,TypeError):
+                folder_watch_id=None
+            if folder_watch_id:
+                watch=c.execute("""SELECT w.id,w.source_id,w.enabled,w.auto_analyze,w.auto_render,
+                    p.status AS rights_status,p.expires_at
+                    FROM media_folder_watches w
+                    JOIN watched_media_files f ON f.watch_id=w.id
+                    JOIN source_permissions p ON p.source_id=w.source_id
+                    WHERE w.id=? AND f.media_id=? AND w.source_id=?""",
+                    (folder_watch_id,m["id"],m["source_id"])).fetchone()
+                paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+                if (watch and bool(watch["enabled"]) and bool(watch["auto_analyze"])
+                    and bool(watch["auto_render"])
+                    and watch["rights_status"]=="AUTHORIZED"
+                    and not expiry_passed(watch["expires_at"])
+                    and not (paused and paused["value"]=="true")):
+                    # Count every previous supervised auto-render job for this media,
+                    # including failed/completed jobs. Re-analysis or restart cannot consume
+                    # another batch and silently exceed the per-file cap.
+                    remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
+                    eligible=c.execute("""SELECT id FROM candidate_moments
+                        WHERE media_id=? AND state='NEEDS_REVIEW' AND auto_rendered=0
+                        ORDER BY start_seconds ASC,created_at ASC
+                        LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
+                    for candidate in eligible:
+                        updated=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(candidate["id"],))
+                        if updated.rowcount!=1:
+                            continue
+                        render_job_id=str(uuid4()); render_stamp=now()
+                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                            VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
+                            (render_job_id,m["source_id"],m["id"],json.dumps({
+                                "candidate_id":candidate["id"],
+                                "render_profile":"fit_pad",
+                                "auto_render_reason":"authorized_folder_watch",
+                                "human_final_review_required":True,
+                            }),render_stamp,render_stamp))
+                        auto_render_queued+=1
+                    if auto_render_queued:
+                        event(c,"INFO","folder_watch.auto_render_queued",
+                            f"Queued {auto_render_queued} local render(s) from an explicitly enabled authorized folder watch.",
+                            {"folder_watch_id":folder_watch_id,"media_id":m["id"],"queued":auto_render_queued,
+                             "cap_per_media":AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,
+                             "rights_rechecked":True,"public_publish_queued":False,
+                             "human_final_review_required":True})
+            summary={"duration_seconds":duration,"candidate_count":added,
+                "auto_render_queued":auto_render_queued,
+                "auto_render_cap_per_media":AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,
+                "auto_rendered_historically":already_auto_rendered if folder_watch_id else 0,
+                "auto_render_slots_remaining":max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-(already_auto_rendered if folder_watch_id else 0)),
+                "note":"Scene changes are not semantic highlight detection; rendered outputs require human review."}; t=now()
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","media.analysis_completed",f"Created {added} scene-change review candidates.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
+            event(c,"INFO","media.analysis_completed",f"Created {added} scene-change review candidates; queued {auto_render_queued} supervised auto-render jobs.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
         finally: c.close()
         if os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true":
             if importlib.util.find_spec("faster_whisper") is not None:
@@ -1954,12 +2044,15 @@ class Worker(threading.Thread):
                         AND status IN ('QUEUED','RUNNING') LIMIT 1""",(media_id,)).fetchone()
                     if not active:
                         job_id=str(uuid4())
-                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,created_at,updated_at)
-                            VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?,?,?)""",(job_id,watch["source_id"],media_id,t,t))
+                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                            VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
+                            (job_id,watch["source_id"],media_id,json.dumps({"folder_watch_id":watch["id"]}),t,t))
                 c.execute("""UPDATE watched_media_files SET status='IMPORTED',media_id=?,error='',last_seen_at=? WHERE watch_id=? AND relative_path=?""",
                           (media_id,t,watch["id"],rel))
                 event(c,"INFO","folder_watch.media_imported","Stable, authorized local file was imported from a watched folder.",
-                      {"watch_id":watch["id"],"media_id":media_id,"source_id":watch["source_id"],"file_name":path.name,"auto_analyze":bool(watch["auto_analyze"])})
+                      {"watch_id":watch["id"],"media_id":media_id,"source_id":watch["source_id"],
+                       "file_name":path.name,"auto_analyze":bool(watch["auto_analyze"]),
+                       "auto_render":bool(watch["auto_render"])})
                 imported+=1
                 c.commit()
             c.execute("UPDATE media_folder_watches SET last_error='',updated_at=? WHERE id=?",(t,watch["id"]))

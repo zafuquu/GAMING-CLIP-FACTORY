@@ -4,14 +4,14 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## What is implemented now
 
-- Local app: FastAPI, SQLite numbered migrations 001–016, React/TypeScript/Vite dashboard, loopback API.
+- Local app: FastAPI, SQLite numbered migrations 001–018, React/TypeScript/Vite dashboard, loopback API.
 - Source discovery: Twitch Helix clip metadata and YouTube Data API public video metadata search, including persisted schedules. These store URLs/metadata only; they do not download platform footage. New sources always start with rights UNKNOWN.
 - Rights registry: documented permission evidence, editing/commercial-use permission, owner review and expiry checks. Expired/revoked rights block processing and publishing.
 - Local media intake: configured media-root containment, file checks, SHA-256 and duplicate protection.
 - Analysis: FFprobe metadata and FFmpeg scene-change candidates. These are heuristics, not a semantic gameplay-event detector.
 - Optional local speech recognition: Faster-Whisper produces transcript/timed segments. A deterministic transcript-grounded content director drafts format/title/description/tags and caption timing. Owners can also write an exact script and explicitly synthesize it through a configured local Piper CLI/voice model; generated WAVs are hashed, previewed and mixed into renders with gameplay-audio ducking. The app does not invent or auto-synthesize scripts.
 - Optional local vision assessment: Ollama-compatible vision model samples a configurable 3 or 5 frames per candidate, passes candidate-relative timestamps to the model, and returns structured evidence. Scores are uncalibrated and never auto-approve; remote endpoints are blocked by default.
-- Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering.
+- Candidate review: approve/reject flow with transcript/vision evidence and a candidate-relative caption editor for timing/text corrections before rendering. **Opt-in supervised auto-production** on an explicitly configured authorized folder can automatically render up to three scene-change candidates per stable media file. The local QC-passed clips land in the review queue; you still inspect the finished video and decide whether to upload. This does not auto-upload or publish, and manual candidate approval remains the default.
 - Local rendering: H.264/AAC 1080×1920 MP4. Owner chooses fit-and-pad or blurred-backdrop composition; both preserve the full foreground gameplay frame without forcing a center crop. Timed caption sidecars are saved and may be burned in if the FFmpeg subtitle filter exists.
 - Local poster and designed cover: the pipeline extracts a 720×1280 poster from the render, creates a title-led 9:16 JPEG Shorts cover from the actual frame, records hash/dimensions and uploads it with the official YouTube thumbnail API after processing succeeds. Cover generation/upload has its own visible status, retry path and failure handling; it does not falsify video-upload success.
 - Automated QC: FFprobe checks dimensions/duration/codecs/audio; FFmpeg decode scan and black/frozen-frame heuristics produce PASS or REVIEW. REVIEW outputs may be previewed but only PASS outputs can be queued for YouTube.
@@ -31,7 +31,7 @@ Local-first, rights-gated Windows software for producing gaming clips. This repo
 
 ## Requirements
 
-- Windows 10/11, Python 3.11+, Node.js 20.19+ or 22.12+, npm.
+- Windows 10/11, Python 3.11 or 3.12, Node.js 20.19+ or 22.12+, and npm.
 - FFmpeg/FFprobe installed separately. The app auto-detects common project-local directories or uses GCF_FFMPEG_PATH/GCF_FFPROBE_PATH.
 - Provider credentials only for integrations you enable.
 
@@ -39,7 +39,7 @@ No API credentials, OAuth files, model weights or FFmpeg binaries are committed.
 
 ## Windows quick start
 
-**First run:** install Python 3.11+ and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. The launcher creates `.env` from `.env.example` only if missing, repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API, checks local readiness and opens the dashboard. The API runs as a background process; its logs are stored at `data\logs\backend.stdout.log` and `data\logs\backend.stderr.log`. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the readiness panel reports degraded status and media processing remains unavailable until those tools are installed/configured.
+**First run:** install Python 3.11 or 3.12 and Node.js 20.19+ or 22.12+, then double-click `scripts\start.bat`. The launcher creates `.env` from `.env.example` only if missing, repairs missing dependencies, builds the optimized dashboard, starts/reuses the loopback API, checks local readiness and opens the dashboard. The API runs as a background process; its logs are stored at `data\logs\backend.stdout.log` and `data\logs\backend.stderr.log`. It does not download FFmpeg, AI model weights, provider credentials or OAuth tokens. If FFmpeg/FFprobe are missing, the readiness panel reports degraded status and media processing remains unavailable until those tools are installed/configured.
 
 **Later runs:** double-click `scripts\start.bat` again. For development only, use `scripts\run-backend.bat` and `scripts\run-dashboard.bat` separately to run the Vite development server. To stop the background app, use `scripts\stop.bat`.
 
@@ -56,8 +56,8 @@ The worker checks free space on the database/output volume before folder scans o
 3. Only mark AUTHORIZED after evidence, editing/commercial flags and owner review are complete. Expired permissions fail closed.
 4. Place authorized files within the media root and register their relative path.
 5. Analyze the source; optionally run local transcription/vision. Scene-change and model-based results are estimates.
-6. Review candidates and caption timing, then approve/reject.
-7. Choose fit-and-pad or blurred-backdrop render, inspect QC, and preview the MP4/poster. REVIEW outputs cannot be uploaded; only PASS qualifies.
+6. By default, review candidates/captions and approve or reject them individually. For a watched folder, you may explicitly enable supervised auto-production to render a capped batch (maximum three scene-change candidates per file) without per-candidate clicks.
+7. Inspect the finished MP4/poster and QC result in the dashboard. Supervised auto-production stops at local rendering; it never uploads/publishes automatically. REVIEW outputs cannot be uploaded; only PASS qualifies.
 8. For YouTube, connect the intended channel and test private upload, processing status and reconciliation. Uploads start private. Public releases require a separate environment gate and current-rights/QC/hash checks at release time.
 
 ## Provider setup
@@ -120,9 +120,7 @@ Frontend:
     npm install
     npm run build
 
-Latest CI for the tested migration/profile/thumbnail code: GitHub Actions run 40358583264 on commit 63517f8f. Its four backend test steps passed: Windows/Python 3.11 and 3.12 reported 70 passed, 2 skipped; Ubuntu/Python 3.11 and 3.12 reported 72 passed including FFmpeg render integration. The frontend typecheck/production build also passed. Link: https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40358583264. Job cleanup was still finishing when these test steps were inspected.
-
-Latest verified GitHub Actions run for commit `b99b8368` passed all five jobs: Windows/Linux on Python 3.11/3.12 plus the frontend build. The backend matrix reported 107 passed / 2 skipped on Windows Python 3.11 and 109 passed on Ubuntu Python 3.11; all four backend jobs were green. [Run details](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40428209391).
+The latest main-branch acceptance run is [GitHub Actions run #364](https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40478057648) on commit `9f4917a92053cd47a939050ec918cae8a71c7ca1`. All six jobs passed: Python 3.11 and 3.12 tests on Windows and Ubuntu, frontend production build, and the Windows one-click start/readiness/restart/stop smoke test. The suite includes a synthetic-media mock-production path through scene analysis, human-review/approval, FFmpeg rendering/QC, a mocked private YouTube upload and a mocked processing-success response. This is not a real credentialed YouTube acceptance test.
 
 Hosted CI does not verify real credentials, actual source rights or the target Windows environment.
 

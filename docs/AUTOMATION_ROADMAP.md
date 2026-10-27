@@ -4,7 +4,7 @@ This roadmap separates code that exists from owner configuration and live accept
 
 ## Current alpha: implemented in code
 
-- FastAPI and React dashboard, SQLite migrations 001–016, persistent jobs and startup recovery.
+- FastAPI and React dashboard, SQLite migrations 001–018, persistent jobs and startup recovery.
 - Rights registry and repeated expiry/revocation checks; discovered sources remain UNKNOWN.
 - Scheduled Twitch Helix and YouTube Data API metadata-only discovery; providers do not download source footage.
 - FFmpeg scene-change candidate generation, optional Faster-Whisper transcripts, timed captions and transcript-grounded draft metadata.
@@ -16,10 +16,11 @@ This roadmap separates code that exists from owner configuration and live accept
 - Public release begins from a private upload, rechecks current rights, output hash/size/QC, processing state and scheduled time; owners can cancel/reschedule.
 - Global pause checks queue admission and outbound YouTube mutations. Queue transitions use immediate SQLite write locks; a partial unique index prevents multiple publication records for one render.
 - Migration runner rejects duplicate version numbers and atomically commits each migration with its version marker; tests cover rollback/duplicate numbers.
-- One-click Windows launcher checks supported runtimes and dependency health, creates the safe default environment file, builds the optimized dashboard, starts/reuses the loopback API, verifies the dashboard route and reports readiness. The API can serve the built React bundle from the same process; the separate Vite server remains available for development.
+- One-click Windows launcher checks Python 3.11/3.12 and Node versions, dependency health, creates the safe default environment file, builds the optimized dashboard, starts/reuses the loopback API, verifies the dashboard route and reports readiness. A Windows smoke test checks startup/readiness, a repeated start without a duplicate worker, clean stop and process exit.
 - Runtime readiness reports SQLite health, executable FFmpeg/FFprobe version checks, writable media/database/output folders and background-worker liveness. Worker error reporting no longer lets a secondary database/logging failure terminate the worker loop.
+- Opt-in supervised auto-production for authorized watched folders queues at most three local scene-change candidate renders per media file after checking the watch/pause/rights state. Human review of the completed clip remains mandatory; no automatic upload or public release is triggered.
 - Scheduled public release now rechecks current permission state, schedule, publishing-policy flags, output linkage, QC, file size/hash and global pause after the remote YouTube status lookup and before the public-state mutation. Rights revocation, output mutation and rescheduling during the lookup have regression tests.
-- Pre-hardening baseline: hosted CI run 40437498235 on commit `0df6b1d` passed all five jobs (Windows/Linux, Python 3.11/3.12, frontend build). The production-hardening branch has its own PR validation; do not treat the baseline run as evidence that the newly added launcher and gate tests passed. https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40437498235.
+- Verified main-branch run #364 on commit `9f4917a92053cd47a939050ec918cae8a71c7ca1` passed all six jobs: Windows/Linux on Python 3.11/3.12, frontend build, and the Windows startup/readiness/restart/stop smoke test. The preceding PR CI also passed the synthetic mock-production workflow with a mocked private YouTube response. https://github.com/zafuquu/GAMING-CLIP-FACTORY/actions/runs/40478057648.
 
 ## Configuration required
 

@@ -705,11 +705,34 @@ def test_folder_watch_automatically_imports_stable_authorized_media(tmp_path,mon
     assert second["imported"]==1
     with sqlite3.connect(c.app.state.settings.database_path) as raw:
         media_row=raw.execute("SELECT id,source_id,original_path,state FROM media_assets").fetchone()
-        job=raw.execute("SELECT job_type,status,media_id FROM jobs WHERE media_id=?",(media_row[0],)).fetchone()
+        job=raw.execute("SELECT job_type,status,media_id,payload_json FROM jobs WHERE media_id=?",(media_row[0],)).fetchone()
         watch_file=raw.execute("SELECT status,media_id FROM watched_media_files WHERE watch_id=?",(watch_id,)).fetchone()
     assert media_row[1]==sid and Path(media_row[2])==video.resolve() and media_row[3]=="IMPORTED"
-    assert tuple(job)==("ANALYZE_MEDIA","QUEUED",media_row[0])
+    assert tuple(job[:3])==("ANALYZE_MEDIA","QUEUED",media_row[0])
+    assert json.loads(job[3])["folder_watch_id"]==watch_id
     assert watch_file[0]=="IMPORTED" and watch_file[1]==media_row[0]
+    c.__exit__(None,None,None)
+
+def test_folder_watch_auto_render_requires_auto_analyze(tmp_path):
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    invalid=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","auto_analyze":False,"auto_render":True})
+    assert invalid.status_code==422,invalid.text
+
+    watch=c.post("/api/automation/folder-watches",json={
+        "source_id":sid,"relative_path":"incoming","auto_analyze":True,"auto_render":True})
+    assert watch.status_code==201,watch.text
+    watch_id=watch.json()["id"]
+    assert watch.json()["auto_render"] is True
+    invalid_update=c.put(f"/api/automation/folder-watches/{watch_id}",json={"auto_analyze":False})
+    assert invalid_update.status_code==422,invalid_update.text
+    saved=c.get("/api/automation/folder-watches").json()[0]
+    assert saved["auto_analyze"] is True and saved["auto_render"] is True
+    disabled=c.put(f"/api/automation/folder-watches/{watch_id}",json={"auto_render":False})
+    assert disabled.status_code==200,disabled.text
+    assert c.get("/api/automation/folder-watches").json()[0]["auto_render"] is False
     c.__exit__(None,None,None)
 
 def test_folder_watch_rechecks_rights_after_file_becomes_stable(tmp_path):
@@ -1167,3 +1190,55 @@ def test_disk_capacity_check_failure_pauses_fail_closed(tmp_path,monkeypatch):
     assert values["system_pause_reason"]=="storage_check_failed"
     assert values["storage_safety_status"]=="ERROR"
     client.__exit__(None,None,None)
+
+
+def test_analysis_releases_sqlite_write_lock_during_ffmpeg_and_rechecks_revoked_rights(tmp_path, monkeypatch):
+    """Dashboard writes must work while FFmpeg is running, and revocation must win."""
+    import subprocess
+    import app.worker as worker_module
+    from app.worker import Worker
+
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"clip.mp4").write_bytes(b"synthetic bytes accepted by the import registry")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"clip.mp4"})
+    assert imported.status_code==201,imported.text
+    media_id=imported.json()["id"]
+    queued=c.post(f"/api/media/{media_id}/analyze")
+    assert queued.status_code==202,queued.text
+
+    cfg=c.app.state.settings
+    worker=Worker(cfg.database_path,"fake-ffmpeg","fake-ffprobe",timeout=5,media_root=media)
+    original_run=worker_module.run
+    revocation_results=[]
+
+    def controlled_run(args,timeout,cwd=None):
+        if args[0]=="fake-ffprobe":
+            return subprocess.CompletedProcess(args,0,stdout=json.dumps({
+                "format":{"format_name":"mp4","duration":"10"},
+                "streams":[{"codec_type":"video","codec_name":"h264","width":320,"height":180,"avg_frame_rate":"30/1"}],
+            }),stderr="")
+        if args[0]=="fake-ffmpeg" and "-vf" in args:
+            # This write would time out with sqlite's 10-second busy timeout if the
+            # analyzer accidentally kept a write transaction open across the subprocess.
+            response=c.put(f"/api/sources/{sid}/rights",json={"status":"REVOKED"})
+            revocation_results.append(response.status_code)
+            assert response.status_code==200,response.text
+            return subprocess.CompletedProcess(args,0,stdout="",stderr="pts_time:5.000")
+        return original_run(args,timeout,cwd)
+
+    monkeypatch.setattr(worker_module,"run",controlled_run)
+    assert worker.one() is True
+    assert revocation_results==[200]
+
+    with sqlite3.connect(cfg.database_path) as raw:
+        status=raw.execute("SELECT status FROM source_permissions WHERE source_id=?",(sid,)).fetchone()[0]
+        job=raw.execute("SELECT status,error FROM jobs WHERE id=?",(queued.json()["id"],)).fetchone()
+        candidates=raw.execute("SELECT COUNT(*) FROM candidate_moments WHERE media_id=?",(media_id,)).fetchone()[0]
+    assert status=="REVOKED"
+    assert job[0]=="FAILED"
+    assert "revoked or expired" in job[1].lower()
+    assert candidates==0
+    c.__exit__(None,None,None)

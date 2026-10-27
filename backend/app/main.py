@@ -79,9 +79,12 @@ class FolderWatchIn(BaseModel):
     enabled: bool = True
     recursive: bool = False
     auto_analyze: bool = True
+    auto_render: bool = False
     scan_interval_seconds: int = Field(default=60,ge=15,le=3600)
     @model_validator(mode="after")
     def normalize_relative_path(self):
+        if self.auto_render and not self.auto_analyze:
+            raise ValueError("Supervised auto-render requires automatic analysis to be enabled.")
         raw=self.relative_path.strip().replace(chr(92), "/")
         if chr(0) in raw or ":" in raw:
             raise ValueError("relative_path cannot contain NUL characters or a drive prefix.")
@@ -96,6 +99,7 @@ class FolderWatchUpdateIn(BaseModel):
     enabled: bool | None = None
     recursive: bool | None = None
     auto_analyze: bool | None = None
+    auto_render: bool | None = None
     scan_interval_seconds: int | None = Field(default=None,ge=15,le=3600)
 class PublishingEnableIn(BaseModel):
     enabled: bool
@@ -386,6 +390,7 @@ def create_app(settings=None,start_worker=True):
                 item["enabled"]=bool(item["enabled"])
                 item["recursive"]=bool(item["recursive"])
                 item["auto_analyze"]=bool(item["auto_analyze"])
+                item["auto_render"]=bool(item["auto_render"])
                 if item["rights_status"]=="AUTHORIZED" and expiry_passed(item.get("expires_at")):
                     item["rights_status"]="EXPIRED"
                 rows.append(item)
@@ -423,12 +428,12 @@ def create_app(settings=None,start_worker=True):
                     raise HTTPException(409,detail="Overlapping watched folders are not allowed; create one parent watch instead.")
             path.mkdir(parents=True,exist_ok=True)
             watch_id=str(uuid4())
-            c.execute("""INSERT INTO media_folder_watches(id,source_id,relative_path,enabled,auto_analyze,recursive,scan_interval_seconds,next_scan_at,last_scan_at,last_error,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,NULL,'',?,?)""",
-                (watch_id,data.source_id,data.relative_path,int(data.enabled),int(data.auto_analyze),int(data.recursive),data.scan_interval_seconds,t,t,t))
-            event(c,"INFO","folder_watch.created","Local folder watch created for an authorized source.",{"watch_id":watch_id,"source_id":data.source_id,"relative_path":data.relative_path,"auto_analyze":data.auto_analyze})
+            c.execute("""INSERT INTO media_folder_watches(id,source_id,relative_path,enabled,auto_analyze,auto_render,recursive,scan_interval_seconds,next_scan_at,last_scan_at,last_error,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,NULL,'',?,?)""",
+                (watch_id,data.source_id,data.relative_path,int(data.enabled),int(data.auto_analyze),int(data.auto_render),int(data.recursive),data.scan_interval_seconds,t,t,t))
+            event(c,"INFO","folder_watch.created","Local folder watch created for an authorized source.",{"watch_id":watch_id,"source_id":data.source_id,"relative_path":data.relative_path,"auto_analyze":data.auto_analyze,"auto_render":data.auto_render,"render_cap_per_file":3})
         return {"id":watch_id,"source_id":data.source_id,"relative_path":data.relative_path,"enabled":data.enabled,
-                "recursive":data.recursive,"auto_analyze":data.auto_analyze,"scan_interval_seconds":data.scan_interval_seconds,
+                "recursive":data.recursive,"auto_analyze":data.auto_analyze,"auto_render":data.auto_render,"scan_interval_seconds":data.scan_interval_seconds,
                 "next_scan_at":t,"folder_path":str(path)}
 
     @app.put("/api/automation/folder-watches/{watch_id}")
@@ -448,6 +453,10 @@ def create_app(settings=None,start_worker=True):
             values={k:v for k,v in updates.items() if v is not None}
             if not values:
                 raise HTTPException(400,detail="Provide a non-null folder-watch setting to update.")
+            effective_auto_analyze=bool(values.get("auto_analyze",row["auto_analyze"]))
+            effective_auto_render=bool(values.get("auto_render",row["auto_render"]))
+            if effective_auto_render and not effective_auto_analyze:
+                raise HTTPException(422,detail="Supervised auto-render requires automatic analysis to remain enabled.")
             if values.get("enabled") is True:
                 target_parts=PurePosixPath(row["relative_path"]).parts
                 siblings=c.execute("SELECT id,relative_path FROM media_folder_watches WHERE id<>?",(watch_id,)).fetchall()
@@ -455,9 +464,9 @@ def create_app(settings=None,start_worker=True):
                     other_parts=PurePosixPath(sibling["relative_path"]).parts
                     if target_parts[:len(other_parts)]==other_parts or other_parts[:len(target_parts)]==target_parts:
                         raise HTTPException(409,detail="Cannot enable an overlapping folder watch. Remove or move the conflicting watch first.")
-            columns={"enabled":"enabled","recursive":"recursive","auto_analyze":"auto_analyze","scan_interval_seconds":"scan_interval_seconds"}
+            columns={"enabled":"enabled","recursive":"recursive","auto_analyze":"auto_analyze","auto_render":"auto_render","scan_interval_seconds":"scan_interval_seconds"}
             assignments=[columns[k]+"=?" for k in values]
-            args=[int(v) if k in {"enabled","recursive","auto_analyze"} else int(v) for k,v in values.items()]
+            args=[int(v) if k in {"enabled","recursive","auto_analyze","auto_render"} else int(v) for k,v in values.items()]
             assignments.extend(["next_scan_at=?","updated_at=?"])
             args.extend([t,t,watch_id])
             c.execute("UPDATE media_folder_watches SET "+", ".join(assignments)+" WHERE id=?",args)

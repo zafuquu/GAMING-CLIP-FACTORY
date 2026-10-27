@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import shutil
 import sqlite3
 import subprocess
@@ -218,66 +218,114 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         )
         assert rights_response.status_code == 200, rights_response.text
 
-        # Step 2 — generate four full-frame colors with hard scene cuts and a moving white box.
-        # The distinct backgrounds ensure scene score exceeds the production detector threshold;
-        # the moving box ensures QC does not interpret each segment as frozen footage.
-        input_path = media / "mock_gameplay.mp4"
+        # Step 2 — generate six full-frame colors with hard scene cuts and a moving white box.
+        # This is synthetic test material only; no third-party content is involved.
+        incoming = media / "incoming"
+        incoming.mkdir(parents=True, exist_ok=True)
+        input_path = incoming / "mock_gameplay.mp4"
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-f", "lavfi", "-i",
-            "color=c=red:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=red:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=lime:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=lime:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=blue:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=blue:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=yellow:s=320x180:r=24:d=4,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
-            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=16",
-            "-filter_complex", "[0:v][1:v][2:v][3:v]concat=n=4:v=1:a=0[v]",
-            "-map", "[v]", "-map", "4:a", "-t", "16",
+            "color=c=yellow:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "-f", "lavfi", "-i",
+            "color=c=magenta:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "-f", "lavfi", "-i",
+            "color=c=cyan:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=18",
+            "-filter_complex", "[0:v][1:v][2:v][3:v][4:v][5:v]concat=n=6:v=1:a=0[v]",
+            "-map", "[v]", "-map", "6:a", "-t", "18",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", str(input_path),
         ]
         subprocess.run(command, capture_output=True, text=True, timeout=90, check=True)
 
-        import_response = client.post(
-            "/api/media/import",
-            json={"source_id": source_id, "path": input_path.name},
+        # Step 3 — opt in to supervised auto-production for a watched, authorized folder.
+        # The folder watcher waits for file stability, imports it, and queues analysis.
+        watch_response = client.post(
+            "/api/automation/folder-watches",
+            json={
+                "source_id": source_id,
+                "relative_path": "incoming",
+                "enabled": True,
+                "recursive": False,
+                "auto_analyze": True,
+                "auto_render": True,
+                "scan_interval_seconds": 15,
+            },
         )
-        assert import_response.status_code == 201, import_response.text
-        media_id = import_response.json()["id"]
-
-        # Step 3 — public API queues analysis; worker finds scene candidates automatically.
-        analysis_response = client.post(f"/api/media/{media_id}/analyze")
-        assert analysis_response.status_code == 202, analysis_response.text
+        assert watch_response.status_code == 201, watch_response.text
+        watch_id = watch_response.json()["id"]
+        assert watch_response.json()["auto_render"] is True
         worker = Worker(cfg.database_path, ffmpeg, ffprobe, 90, media_root=media)
+
+        first_scan = worker.scan_folder_watch(watch_id)
+        assert first_scan["files_seen"] == 1
+        assert first_scan["pending_stability"] == 1
+        with sqlite3.connect(cfg.database_path) as db:
+            old = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+            db.execute(
+                "UPDATE watched_media_files SET stable_since=? WHERE watch_id=?",
+                (old, watch_id),
+            )
+        second_scan = worker.scan_folder_watch(watch_id)
+        assert second_scan["imported"] == 1, second_scan
+        with sqlite3.connect(cfg.database_path) as db:
+            media_row = db.execute(
+                "SELECT id FROM media_assets WHERE source_id=? ORDER BY created_at DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            assert media_row is not None
+            media_id = media_row[0]
+            analysis_row = db.execute(
+                "SELECT id FROM jobs WHERE media_id=? AND job_type='ANALYZE_MEDIA' ORDER BY created_at DESC LIMIT 1",
+                (media_id,),
+            ).fetchone()
+        assert analysis_row is not None
+
+        # Step 4 — the real analyzer may automatically queue no more than three render jobs
+        # for this explicitly configured folder. Every render still runs rights/QC gates.
         assert worker.one() is True
         analysis_job = next(
             job for job in client.get("/api/jobs").json()
-            if job["id"] == analysis_response.json()["id"]
+            if job["id"] == analysis_row[0]
         )
         assert analysis_job["status"] == "COMPLETED", analysis_job.get("error")
+        analysis_summary = json.loads(analysis_job["payload_json"])
+        assert analysis_summary["auto_render_queued"] >= 1, analysis_summary
+        assert analysis_summary["auto_render_queued"] <= 3, analysis_summary
+
         candidates = [
             candidate for candidate in client.get("/api/candidates").json()
             if candidate["media_id"] == media_id
         ]
-        assert candidates, "Scene-change analysis should create at least one candidate for the generated cuts."
-        assert all(candidate["state"] == "NEEDS_REVIEW" for candidate in candidates)
+        assert candidates, "Scene-change analysis should create candidates for the generated full-frame cuts."
         assert all(candidate["detector"] == "ffmpeg_scene_change" for candidate in candidates)
+        approved = [candidate for candidate in candidates if candidate["state"] == "APPROVED"]
+        assert len(candidates) >= 4, "Fixture must produce more than the lifetime auto-render cap."
+        assert len(approved) == 3, "Only three of the detected candidates may auto-render for a media file."
+        assert len(approved) == analysis_summary["auto_render_queued"]
+        assert len(approved) <= 3
+        render_jobs = [
+            job for job in client.get("/api/jobs").json()
+            if job["media_id"] == media_id
+            and job["job_type"] == "RENDER_CANDIDATE"
+            and job["status"] == "QUEUED"
+        ]
+        assert len(render_jobs) == len(approved)
+        for _ in render_jobs:
+            assert worker.one() is True
 
-        # Step 4 — candidates cannot go to render until the owner approves one.
-        selected = candidates[0]
-        blocked_without_approval = client.post(
-            f"/api/candidates/{selected['id']}/decision",
-            json={"decision": "approve", "render_profile": "fit_pad"},
-        )
-        assert blocked_without_approval.status_code == 202, blocked_without_approval.text
-        render_job_id = blocked_without_approval.json()["job_id"]
-        assert worker.one() is True
-        render_job = next(
-            job for job in client.get("/api/jobs").json() if job["id"] == render_job_id
-        )
-        assert render_job["status"] == "COMPLETED", render_job.get("error")
+        final_jobs = {job["id"]: job for job in client.get("/api/jobs").json()}
+        for render_job in render_jobs:
+            assert final_jobs[render_job["id"]]["status"] == "COMPLETED", final_jobs[render_job["id"]].get("error")
+
+        selected = approved[0]
         render = next(
             output for output in client.get("/api/renders").json()
             if output["candidate_id"] == selected["id"]
@@ -289,6 +337,44 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert Path(render["output_path"]).is_file()
         assert Path(render["thumbnail_path"]).is_file()
         assert render["file_size"] == Path(render["output_path"]).stat().st_size
+
+        # Simulate a repeated/recovered analysis job from the same folder watch.
+        # Preserve the watch ID exactly as the actual watcher does in its job payload.
+        repeat_analysis_id = "repeat-auto-render-cap"
+        repeat_stamp = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute(
+                """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                   VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
+                (
+                    repeat_analysis_id,
+                    source_id,
+                    media_id,
+                    json.dumps({"folder_watch_id": watch_id}),
+                    repeat_stamp,
+                    repeat_stamp,
+                ),
+            )
+        assert worker.one() is True
+        repeat_job = next(
+            job for job in client.get("/api/jobs").json()
+            if job["id"] == repeat_analysis_id
+        )
+        assert repeat_job["status"] == "COMPLETED", repeat_job.get("error")
+        repeat_summary = json.loads(repeat_job["payload_json"])
+        assert repeat_summary["auto_render_queued"] == 0, repeat_summary
+        assert repeat_summary["auto_rendered_historically"] == 3, repeat_summary
+        with sqlite3.connect(cfg.database_path) as db:
+            auto_rendered_count = db.execute(
+                "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
+                (media_id,),
+            ).fetchone()[0]
+        assert auto_rendered_count == 3, "Persistent candidate markers must enforce the lifetime per-media cap."
+        remaining = [
+            candidate for candidate in client.get("/api/candidates").json()
+            if candidate["media_id"] == media_id and candidate["state"] == "NEEDS_REVIEW"
+        ]
+        assert remaining, "Candidates beyond the auto-render cap must stay in the manual review queue."
 
         # Step 5 — simulate the owner enabling uploads after the normal OAuth setup.
         # Only the provider network operation is mocked; the real rights/QC/hash/API gates run.
