@@ -61,7 +61,7 @@ call npm ls --depth=0 >nul 2>nul
 set "FRONTEND_DEPS_STATUS=%ERRORLEVEL%"
 popd
 if not "%FRONTEND_DEPS_STATUS%"=="0" goto setup
-goto build_dashboard
+goto builddashboard
 
 :setup
 echo Installing or repairing application dependencies...
@@ -73,7 +73,7 @@ if errorlevel 1 (
   goto fail
 )
 
-:build_dashboard
+:builddashboard
 findstr /R /C:"^[ ]*GCF_RENDER_ENGINE=remotion[ ]*$" ".env" >nul
 if errorlevel 1 goto remotion_ready
 if not exist "remotion\node_modules\@remotion\renderer\package.json" goto setup_remotion_runtime
