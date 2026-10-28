@@ -477,6 +477,36 @@ class Worker(threading.Thread):
             if 0<=t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
         audio_samples=parse_timed_metric(p.stderr,"lavfi.astats.Overall.RMS_level")
         motion_samples=parse_timed_metric(p.stderr,"lavfi.signalstats.YAVG")
+        if len(motion_samples)<3:
+            # Some FFmpeg builds differ in multi-output filter-graph support.
+            # Retry the motion branch as a standalone local pass instead of
+            # silently losing the signal on that platform.
+            c=connect(self.db)
+            try:
+                current_rights=c.execute("""SELECT p.status AS rights_status,p.expires_at
+                    FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id
+                    WHERE m.id=?""",(job["media_id"],)).fetchone()
+                if (not current_rights or current_rights["rights_status"]!="AUTHORIZED"
+                    or expiry_passed(current_rights["expires_at"])):
+                    raise PermissionError("Rights gate blocked analysis: permission was revoked or expired during media analysis.")
+            finally:
+                c.close()
+            try:
+                motion_cmd=[self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                    "-vf","fps=2,scale=160:90:flags=fast_bilinear,format=gray,"
+                         "tblend=all_mode=difference,signalstats,metadata=print",
+                    "-an","-f","null","-"]
+                motion_result=run(motion_cmd,self.timeout)
+                recovered=parse_timed_metric(motion_result.stderr,"lavfi.signalstats.YAVG")
+                if len(recovered)>=3:
+                    motion_samples=recovered
+                    prior=(signal_analysis_warning+" ") if signal_analysis_warning else ""
+                    signal_analysis_warning=(prior+"Standalone local motion scan recovered visual-motion measurements.").strip()
+                elif not signal_analysis_warning:
+                    signal_analysis_warning="Visual-motion scan produced too few metadata samples; legacy scene/audio ranking was retained."
+            except RuntimeError as motion_exc:
+                suffix=f"Standalone visual-motion scan unavailable ({type(motion_exc).__name__}); legacy scene/audio ranking was retained."
+                signal_analysis_warning=(signal_analysis_warning+" "+suffix).strip()
         ranked_moments=rank_highlight_windows(duration,ts,audio_samples,video_motion_samples=motion_samples)
         has_motion_samples=len(motion_samples)>=3
 

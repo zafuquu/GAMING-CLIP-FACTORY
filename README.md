@@ -78,6 +78,10 @@ The worker checks free space on the database/output volume before folder scans o
 
 ## Source and rights workflow
 
+### Zero-cost, no-account local workflow
+
+You can analyze and render your own gameplay without registering a Twitch/Google developer app, connecting an account, buying a subscription, or downloading an AI model. In **Sources & Rights**, set Platform to `manual` and Source reference to a unique value such as `local://owned-gameplay`. Document your actual permission basis (for example, self-recorded footage you own), and mark editing/commercial permissions only when they are true. Copy the video under the configured local media root, register its relative path in **Media Library**, run **Analyze**, review the generated candidates, and render locally. No third-party account is required for this path. Uploading or publishing to YouTube still requires a YouTube account; provider discovery and OAuth-based features remain optional.
+
 1. Use Automation Setup to search Twitch/YouTube after configuring a provider. Search results enter the registry as UNKNOWN.
 2. Record a license, contract or creator grant that allows the intended editing and commercial use. A public URL or API search result is not permission.
 3. Only mark AUTHORIZED after evidence, editing/commercial flags and owner review are complete. Expired permissions fail closed.
