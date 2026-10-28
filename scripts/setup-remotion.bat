@@ -27,8 +27,13 @@ if errorlevel 1 (
 )
 
 pushd remotion
-echo Installing the separately pinned Remotion runtime...
-call npm install --no-audit --no-fund
+echo Installing the committed, lockfile-pinned Remotion runtime...
+if not exist "package-lock.json" (
+  popd
+  echo ERROR: remotion\package-lock.json is missing. Restore the committed lockfile before setup.
+  exit /b 1
+)
+call npm ci --no-audit --no-fund
 if errorlevel 1 (
   popd
   echo ERROR: Remotion dependency installation failed. Review the npm output above.

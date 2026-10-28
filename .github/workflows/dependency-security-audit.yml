@@ -10,6 +10,8 @@ on:
       - "backend/requirements*.txt"
       - "frontend/package.json"
       - "frontend/package-lock.json"
+      - "remotion/package.json"
+      - "remotion/package-lock.json"
       - ".github/workflows/dependency-security-audit.yml"
       - ".github/dependabot.yml"
   pull_request:
@@ -17,6 +19,8 @@ on:
       - "backend/requirements*.txt"
       - "frontend/package.json"
       - "frontend/package-lock.json"
+      - "remotion/package.json"
+      - "remotion/package-lock.json"
       - ".github/workflows/dependency-security-audit.yml"
       - ".github/dependabot.yml"
 
@@ -102,4 +106,22 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Audit production and development dependencies
         working-directory: frontend
+        run: npm audit --audit-level=high
+
+  remotion-npm-lock-audit:
+    name: Remotion npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: remotion/package-lock.json
+      - name: Install locked Remotion dependency tree
+        working-directory: remotion
+        run: npm ci --no-audit --no-fund
+      - name: Audit locked Remotion dependencies
+        working-directory: remotion
         run: npm audit --audit-level=high

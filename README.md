@@ -50,19 +50,19 @@ Do not interpret any rank as a probability of reaching millions of views. Reliab
 
 No API credentials, OAuth files, model weights or FFmpeg binaries are committed. Review the actual FFmpeg license/notices; do not redistribute binaries without checking obligations.
 
-## Optional Remotion renderer
+## Remotion renderer (recommended on Windows)
 
-The default render engine remains FFmpeg. To test the optional Remotion engine on Windows:
+Remotion is the recommended renderer in the Windows starter configuration. The one-click launcher installs its lockfile-pinned runtime and runs a synthetic render smoke test when needed. FFmpeg remains available as an explicit fallback via `GCF_RENDER_ENGINE=ffmpeg`. To validate Remotion directly on Windows:
 
 1. Install Node.js 20.19+ or 22.13+ (the Remotion renderer is separate from the dashboard dependencies).
-2. From the repository root, run `scripts\\setup-remotion.bat`. It installs the pinned Remotion package versions and renders a short, self-generated test clip. The command exits nonzero if the test fails.
+2. From the repository root, run `scripts\\setup-remotion.bat`. It installs the committed dependency lock with `npm ci` and renders a short, self-generated test clip. The command exits nonzero if the test fails.
 3. If the synthetic render and QC checks pass, set `GCF_RENDER_ENGINE=remotion` in `.env` and restart the app. Keep `GCF_RENDER_ENGINE=ffmpeg` to use the existing renderer.
 4. Open Readiness at `http://127.0.0.1:8765/api/readiness`; when Remotion is selected, the report checks Node.js, the renderer entry point, and the installed Remotion packages.
 5. Import a locally available `.mp4` or `.webm` source that you are authorized to edit. Approve a candidate and render. The worker still checks permissions, source identity, MP4 dimensions/codecs, duration, decode errors, and black/frozen-frame heuristics.
 
 This Remotion path is local-only: it does not generate a poster/thumbnail or mix narration. It renders the vertical gameplay composition and timed captions; FFmpeg/FFprobe remain required for source analysis and final QC. Browser codec support varies, so H.264/AAC MP4 sources are recommended. Other containers should use the FFmpeg engine.
 
-**No-subscription target:** No paid AI API, cloud renderer, paid downloader, thumbnail service, or voice service is required. FFmpeg/FFprobe, Python, Node.js, and the local application run on your computer. Remotion's current official [license FAQ](https://convert.remotion.dev/docs/license/faq) explicitly says eligible individuals can use the Free License for automation and commercial use without signing up; the paid "Remotion for Automators" plan applies to users who require a Company License. This integration is designed for one individual using their own local workflow, so no monthly Remotion subscription should be necessary under the Free License, provided you remain eligible under the terms. If your organization is larger than the free-license limit or you distribute/operate the app for others under a different arrangement, re-check the terms. To keep a strictly no-subscription fallback regardless of Remotion licensing, leave `GCF_RENDER_ENGINE=ffmpeg`; FFmpeg remains the default and is fully local. See the current [Remotion license and pricing](https://www.remotion.dev/docs/license/pricing).
+**No-subscription target:** No paid AI API, cloud renderer, paid downloader, thumbnail service, or voice service is required. FFmpeg/FFprobe, Python, Node.js, and the local application run on your computer. Remotion's current official [license FAQ](https://convert.remotion.dev/docs/license/faq) explicitly says eligible individuals can use the Free License for automation and commercial use without signing up; the paid "Remotion for Automators" plan applies to users who require a Company License. This integration is designed for one individual using their own local workflow, so no monthly Remotion subscription should be necessary under the Free License, provided you remain eligible under the terms. If your organization is larger than the free-license limit or you distribute/operate the app for others under a different arrangement, re-check the terms. To keep a strictly no-subscription fallback regardless of Remotion licensing, leave `GCF_RENDER_ENGINE=ffmpeg`; FFmpeg remains the fully local fallback. See the current [Remotion license and pricing](https://www.remotion.dev/docs/license/pricing).
 
 ## Windows quick start
 
