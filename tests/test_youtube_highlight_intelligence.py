@@ -88,8 +88,9 @@ def test_media_analysis_ranks_an_audio_event_into_a_shorts_window(tmp_path, monk
         analysis_job = next(item for item in job_rows if item["id"] == queued.json()["id"])
         assert analysis_job["status"] == "COMPLETED", analysis_job.get("error")
         job_payload = json.loads(analysis_job.get("payload_json") or "{}")
-        assert job_payload.get("ranking_method") == "local_audio_scene_v1"
+        assert job_payload.get("ranking_method") == "local_audio_motion_scene_v2"
         assert job_payload.get("audio_signal_sample_count", 0) >= 40
+        assert job_payload.get("video_motion_sample_count", 0) >= 60
 
         candidates = client.get("/api/candidates?state=NEEDS_REVIEW").json()
         media_candidates = [item for item in candidates if item["media_id"] == media_id]
@@ -99,8 +100,9 @@ def test_media_analysis_ranks_an_audio_event_into_a_shorts_window(tmp_path, monk
         assert top["start_seconds"] <= 21.0 <= top["end_seconds"], top
         ranking_components=json.loads(top["ranking_components_json"] or "{}")
         assert 20.0 <= ranking_components["event_time_seconds"] <= 22.0
-        assert top["detector"] == "local_audio_scene_ranker_v1"
+        assert top["detector"] == "local_audio_motion_scene_ranker_v2"
         assert "uncalibrated" in top["explanation"].lower()
+        assert ranking_components["visual_motion_samples_available"] is True
         # Analysis must never auto-approve or publish a candidate.
         assert all(item["state"] == "NEEDS_REVIEW" for item in media_candidates)
         assert client.get("/api/publishing/videos").json() == []

@@ -9,7 +9,7 @@ Release baseline: 0.3 development alpha. The repository contains a substantial l
 - Source rights registry with evidence, editing/commercial-use flags, owner review and expiry checks. Discovered sources remain UNKNOWN.
 - Local media registration restricted to the configured media root with file checks, SHA-256 and duplicate prevention.
 - Twitch Helix and YouTube Data API metadata-only discovery with schedules/history. No source media is downloaded and public metadata never grants reuse rights.
-- FFprobe metadata and FFmpeg scene-change candidates; still a heuristic detector rather than semantic game-event understanding.
+- FFprobe metadata plus a local FFmpeg ranker combining relative audio peaks, scene-change timing, and low-resolution frame-difference motion sampled twice per second. This requires no external API or downloaded AI model, but remains an uncalibrated heuristic rather than semantic game-event understanding.
 - Optional Faster-Whisper transcription, timed phrase segments, deterministic transcript-grounded content drafts and caption timing. A post-subprocess rights/file-identity recheck prevents persistence after revocation or source mutation; owner-edited plans and manually corrected captions survive re-transcription.
 - Optional local Ollama-compatible vision assessment sampling configurable 3 or 5 frames with candidate-relative timestamps, saving structured evidence and an uncalibrated score. Local inference is preferred, feature is off by default and never auto-approves.
 - Candidate review/approval, editable candidate-relative captions, H.264/AAC 1080×1920 fit-and-pad or blurred-backdrop rendering, optional SRT subtitle burn-in and output hashes.
@@ -42,7 +42,7 @@ Verification history:
 
 ## Not complete
 
-- Reliably calibrated game-aware highlight classification across games. Scene-change detection and sparse-frame vision models can miss motion/context; scores are not calibrated.
+- Reliably calibrated game-aware highlight classification across games. The motion/audio/scene ranker improves local signal coverage but frame differences cannot distinguish camera motion from genuine action; sparse-frame vision can also miss temporal context. Scores are not calibrated.
 - Full transcript correction workflow, higher-quality narration direction/pronunciation/emotion controls, owner-editable design templates, richer compositions, safe-area validation and sophisticated repair/quarantine. Local Piper script-to-WAV synthesis and FFmpeg render mixing are implemented but require a suitable local voice, licensing review and listening/quality validation. Designed cover code exists, but real channel eligibility for custom thumbnail upload remains unverified.
 - Automatic source-media acquisition; providers currently search metadata only.
 - Production hardening for multiple workers, quota budgeting, authentication beyond loopback, notifications, storage-quota budgets and Windows stress tests.
