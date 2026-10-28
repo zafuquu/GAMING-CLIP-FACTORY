@@ -46,6 +46,10 @@ if errorlevel 1 (
 
 echo.
 echo Refreshing environment lookup for installed prerequisites...
+rem winget changed the persistent PATH, but this batch process still has
+rem the old copy. Re-read Machine and User PATH values into this process.
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$m=[Environment]::GetEnvironmentVariable('Path','Machine'); $u=[Environment]::GetEnvironmentVariable('Path','User'); (($m,$u,$env:PATH | Where-Object { $_ }) -join ';')"`) do set "PATH=%%P"
+
 where py >nul 2>nul
 if errorlevel 1 goto restart_shell
 where node >nul 2>nul
@@ -77,17 +81,20 @@ echo [2/3] Checking FFmpeg and FFprobe...
 where ffmpeg >nul 2>nul
 if errorlevel 1 (
   if not exist "tools\ffmpeg\ffmpeg.exe" (
-    echo ERROR: FFmpeg is still unavailable. Install FFmpeg and reopen this installer.
+    echo ERROR: FFmpeg was installed or expected, but is not visible on PATH.
+    echo Open a new Command Prompt and run INSTALL.bat again.
     goto fail
   )
 )
 where ffprobe >nul 2>nul
 if errorlevel 1 (
   if not exist "tools\ffmpeg\ffprobe.exe" (
-    echo ERROR: FFprobe is still unavailable. Install FFmpeg and reopen this installer.
+    echo ERROR: FFprobe was installed or expected, but is not visible on PATH.
+    echo Open a new Command Prompt and run INSTALL.bat again.
     goto fail
   )
 )
+echo PASS: FFmpeg and FFprobe are available.
 
 echo.
 echo [3/3] Installing Remotion and running its render smoke test...
