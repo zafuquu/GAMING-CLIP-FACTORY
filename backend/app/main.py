@@ -46,7 +46,7 @@ class MediaIn(BaseModel):
 class CandidateDecisionIn(BaseModel):
     decision: str
     notes: str = ""
-    render_profile: str = "fit_pad"
+    render_profile: str = "blur_fill"
     @model_validator(mode="after")
     def check_decision(self):
         if self.decision not in {"approve","reject"}:
@@ -643,6 +643,44 @@ def create_app(settings=None,start_worker=True):
         return {"id":jid,"status":"QUEUED","job_type":"DOWNLOAD_TWITCH_CLIP",
                 "provider":"twitch_official_clips_api","media_downloaded":False,
                 "note":"Requires current Twitch broadcaster/editor authorization and authorized source rights."}
+
+    @app.post("/api/sources/{sid}/fetch-youtube-video",status_code=202)
+    def queue_youtube_video_download(sid: str):
+        """Queue a single YouTube video download through yt-dlp after explicit rights review."""
+        try:
+            from .integrations.youtube_download import validate_youtube_video_url
+        except Exception as exc:
+            raise HTTPException(503,detail="yt-dlp download component is unavailable. Check the local installation.") from exc
+        t=now()
+        with session(cfg.database_path) as c:
+            c.execute("BEGIN IMMEDIATE")
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true":
+                raise HTTPException(423,detail="Global pause is enabled.")
+            row=c.execute("""SELECT s.source_url,s.platform,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not row:
+                raise HTTPException(404,detail="Source not found.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise HTTPException(409,detail="Rights gate blocked download: document and authorize editing/commercial reuse rights first.")
+            try:
+                normalized=validate_youtube_video_url(str(row["source_url"]))
+            except ValueError as exc:
+                raise HTTPException(400,detail=str(exc)) from exc
+            active=c.execute("""SELECT id FROM jobs WHERE job_type='DOWNLOAD_YOUTUBE_VIDEO'
+                AND source_id=? AND status IN ('QUEUED','RUNNING') LIMIT 1""",(sid,)).fetchone()
+            if active:
+                return {"id":active["id"],"status":"ALREADY_QUEUED","job_type":"DOWNLOAD_YOUTUBE_VIDEO"}
+            jid=str(uuid4())
+            c.execute("""INSERT INTO jobs(id,job_type,status,source_id,payload_json,created_at,updated_at)
+                VALUES(?,'DOWNLOAD_YOUTUBE_VIDEO','QUEUED',?,?,?,?)""",
+                (jid,sid,json.dumps({"source_id":sid,"source_url":normalized}),t,t))
+            event(c,"INFO","media.youtube_video_download_queued",
+                "yt-dlp video download queued after source rights and URL validation.",
+                {"job_id":jid,"source_id":sid,"provider":"yt-dlp"})
+        return {"id":jid,"status":"QUEUED","job_type":"DOWNLOAD_YOUTUBE_VIDEO",
+                "provider":"yt-dlp","media_downloaded":False,
+                "note":"Single video only; requires documented AUTHORIZED editing/commercial rights. No cookies or access-control bypass is used."}
 
     @app.post("/api/media/{mid}/analyze",status_code=202)
     def analyze(mid: str):

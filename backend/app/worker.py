@@ -1,14 +1,16 @@
-import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3, wave, shutil
+import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3, wave, shutil, math
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
 from .db import connect, now, event, session
 from .integrations.twitch import TwitchHelix
 from .integrations.twitch_download import TwitchClipDownloader, TwitchClipDownloadError
+from .integrations.youtube_download import YouTubeVideoDownloader, YouTubeDownloadError, validate_youtube_video_url
 from .twitch_user_auth import TwitchUserNotConfigured
 from .integrations.youtube import upload_video, fetch_video_analytics, UploadReconciliationRequired, YouTubeNotConfigured, ThumbnailUploadError, set_custom_thumbnail, youtube_service, youtube_discovery_available, youtube_oauth_available, search_public_videos
 from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
+from .highlight_detector import parse_timed_metric, rank_highlight_windows, is_render_worthy_vision_assessment
 from .render_profiles import build_video_filter, profile_warning
 from .vision import assess_candidate_images, VisionNotConfigured, vision_sampling_fractions
 from .narration import synthesize_piper, NarrationNotConfigured, NarrationError, narration_status as get_narration_status, validate_script
@@ -259,6 +261,8 @@ class Worker(threading.Thread):
                 self.discover_twitch(job)
             elif job["job_type"] == "DOWNLOAD_TWITCH_CLIP":
                 self.download_twitch_clip(job)
+            elif job["job_type"] == "DOWNLOAD_YOUTUBE_VIDEO":
+                self.download_youtube_video(job)
             elif job["job_type"] == "DISCOVER_YOUTUBE_VIDEOS":
                 self.discover_youtube(job)
             elif job["job_type"] == "UPLOAD_YOUTUBE":
@@ -417,14 +421,42 @@ class Worker(threading.Thread):
         data=json.loads(probe.stdout); fmt=data.get("format",{}); duration=float(fmt.get("duration",0))
         if duration<=0: raise RuntimeError("Could not verify positive media duration")
         meta={"format_name":fmt.get("format_name"),"duration_seconds":duration,"size_bytes":source_stat_before.st_size,"streams":[{"type":s.get("codec_type"),"codec":s.get("codec_name"),"width":s.get("width"),"height":s.get("height"),"fps":s.get("avg_frame_rate")} for s in data.get("streams",[])]}
-        p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),"-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
+        has_audio=any(stream.get("type")=="audio" for stream in meta["streams"])
+        signal_cmd=[self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                    "-vf","select='gt(scene,0.35)',showinfo"]
+        signal_analysis_warning=""
+        if has_audio:
+            # One FFmpeg pass collects scene-change timestamps and one-second
+            # relative audio RMS levels. This remains local and API-free.
+            signal_cmd.extend(["-af","aresample=48000,asetnsamples=n=48000:p=1,astats=metadata=1:reset=1,ametadata=print"])
+        signal_cmd.extend(["-f","null","-"])
+        try:
+            p=run(signal_cmd,self.timeout)
+        except RuntimeError as exc:
+            if not has_audio:
+                raise
+            # Audio filters differ across some third-party FFmpeg builds. Keep
+            # scene-only review working rather than failing the whole analysis.
+            signal_analysis_warning=f"Audio activity extraction unavailable ({type(exc).__name__}); scene-only fallback used."
+            p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                   "-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
         source_stat_after=path.stat()
         if (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns):
             raise RuntimeError("Source media changed during analysis. Let the file finish copying/recording and retry.")
+        # Audio metadata also contains pts_time. Only lines emitted by showinfo
+        # are valid scene-change timestamps; this avoids mistaking audio seconds
+        # for visual scene boundaries.
         ts=[]
-        for hit in SCENE.finditer(p.stderr):
+        for line in p.stderr.splitlines():
+            if "showinfo" not in line.lower():
+                continue
+            hit=SCENE.search(line)
+            if not hit:
+                continue
             t=float(hit.group(1))
-            if 0<t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
+            if 0<=t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
+        audio_samples=parse_timed_metric(p.stderr,"lavfi.astats.Overall.RMS_level")
+        ranked_moments=rank_highlight_windows(duration,ts,audio_samples)
 
         # Reacquire a short write transaction after media processing and recheck permission;
         # revocation/expiry during a long FFmpeg scan must not get ignored.
@@ -440,11 +472,29 @@ class Worker(threading.Thread):
             m=dict(current)
             c.execute("UPDATE media_assets SET probe_json=?,state='PROBED' WHERE id=?",(json.dumps(meta),m["id"]))
             added=0
-            for t in ts:
-                start=round(max(0,t-5),3); end=round(min(duration,t+5),3)
-                if end-start<3: continue
-                cur=c.execute("INSERT OR IGNORE INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,? ,?,'NEEDS_REVIEW',?)",(str(uuid4()),m["id"],start,end,"ffmpeg_scene_change","Scene-change heuristic only; human review required.",now()))
-                added+=cur.rowcount
+            for moment in ranked_moments:
+                candidate_id=str(uuid4())
+                score=float(moment["ranking_score"])
+                components={
+                    **moment["ranking_components"],
+                    "event_time_seconds":round(float(moment["event_time_seconds"]),3),
+                }
+                explanation=(
+                    f"Local signal rank {score:.2f}/1.00; event={moment['event_type']}; "
+                    "rank uses relative audio activity and scene timing only. "
+                    "It is uncalibrated, does not predict views, and requires human review."
+                )
+                cur=c.execute(
+                    """INSERT OR IGNORE INTO candidate_moments(
+                        id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at
+                    ) VALUES(?,?,?,?,?,?,'NEEDS_REVIEW',?)""",
+                    (candidate_id,m["id"],moment["start_seconds"],moment["end_seconds"],
+                     "local_audio_scene_ranker_v1",explanation,now()))
+                if cur.rowcount:
+                    c.execute(
+                        "UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",
+                        (score,json.dumps(components),candidate_id))
+                    added+=cur.rowcount
 
             # Explicitly enabled folder watches can auto-render a small local batch after
             # rechecking the watch and current source rights. This skips the per-candidate
@@ -477,9 +527,16 @@ class Worker(threading.Thread):
                     # including failed/completed jobs. Re-analysis or restart cannot consume
                     # another batch and silently exceed the per-file cap.
                     remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
-                    eligible=c.execute("""SELECT id FROM candidate_moments
-                        WHERE media_id=? AND state='NEEDS_REVIEW' AND auto_rendered=0
-                        ORDER BY start_seconds ASC,created_at ASC
+                    # Signal-only scores cannot authorize unattended rendering.
+                    # The local vision job queues a render only after the semantic gate passes.
+                    eligible=c.execute("""SELECT cm.id FROM candidate_moments cm
+                        JOIN candidate_vision_assessments va ON va.candidate_id=cm.id
+                        WHERE cm.media_id=? AND cm.state='NEEDS_REVIEW' AND cm.auto_rendered=0
+                          AND va.status='COMPLETED' AND va.is_actionable_highlight=1
+                          AND va.highlight_score>=0.75 AND va.confidence>=0.75
+                          AND va.event_type IN ('clutch','elimination','victory','near_death','team_fight','skill_play')
+                          AND va.quality_issues_json='[]' AND va.evidence_json<>'[]'
+                        ORDER BY va.highlight_score DESC,va.confidence DESC,COALESCE(cm.ranking_score,0) DESC
                         LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
                     for candidate in eligible:
                         updated=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(candidate["id"],))
@@ -490,7 +547,7 @@ class Worker(threading.Thread):
                             VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
                             (render_job_id,m["source_id"],m["id"],json.dumps({
                                 "candidate_id":candidate["id"],
-                                "render_profile":"fit_pad",
+                                "render_profile":"blur_fill",
                                 "auto_render_reason":"authorized_folder_watch",
                                 "folder_watch_id":folder_watch_id,
                                 "human_final_review_required":True,
@@ -504,13 +561,18 @@ class Worker(threading.Thread):
                              "rights_rechecked":True,"public_publish_queued":False,
                              "human_final_review_required":True})
             summary={"duration_seconds":duration,"candidate_count":added,
+                "ranked_candidate_count":len(ranked_moments),
+                "audio_signal_sample_count":len(audio_samples),
+                "ranking_method":"local_audio_scene_v1",
+                "ranking_calibrated":False,
+                "signal_analysis_warning":signal_analysis_warning,
                 "auto_render_queued":auto_render_queued,
                 "auto_render_cap_per_media":AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,
                 "auto_rendered_historically":already_auto_rendered if folder_watch_id else 0,
                 "auto_render_slots_remaining":max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-(already_auto_rendered if folder_watch_id else 0)),
-                "note":"Scene changes are not semantic highlight detection; rendered outputs require human review."}; t=now()
+                "note":"Candidates are ranked by relative audio activity and nearby scene changes. This is an uncalibrated review heuristic, not semantic proof or a prediction of views; human review is required."}; t=now()
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","media.analysis_completed",f"Created {added} scene-change review candidates; queued {auto_render_queued} supervised auto-render jobs.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
+            event(c,"INFO","media.analysis_completed",f"Created {added} locally signal-ranked review candidates; queued {auto_render_queued} supervised auto-render jobs.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
         finally: c.close()
         if os.getenv("GCF_ENABLE_TRANSCRIPTION","").lower()=="true":
             if importlib.util.find_spec("faster_whisper") is not None:
@@ -533,7 +595,7 @@ class Worker(threading.Thread):
             except (TypeError,ValueError): maximum=25
             c=connect(self.db)
             try:
-                candidates=c.execute("SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY created_at DESC LIMIT ?",(job["media_id"],maximum)).fetchall()
+                candidates=c.execute("SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY COALESCE(ranking_score,0) DESC,created_at DESC LIMIT ?",(job["media_id"],maximum)).fetchall()
                 queued=0; stamp=now()
                 for candidate in candidates:
                     active=c.execute("SELECT id FROM jobs WHERE job_type='ANALYZE_CANDIDATE_VISION' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",("%"+candidate["id"]+"%",)).fetchone()
@@ -644,7 +706,7 @@ class Worker(threading.Thread):
             captions_burned=False
             caption_filter_warning=False
             remotion_captions=[]
-            render_profile=str(payload.get("render_profile","fit_pad"))
+            render_profile=str(payload.get("render_profile","blur_fill"))
             subtitle_filter=None
             if caption_rows:
                 caption_path=output.with_suffix(".srt")
@@ -709,6 +771,7 @@ class Worker(threading.Thread):
                     args += ["-map","0:a?"]
             args += ["-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
             remotion_props_path=None
+            remotion_encoder_settings=None
             try:
                 if render_engine=="remotion":
                     remotion_props_path=output_dir/(".remotion-props-"+uuid4().hex+".json")
@@ -726,7 +789,21 @@ class Worker(threading.Thread):
                         remotion_timeout=max(self.timeout,min(3600,max(30,int(os.getenv("GCF_REMOTION_TIMEOUT_SECONDS","900")))))
                     except (TypeError,ValueError):
                         remotion_timeout=max(self.timeout,900)
-                    run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],remotion_timeout)
+                    remotion_result=run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],remotion_timeout)
+                    remotion_summary=None
+                    for output_line in reversed((remotion_result.stdout or "").splitlines()):
+                        try:
+                            parsed_line=json.loads(output_line)
+                        except (ValueError,TypeError):
+                            continue
+                        if isinstance(parsed_line,dict):
+                            remotion_summary=parsed_line
+                            break
+                    if not isinstance(remotion_summary,dict) or remotion_summary.get("ok") is not True:
+                        raise RuntimeError("Remotion renderer did not confirm a successful output.")
+                    remotion_encoder_settings=remotion_summary.get("encoding")
+                    if not isinstance(remotion_encoder_settings,dict) or remotion_encoder_settings.get("crf") is None:
+                        raise RuntimeError("Remotion renderer omitted the encoder quality settings from its output report.")
                     captions_burned=bool(remotion_captions)
                 else:
                     run(args,self.timeout)
@@ -824,7 +901,7 @@ class Worker(threading.Thread):
                     try: thumbnail.unlink(missing_ok=True)
                     except OSError: pass
                     warnings.append("local_thumbnail_generation_failed")
-            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"render_engine":render_engine,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"render_engine":render_engine,"profile_notes":profile_warning(render_profile),"remotion_encoder_settings":remotion_encoder_settings,"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
             # Serialize the final authorization check with permission revocation and record
             # the render plus any automated private-upload intent in the same SQLite transaction.
@@ -1014,6 +1091,93 @@ class Worker(threading.Thread):
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
                 (json.dumps(summary),stamp,stamp,job["id"]))
             event(c,"INFO","media.twitch_clip_downloaded","Official Twitch clip downloaded and registered as local media.",{"job_id":job["id"],**summary})
+            c.commit()
+        except Exception:
+            if c.in_transaction:
+                c.rollback()
+            if destination is not None:
+                try: destination.unlink(missing_ok=True)
+                except OSError: pass
+            raise
+        finally:
+            c.close()
+
+
+    def download_youtube_video(self, job):
+        """Download one rights-authorized YouTube video with yt-dlp, then verify and register it."""
+        payload=json.loads(job["payload_json"] or "{}")
+        sid=str(payload.get("source_id") or job["source_id"] or "")
+        if not sid:
+            raise ValueError("YouTube download job is missing source_id.")
+        if not self.ffprobe:
+            raise RuntimeError("FFprobe is required to verify downloaded YouTube videos.")
+        c=connect(self.db)
+        destination=None
+        try:
+            row=c.execute("""SELECT s.id,s.source_url,s.title,s.game,s.platform,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not row:
+                raise FileNotFoundError("YouTube source no longer exists.")
+            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                raise PermissionError("Rights gate blocked YouTube download: current AUTHORIZED permission is required.")
+            source_url=validate_youtube_video_url(str(row["source_url"]))
+            destination_dir=self.media_root/"downloads"
+            destination_dir.mkdir(parents=True,exist_ok=True)
+            destination=destination_dir/f"youtube_{uuid4().hex}.mp4"
+            downloader=YouTubeVideoDownloader(
+                timeout_seconds=int(os.getenv("GCF_YTDLP_TIMEOUT_SECONDS","1800")),
+                max_bytes=int(os.getenv("GCF_YTDLP_MAX_BYTES","2147483648")),
+                max_duration_seconds=int(os.getenv("GCF_YTDLP_MAX_DURATION_SECONDS","14400")),
+            )
+            details=downloader.download(source_url,destination)
+            downloaded_path=Path(details.get("file_path") or destination).expanduser().resolve()
+            try:
+                downloaded_path.relative_to(destination_dir.resolve())
+            except ValueError:
+                raise PermissionError("yt-dlp output path escaped the managed download directory.")
+            if downloaded_path.suffix.lower() not in {".mp4",".mkv",".webm",".mov",".m4v"}:
+                raise RuntimeError("yt-dlp produced an unsupported media container.")
+            destination=downloaded_path
+            if not destination.is_file() or destination.stat().st_size<=0:
+                raise RuntimeError("yt-dlp did not create a nonempty local video.")
+            probe=run([self.ffprobe,"-v","error","-print_format","json","-show_streams","-show_format",str(destination)],min(60,self.timeout))
+            probe_data=json.loads(probe.stdout)
+            streams=probe_data.get("streams") or []
+            video=next((stream for stream in streams if stream.get("codec_type")=="video"),None)
+            if not video:
+                raise RuntimeError("Downloaded YouTube file has no valid video stream.")
+            duration=float((probe_data.get("format") or {}).get("duration") or 0)
+            max_duration=int(os.getenv("GCF_YTDLP_MAX_DURATION_SECONDS","14400"))
+            if duration<=0 or duration>max_duration:
+                raise RuntimeError("Downloaded YouTube duration is invalid or exceeds the configured limit.")
+            digest=hashlib.sha256()
+            with destination.open("rb") as handle:
+                for block in iter(lambda:handle.read(1024*1024),b""):
+                    digest.update(block)
+            file_hash=digest.hexdigest()
+            source_stat=destination.stat()
+            c.execute("BEGIN IMMEDIATE")
+            latest=c.execute("""SELECT s.source_url,p.status AS rights_status,p.expires_at
+                FROM sources s JOIN source_permissions p ON p.source_id=s.id WHERE s.id=?""",(sid,)).fetchone()
+            if not latest or latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                raise PermissionError("Rights gate blocked YouTube download persistence: permission was revoked or expired.")
+            if validate_youtube_video_url(str(latest["source_url"]))!=source_url:
+                raise PermissionError("YouTube source URL changed during download; media was not registered.")
+            duplicate=c.execute("SELECT id FROM media_assets WHERE source_id=? AND sha256=?",(sid,file_hash)).fetchone()
+            if duplicate:
+                raise ValueError("This exact YouTube video file is already registered for the source.")
+            mid=str(uuid4()); stamp=now()
+            c.execute("""INSERT INTO media_assets(id,source_id,original_path,file_name,file_size,sha256,probe_json,state,created_at)
+                VALUES(?,?,?,?,?,?,?,'IMPORTED',?)""",
+                (mid,sid,str(destination),destination.name,source_stat.st_size,file_hash,json.dumps(probe_data),stamp))
+            summary={"media_id":mid,"source_id":sid,"source_url":source_url,"file_name":destination.name,
+                "file_size":source_stat.st_size,"sha256":file_hash,"duration_seconds":duration,
+                "width":video.get("width"),"height":video.get("height"),"download_provider":"yt-dlp",
+                "yt_dlp_version":details.get("version"),"rights_rechecked":True}
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                (json.dumps(summary),stamp,stamp,job["id"]))
+            event(c,"INFO","media.youtube_video_downloaded","YouTube video downloaded by yt-dlp, validated, and registered as local media.",
+                {"job_id":job["id"],**summary})
             c.commit()
         except Exception:
             if c.in_transaction:
@@ -1947,7 +2111,22 @@ class Worker(threading.Thread):
             assessment_id=old_assessment["id"] if old_assessment else str(uuid4())
         finally:
             c.close()
-        frame_fractions=vision_sampling_fractions()
+        try:
+            rank_components=json.loads(row["ranking_components_json"] or "{}")
+        except (ValueError,TypeError):
+            rank_components={}
+        event_fraction=None
+        raw_event_time=rank_components.get("event_time_seconds") if isinstance(rank_components,dict) else None
+        if (
+            isinstance(raw_event_time,(int,float))
+            and not isinstance(raw_event_time,bool)
+            and math.isfinite(float(raw_event_time))
+            and end>start
+        ):
+            candidate_fraction=(float(raw_event_time)-start)/(end-start)
+            if 0.0<=candidate_fraction<=1.0:
+                event_fraction=candidate_fraction
+        frame_fractions=vision_sampling_fractions(event_fraction)
         frame_times=[round(start+(end-start)*fraction,3) for fraction in frame_fractions]
         relative_frame_times=[round(frame_time-start,3) for frame_time in frame_times]
         images=[]
@@ -1994,11 +2173,44 @@ class Worker(threading.Thread):
                 "vision_assessment_method":"local-vision-model-estimate","vision_score_calibrated":False,
                 "vision_frame_times_seconds":frame_times,"vision_relative_frame_times_seconds":relative_frame_times,"vision_sample_count":len(frame_times)})
             c.execute("UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",(combined,json.dumps(components),cid))
+            # Opt-in unattended rendering is allowed only after the conservative
+            # semantic gate passes. Signal-only heuristics never select content for
+            # automatic rendering; the rendered artifact still requires QC and owner review.
+            auto_render_queued=False
+            if is_render_worthy_vision_assessment(result):
+                watch=c.execute("""SELECT w.id,w.enabled,w.auto_analyze,w.auto_render,
+                    p.status AS rights_status,p.expires_at
+                    FROM media_folder_watches w
+                    JOIN watched_media_files f ON f.watch_id=w.id
+                    JOIN source_permissions p ON p.source_id=w.source_id
+                    WHERE w.source_id=? AND f.media_id=?""",(row["source_id"],row["media_id"])).fetchone()
+                paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+                already_auto_rendered=int(c.execute("SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",(row["media_id"],)).fetchone()[0])
+                if (watch and bool(watch["enabled"]) and bool(watch["auto_analyze"]) and bool(watch["auto_render"])
+                    and watch["rights_status"]=="AUTHORIZED" and not expiry_passed(watch["expires_at"])
+                    and not (paused and paused["value"]=="true")
+                    and already_auto_rendered < AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA):
+                    changed=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(cid,))
+                    if changed.rowcount==1:
+                        render_job_id=str(uuid4()); render_stamp=now()
+                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                            VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
+                            (render_job_id,row["source_id"],row["media_id"],json.dumps({
+                                "candidate_id":cid,"render_profile":"blur_fill",
+                                "auto_render_reason":"authorized_folder_watch_vision_gate",
+                                "folder_watch_id":watch["id"],"human_final_review_required":True,
+                                "vision_gate":{"event_type":result["event_type"],"highlight_score":result["highlight_score"],
+                                    "confidence":result["confidence"],"quality_issues":result["quality_issues"]},
+                            }),render_stamp,render_stamp))
+                        auto_render_queued=True
+                        event(c,"INFO","folder_watch.auto_render_queued","Queued a vision-qualified candidate for local rendering; owner review remains required.",
+                            {"candidate_id":cid,"media_id":row["media_id"],"rights_rechecked":True,"public_publish_queued":False,
+                             "human_final_review_required":True,"vision_gate_passed":True})
             summary={"candidate_id":cid,"assessment_id":assessment_id,"model_name":result["model_name"],"event_type":result["event_type"],
                 "highlight_score":result["highlight_score"],"confidence":confidence,"combined_ranking_score":combined,
-                "score_calibrated":False,"automatic_approval":False,"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
+                "score_calibrated":False,"automatic_approval":auto_render_queued,"auto_render_queued":auto_render_queued,"vision_render_gate_passed":is_render_worthy_vision_assessment(result),"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","vision.assessment_completed","Local vision assessment saved as a review aid; candidate remains human-review-only.",{"job_id":job["id"],**summary})
+            event(c,"INFO","vision.assessment_completed","Local vision assessment saved; unattended rendering occurs only when the explicit folder-watch and strict semantic quality gates pass.",{"job_id":job["id"],**summary})
             c.commit()
         finally:
             c.close()

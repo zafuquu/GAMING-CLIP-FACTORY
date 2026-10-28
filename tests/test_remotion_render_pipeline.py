@@ -135,6 +135,13 @@ def test_authorized_candidate_renders_through_remotion_without_poster_or_voiceov
 
         report = render["qc_report"]
         assert report["render_engine"] == "remotion"
+        assert report["remotion_encoder_settings"] == {
+            "codec": "h264",
+            "crf": 16,
+            "x264Preset": "slow",
+            "audioCodec": "aac",
+            "audioBitrate": "192K",
+        }
         assert report["captions_burned"] is True
         assert report["checks"]["narration_mixed"] is False
         assert report["checks"]["ffmpeg_decode_scan"] == "PASS"

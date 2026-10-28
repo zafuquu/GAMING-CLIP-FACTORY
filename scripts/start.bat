@@ -27,9 +27,9 @@ if errorlevel 1 (
   echo ERROR: Node.js is required for the dashboard build.
   goto fail
 )
-node -e "const v=process.versions.node.split('.').map(Number); process.exit((v[0]===20 && v[1]>=19) || (v[0]>=22 && (v[0]>22 || v[1]>=12)) ? 0 : 1)" >nul 2>nul
+node -e "const v=process.versions.node.split('.').map(Number); process.exit((v[0]===20 && v[1]>=19) || (v[0]>=22 && (v[0]>22 || v[1]>=13)) ? 0 : 1)" >nul 2>nul
 if errorlevel 1 (
-  echo ERROR: Install Node.js 20.19+ or 22.12+.
+  echo ERROR: Install Node.js 20.19+ or 22.13+.
   goto fail
 )
 
@@ -52,7 +52,7 @@ if errorlevel 1 goto setup
 powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\lock-state.ps1" -Mode test >nul 2>nul
 if errorlevel 1 goto setup
 if not exist "frontend\node_modules\vite\bin\vite.js" goto setup
-".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL" >nul 2>nul
+".venv\Scripts\python.exe" -c "import fastapi, uvicorn, pydantic, dotenv, requests, googleapiclient, google_auth_oauthlib, google_auth_httplib2, keyring, PIL, yt_dlp" >nul 2>nul
 if errorlevel 1 goto setup
 ".venv\Scripts\python.exe" -m pip check >nul 2>nul
 if errorlevel 1 goto setup
@@ -67,13 +67,26 @@ goto build_dashboard
 echo Installing or repairing application dependencies...
 call scripts\setup-windows.bat
 if errorlevel 1 goto fail
-".venv\Scripts\python.exe" -c "import sys,fastapi,uvicorn,pydantic,dotenv,requests,googleapiclient,google_auth_oauthlib,google_auth_httplib2,keyring,PIL; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
+".venv\Scripts\python.exe" -c "import sys,fastapi,uvicorn,pydantic,dotenv,requests,googleapiclient,google_auth_oauthlib,google_auth_httplib2,keyring,PIL,yt_dlp; raise SystemExit(0 if sys.version_info.major == 3 and sys.version_info.minor in (11,12) else 1)" >nul 2>nul
 if errorlevel 1 (
   echo ERROR: Supported Python or required packages are still unavailable after setup.
   goto fail
 )
 
 :build_dashboard
+findstr /R /C:"^[ ]*GCF_RENDER_ENGINE=remotion[ ]*$" ".env" >nul
+if errorlevel 1 goto remotion_ready
+if not exist "remotion\node_modules\@remotion\renderer\package.json" goto setup_remotion_runtime
+if not exist "remotion\node_modules\@remotion\bundler\package.json" goto setup_remotion_runtime
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\remotion-lock-state.ps1" -Mode test >nul 2>nul
+if errorlevel 1 goto setup_remotion_runtime
+goto remotion_ready
+:setup_remotion_runtime
+echo.
+echo Remotion is selected but its runtime is missing or incomplete. Installing and smoke-testing it now...
+call scripts\setup-remotion.bat
+if errorlevel 1 goto fail
+:remotion_ready
 echo.
 echo Building the optimized dashboard bundle...
 pushd frontend

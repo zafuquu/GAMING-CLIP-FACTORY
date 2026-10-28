@@ -617,7 +617,7 @@ def test_candidate_render_profile_validation():
     from pathlib import Path
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"backend"))
     from app.main import CandidateDecisionIn
-    assert CandidateDecisionIn(decision="approve").render_profile=="fit_pad"
+    assert CandidateDecisionIn(decision="approve").render_profile=="blur_fill"
     assert CandidateDecisionIn(decision="approve",render_profile="blur_fill").render_profile=="blur_fill"
     with pytest.raises(Exception):
         CandidateDecisionIn(decision="approve",render_profile="crop_fill")

@@ -48,15 +48,44 @@ def _settings():
         timeout=180
     return endpoint,model,timeout
 
-def vision_sampling_fractions() -> list[float]:
-    """Choose a small, auditable temporal sample count; valid settings are 3 or 5 frames."""
+def vision_sampling_fractions(event_fraction: float | None = None) -> list[float]:
+    """Return deterministic frame fractions, optionally centered around a ranked event.
+
+    Uniform sampling can miss a short gameplay moment. When an event offset is
+    available, sample close to that moment and retain early/late context frames.
+    Legacy candidates without an event anchor keep the old uniform policy.
+    """
     try:
         count=int(os.getenv("GCF_VISION_SAMPLE_FRAMES","5"))
     except (TypeError,ValueError):
         count=5
     if count not in {3,5}:
         count=5
-    return [0.2,0.5,0.8] if count==3 else [0.1,0.3,0.5,0.7,0.9]
+
+    valid_event=(
+        isinstance(event_fraction,(int,float))
+        and not isinstance(event_fraction,bool)
+        and math.isfinite(float(event_fraction))
+    )
+    if not valid_event:
+        return [0.2,0.5,0.8] if count==3 else [0.1,0.3,0.5,0.7,0.9]
+
+    focus=min(1.0,max(0.0,float(event_fraction)))
+    if count==3:
+        if focus < 0.2:
+            fractions=[focus,focus+0.08,focus+0.18]
+        elif focus > 0.8:
+            fractions=[focus-0.18,focus-0.08,focus]
+        else:
+            fractions=[focus-0.12,focus,focus+0.12]
+    else:
+        if focus < 0.2:
+            fractions=[focus,focus+0.05,focus+0.13,0.55,0.9]
+        elif focus > 0.8:
+            fractions=[0.1,0.45,focus-0.13,focus-0.05,focus]
+        else:
+            fractions=[0.1,focus-0.08,focus,focus+0.08,0.9]
+    return sorted(round(min(1.0,max(0.0,value)),4) for value in fractions)
 
 
 def assess_candidate_images(images: list[bytes], game: str, source_title: str, transcript_excerpt: str="", http_post=None, frame_times_seconds: list[float] | None=None) -> dict:

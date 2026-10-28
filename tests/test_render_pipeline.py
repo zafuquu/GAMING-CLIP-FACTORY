@@ -228,20 +228,21 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-f", "lavfi", "-i",
-            "color=c=red:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=red:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=lime:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=lime:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=blue:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=blue:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=yellow:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=yellow:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=magenta:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "color=c=magenta:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
             "-f", "lavfi", "-i",
-            "color=c=cyan:s=320x180:r=24:d=3,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
-            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=18",
+            "color=c=cyan:s=320x180:r=24:d=12,drawbox=x='mod(t*60,iw-40)':y=70:w=40:h=40:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=72",
             "-filter_complex", "[0:v][1:v][2:v][3:v][4:v][5:v]concat=n=6:v=1:a=0[v]",
-            "-map", "[v]", "-map", "6:a", "-t", "18",
+            "-map", "[v]", "-map", "6:a", "-t", "72",
+            "-af", "volume=eval=frame:volume='if(between(t\\,20\\,22)\\,18\\,0.1)'",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "96k", str(input_path),
         ]
@@ -297,44 +298,81 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             ).fetchone()
         assert analysis_row is not None
 
-        # Step 4 — the real analyzer may automatically queue no more than three render jobs
-        # for this explicitly configured folder. Every render still runs rights/QC gates.
+        # Step 4 — signal-only candidates must never be auto-rendered. This fixture
+        # includes a deliberate audio-energy event, but without a completed semantic
+        # vision assessment it must stay in NEEDS_REVIEW.
         assert worker.one() is True
-        analysis_job = next(
-            job for job in client.get("/api/jobs").json()
-            if job["id"] == analysis_row[0]
-        )
+        analysis_job = next(job for job in client.get("/api/jobs").json() if job["id"] == analysis_row[0])
         assert analysis_job["status"] == "COMPLETED", analysis_job.get("error")
         analysis_summary = json.loads(analysis_job["payload_json"])
-        assert analysis_summary["auto_render_queued"] >= 1, analysis_summary
-        assert analysis_summary["auto_render_queued"] <= 3, analysis_summary
+        assert analysis_summary["auto_render_queued"] == 0, analysis_summary
+        assert analysis_summary["ranking_method"] == "local_audio_scene_v1"
+        assert analysis_summary["ranking_calibrated"] is False
 
         candidates = [
             candidate for candidate in client.get("/api/candidates").json()
             if candidate["media_id"] == media_id
         ]
-        assert candidates, "Scene-change analysis should create candidates for the generated full-frame cuts."
-        assert all(candidate["detector"] == "ffmpeg_scene_change" for candidate in candidates)
-        approved = [candidate for candidate in candidates if candidate["state"] == "APPROVED"]
-        assert len(candidates) >= 4, "Fixture must produce more than the lifetime auto-render cap."
-        assert len(approved) == 3, "Only three of the detected candidates may auto-render for a media file."
-        assert len(approved) == analysis_summary["auto_render_queued"]
-        assert len(approved) <= 3
+        assert candidates, "The deliberate audio-energy event should produce a review candidate."
+        assert all(candidate["detector"] == "local_audio_scene_ranker_v1" for candidate in candidates)
+        assert all(candidate["ranking_score"] is not None for candidate in candidates)
+        assert all(candidate["state"] == "NEEDS_REVIEW" for candidate in candidates)
+        assert not [
+            job for job in client.get("/api/jobs").json()
+            if job["media_id"] == media_id and job["job_type"] == "RENDER_CANDIDATE"
+            and job["status"] == "QUEUED"
+        ], "No candidate may auto-render without passing semantic vision review."
+
+        # Seed a completed, strong, evidence-grounded assessment to exercise the
+        # actual worker's post-assessment auto-render gate without requiring Ollama in CI.
+        selected = candidates[0]
+        stamp = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(cfg.database_path) as db:
+            db.execute(
+                """INSERT INTO candidate_vision_assessments(
+                    id,candidate_id,model_name,status,gameplay_context,event_type,visible_event,
+                    is_actionable_highlight,highlight_score,confidence,evidence_json,
+                    quality_issues_json,frame_times_json,raw_response_json,error,created_at,updated_at
+                ) VALUES(?,?,?,'COMPLETED',?,?,?,?,?,?,?,?,?,?, '',?,?)""",
+                (
+                    "vision-gate-ci-assessment", selected["id"], "ci-mocked-local-vision",
+                    "Visible gameplay elimination", "elimination", "Visible elimination indicator",
+                    1, 0.91, 0.89, json.dumps(["Visible elimination indicator in HUD"]),
+                    "[]", "[]", "{}", stamp, stamp,
+                ),
+            )
+            db.execute(
+                """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
+                   VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
+                (
+                    "vision-qualified-auto-render", source_id, media_id,
+                    json.dumps({"folder_watch_id": watch_id}), stamp, stamp,
+                ),
+            )
+        assert worker.one() is True
+        qualified_job = next(
+            job for job in client.get("/api/jobs").json() if job["id"] == "vision-qualified-auto-render"
+        )
+        assert qualified_job["status"] == "COMPLETED", qualified_job.get("error")
+        qualified_summary = json.loads(qualified_job["payload_json"])
+        assert qualified_summary["auto_render_queued"] == 1, qualified_summary
+
         render_jobs = [
             job for job in client.get("/api/jobs").json()
-            if job["media_id"] == media_id
-            and job["job_type"] == "RENDER_CANDIDATE"
+            if job["media_id"] == media_id and job["job_type"] == "RENDER_CANDIDATE"
             and job["status"] == "QUEUED"
         ]
-        assert len(render_jobs) == len(approved)
-        for _ in render_jobs:
-            assert worker.one() is True
-
+        assert len(render_jobs) == 1
+        render_job_id = render_jobs[0]["id"]
+        assert worker.one() is True
         final_jobs = {job["id"]: job for job in client.get("/api/jobs").json()}
-        for render_job in render_jobs:
-            assert final_jobs[render_job["id"]]["status"] == "COMPLETED", final_jobs[render_job["id"]].get("error")
+        assert final_jobs[render_job_id]["status"] == "COMPLETED", final_jobs[render_job_id].get("error")
 
-        selected = approved[0]
+        selected_after_render = next(
+            candidate for candidate in client.get("/api/candidates").json()
+            if candidate["id"] == selected["id"]
+        )
+        assert selected_after_render["state"] == "RENDERED_QC_PASSED", selected_after_render
         render = next(
             output for output in client.get("/api/renders").json()
             if output["candidate_id"] == selected["id"]
@@ -347,46 +385,30 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert Path(render["thumbnail_path"]).is_file()
         assert render["file_size"] == Path(render["output_path"]).stat().st_size
 
-        # Simulate a repeated/recovered analysis job from the same folder watch.
-        # Preserve the watch ID exactly as the actual watcher does in its job payload.
+        # Re-analysis is idempotent and cannot exceed the lifetime auto-render cap.
         repeat_analysis_id = "repeat-auto-render-cap"
-        # Prioritize this synthetic retry over the already-queued private upload so this
-        # assertion tests analysis idempotency without consuming the later upload step.
         repeat_stamp = "2000-01-01T00:00:00+00:00"
         with sqlite3.connect(cfg.database_path) as db:
             db.execute(
                 """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
                    VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
                 (
-                    repeat_analysis_id,
-                    source_id,
-                    media_id,
-                    json.dumps({"folder_watch_id": watch_id}),
-                    repeat_stamp,
-                    repeat_stamp,
+                    repeat_analysis_id, source_id, media_id,
+                    json.dumps({"folder_watch_id": watch_id}), repeat_stamp, repeat_stamp,
                 ),
             )
         assert worker.one() is True
-        repeat_job = next(
-            job for job in client.get("/api/jobs").json()
-            if job["id"] == repeat_analysis_id
-        )
+        repeat_job = next(job for job in client.get("/api/jobs").json() if job["id"] == repeat_analysis_id)
         assert repeat_job["status"] == "COMPLETED", repeat_job.get("error")
         repeat_summary = json.loads(repeat_job["payload_json"])
         assert repeat_summary["auto_render_queued"] == 0, repeat_summary
-        assert repeat_summary["auto_rendered_historically"] == 3, repeat_summary
+        assert repeat_summary["auto_rendered_historically"] == 1, repeat_summary
         with sqlite3.connect(cfg.database_path) as db:
             auto_rendered_count = db.execute(
                 "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
                 (media_id,),
             ).fetchone()[0]
-        assert auto_rendered_count == 3, "Persistent candidate markers must enforce the lifetime per-media cap."
-        remaining = [
-            candidate for candidate in client.get("/api/candidates").json()
-            if candidate["media_id"] == media_id and candidate["state"] == "NEEDS_REVIEW"
-        ]
-        assert remaining, "Candidates beyond the auto-render cap must stay in the manual review queue."
-
+        assert auto_rendered_count == 1, "Persistent candidate markers must enforce the lifetime per-media cap."
         # Step 5 — the real render completion path should enqueue exactly one private upload
         # for this media after a QC-PASS output and all live rights/settings checks.
         # The per-media cap prevents one long recording from flooding the channel.

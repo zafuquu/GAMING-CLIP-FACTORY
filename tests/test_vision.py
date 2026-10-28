@@ -82,6 +82,22 @@ def test_vision_sampling_defaults_to_five_frames_and_allows_three(monkeypatch):
     monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","4")
     assert vision_sampling_fractions()==[0.1,0.3,0.5,0.7,0.9]
 
+def test_event_centered_sampling_keeps_context_and_focus_frames(monkeypatch):
+    monkeypatch.delenv("GCF_VISION_SAMPLE_FRAMES", raising=False)
+    assert vision_sampling_fractions(0.5)==[0.1,0.42,0.5,0.58,0.9]
+    assert vision_sampling_fractions(0.05)==[0.05,0.1,0.18,0.55,0.9]
+    assert vision_sampling_fractions(0.95)==[0.1,0.45,0.82,0.9,0.95]
+
+    monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","3")
+    assert vision_sampling_fractions(0.5)==[0.38,0.5,0.62]
+    assert vision_sampling_fractions(0.05)==[0.05,0.13,0.23]
+    assert vision_sampling_fractions(0.95)==[0.77,0.87,0.95]
+
+    # Invalid/legacy event offsets preserve uniform sampling.
+    assert vision_sampling_fractions(float("nan"))==[0.2,0.5,0.8]
+    assert vision_sampling_fractions(True)==[0.2,0.5,0.8]
+
+
 def test_vision_rejects_timestamps_that_do_not_match_frames(monkeypatch):
     monkeypatch.setenv("GCF_ENABLE_VISION_ANALYSIS","true")
     monkeypatch.setenv("GCF_VISION_BASE_URL","http://127.0.0.1:11434/api/chat")

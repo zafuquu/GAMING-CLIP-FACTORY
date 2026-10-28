@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=20.19.0"
+    "node": "^20.19.0 || >=22.13.0"
   },
   "scripts": {
     "render": "node render.mjs",
@@ -16,5 +16,8 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "remotion": "4.0.538"
+  },
+  "overrides": {
+    "zod": "4.6.7"
   }
 }

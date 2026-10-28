@@ -6,7 +6,7 @@ const defaults: GameplayProps = {
   sourceFile: "clip.mp4",
   startSeconds: 0,
   durationSeconds: 2,
-  profile: "fit_pad",
+  profile: "blur_fill",
   captions: [],
 };
 
