@@ -344,7 +344,7 @@ class Worker(threading.Thread):
                     try:
                         cid=json.loads(job["payload_json"] or "{}").get("candidate_id")
                         if cid:
-                            model=os.getenv("GCF_VISION_MODEL","llama3.2-vision").strip() or "unknown"
+                            model=os.getenv("GCF_VISION_MODEL","qwen3-vl:2b").strip() or "unknown"
                             c.execute("""INSERT INTO candidate_vision_assessments(id,candidate_id,model_name,status,error,created_at,updated_at)
                                 VALUES(?,?,?,'FAILED',?,?,?)
                                 ON CONFLICT(candidate_id) DO UPDATE SET model_name=excluded.model_name,status='FAILED',error=excluded.error,updated_at=excluded.updated_at""",
@@ -647,7 +647,7 @@ class Worker(threading.Thread):
                     event(c,"WARNING","transcription.not_installed","Transcription is enabled but faster-whisper is not installed; install backend/requirements-ml.txt.",{"media_id":job["media_id"]}); c.commit()
                 finally: c.close()
         if os.getenv("GCF_ENABLE_VISION_ANALYSIS","").lower()=="true":
-            try: maximum=max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","25"))))
+            try: maximum=max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","8"))))
             except (TypeError,ValueError): maximum=25
             c=connect(self.db)
             try:

@@ -5,7 +5,7 @@ import pytest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"backend"))
-from app.vision import assess_candidate_images, VisionNotConfigured, VisionAnalysisError, SCHEMA, vision_sampling_fractions
+from app.vision import assess_candidate_images, VisionNotConfigured, VisionAnalysisError, SCHEMA, vision_sampling_fractions, vision_status
 
 def _valid_result():
     return {
@@ -53,7 +53,7 @@ def test_vision_returns_validated_evidence_and_uses_structured_output(monkeypatc
     result=assess_candidate_images([b"frame1",b"frame2"],"Valorant","ranked match","Nice shot!",http_post=fake_post,frame_times_seconds=[0.3,1.7])
     assert result["event_type"]=="skill_play"
     assert result["score_calibrated"] is False
-    assert result["model_name"]=="llama3.2-vision"
+    assert result["model_name"]=="qwen3-vl:2b"
     assert len(captured["body"]["messages"][1]["images"])==2
     assert captured["body"]["format"]==SCHEMA
     assert "image 1 ~= 0.300s after candidate start" in captured["body"]["messages"][1]["content"]
@@ -74,16 +74,25 @@ def test_vision_fails_closed_on_invalid_model_score(monkeypatch):
         assess_candidate_images([b"frame"],"Valorant","match",http_post=fake_post)
 
 
-def test_vision_sampling_defaults_to_five_frames_and_allows_three(monkeypatch):
+def test_vision_sampling_defaults_to_three_frames_and_allows_five(monkeypatch):
     monkeypatch.delenv("GCF_VISION_SAMPLE_FRAMES",raising=False)
-    assert vision_sampling_fractions()==[0.1,0.3,0.5,0.7,0.9]
-    monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","3")
     assert vision_sampling_fractions()==[0.2,0.5,0.8]
-    monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","4")
+    monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","5")
     assert vision_sampling_fractions()==[0.1,0.3,0.5,0.7,0.9]
+    monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","4")
+    assert vision_sampling_fractions()==[0.2,0.5,0.8]
+
+
+def test_vision_defaults_are_lightweight_and_bounded(monkeypatch):
+    for key in ("GCF_VISION_MODEL","GCF_VISION_MAX_CANDIDATES_PER_MEDIA","GCF_VISION_SAMPLE_FRAMES"):
+        monkeypatch.delenv(key,raising=False)
+    status=vision_status()
+    assert status["model"]=="qwen3-vl:2b"
+    assert status["max_candidates_per_media"]==8
+    assert status["sample_frames"]==3
 
 def test_event_centered_sampling_keeps_context_and_focus_frames(monkeypatch):
-    monkeypatch.delenv("GCF_VISION_SAMPLE_FRAMES", raising=False)
+    monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","5")
     assert vision_sampling_fractions(0.5)==[0.1,0.42,0.5,0.58,0.9]
     assert vision_sampling_fractions(0.05)==[0.05,0.1,0.18,0.55,0.9]
     assert vision_sampling_fractions(0.95)==[0.1,0.45,0.82,0.9,0.95]
@@ -93,7 +102,7 @@ def test_event_centered_sampling_keeps_context_and_focus_frames(monkeypatch):
     assert vision_sampling_fractions(0.05)==[0.05,0.13,0.23]
     assert vision_sampling_fractions(0.95)==[0.77,0.87,0.95]
 
-    # Invalid/legacy event offsets preserve uniform sampling.
+    # Invalid/legacy event offsets preserve lightweight uniform sampling.
     assert vision_sampling_fractions(float("nan"))==[0.2,0.5,0.8]
     assert vision_sampling_fractions(True)==[0.2,0.5,0.8]
 

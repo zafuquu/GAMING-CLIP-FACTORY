@@ -15,6 +15,9 @@ def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approv
     ffmpeg=shutil.which("ffmpeg")
     if not ffmpeg: pytest.skip("FFmpeg not installed")
     monkeypatch.setenv("GCF_ENABLE_VISION_ANALYSIS","true")
+    # This regression covers the optional five-frame path explicitly; the
+    # low-memory application default is now three sampled frames.
+    monkeypatch.setenv("GCF_VISION_SAMPLE_FRAMES","5")
     root=tmp_path/"project"; data=root/"data"; media=data/"media"
     cfg=Settings(root,data,media,data/"vision.sqlite3",ffmpeg,None,60)
     with TestClient(create_app(settings=cfg,start_worker=False)) as client:
