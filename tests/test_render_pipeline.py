@@ -306,7 +306,8 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
         assert analysis_job["status"] == "COMPLETED", analysis_job.get("error")
         analysis_summary = json.loads(analysis_job["payload_json"])
         assert analysis_summary["auto_render_queued"] == 0, analysis_summary
-        assert analysis_summary["ranking_method"] == "local_audio_scene_v1"
+        assert analysis_summary["ranking_method"] == "local_audio_motion_scene_v2", analysis_summary
+        assert analysis_summary["video_motion_sample_count"] >= 3, analysis_summary
         assert analysis_summary["ranking_calibrated"] is False
 
         candidates = [
@@ -314,7 +315,7 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             if candidate["media_id"] == media_id
         ]
         assert candidates, "The deliberate audio-energy event should produce a review candidate."
-        assert all(candidate["detector"] == "local_audio_scene_ranker_v1" for candidate in candidates)
+        assert all(candidate["detector"] == "local_audio_motion_scene_ranker_v2" for candidate in candidates)
         assert all(candidate["ranking_score"] is not None for candidate in candidates)
         assert all(candidate["state"] == "NEEDS_REVIEW" for candidate in candidates)
         assert not [

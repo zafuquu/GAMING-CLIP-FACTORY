@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, AnyHttpUrl, Field, model_validator
+from pydantic import BaseModel, AnyHttpUrl, Field, TypeAdapter, ValidationError, model_validator
+from urllib.parse import urlsplit
 from .config import Settings
 from .db import initialize, connect, session, now, event, recover_interrupted_jobs
 from .worker import Worker
@@ -17,11 +18,30 @@ from .narration import narration_status as get_narration_status, validate_script
 from .script_writer import script_drafting_status as get_script_drafting_status
 
 class SourceIn(BaseModel):
-    source_url: AnyHttpUrl
+    source_url: str = Field(min_length=1,max_length=2048)
     platform: str = Field(min_length=1,max_length=80)
     title: str = Field(default="",max_length=300)
     creator: str = Field(default="",max_length=200)
     game: str = Field(default="",max_length=120)
+
+    @model_validator(mode="after")
+    def validate_source_reference(self):
+        self.source_url=self.source_url.strip()
+        self.platform=self.platform.strip()
+        parsed=urlsplit(self.source_url)
+        if (self.platform.casefold()=="manual" and parsed.scheme.casefold()=="local"
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}",parsed.netloc)
+            and not parsed.path and not parsed.query and not parsed.fragment):
+            return self
+        if parsed.scheme.casefold()=="local":
+            raise ValueError("local:// references are only valid when Platform is manual.")
+        try:
+            # Preserve the same strict URL validation/canonicalization used before
+            # local source references were supported.
+            self.source_url=str(TypeAdapter(AnyHttpUrl).validate_python(self.source_url))
+        except ValidationError as exc:
+            raise ValueError("Use local://name for your own local recordings, or a valid HTTP(S) URL for an external source.") from exc
+        return self
 class RightsIn(BaseModel):
     status: str
     license_type: str = ""

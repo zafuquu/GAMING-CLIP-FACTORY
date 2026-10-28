@@ -422,24 +422,44 @@ class Worker(threading.Thread):
         if duration<=0: raise RuntimeError("Could not verify positive media duration")
         meta={"format_name":fmt.get("format_name"),"duration_seconds":duration,"size_bytes":source_stat_before.st_size,"streams":[{"type":s.get("codec_type"),"codec":s.get("codec_name"),"width":s.get("width"),"height":s.get("height"),"fps":s.get("avg_frame_rate")} for s in data.get("streams",[])]}
         has_audio=any(stream.get("type")=="audio" for stream in meta["streams"])
-        signal_cmd=[self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
-                    "-vf","select='gt(scene,0.35)',showinfo"]
         signal_analysis_warning=""
+        # One local FFmpeg graph gathers scene changes, one-second RMS values,
+        # and half-second low-resolution frame-difference values. The motion
+        # branch is cheap and requires no downloaded model or external service.
+        signal_cmd=[self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                    "-filter_complex",
+                    "[0:v]select='gt(scene,0.35)',showinfo[scenes];"
+                    "[0:v]fps=2,scale=160:90:flags=fast_bilinear,format=gray,"
+                    "tblend=all_mode=difference,signalstats,metadata=print[motion]",
+                    "-map","[scenes]","-map","[motion]"]
         if has_audio:
-            # One FFmpeg pass collects scene-change timestamps and one-second
-            # relative audio RMS levels. This remains local and API-free.
-            signal_cmd.extend(["-af","aresample=48000,asetnsamples=n=48000:p=1,astats=metadata=1:reset=1,ametadata=print"])
+            signal_cmd.extend(["-map","0:a?",
+                "-af","aresample=48000,asetnsamples=n=48000:p=1,astats=metadata=1:reset=1,ametadata=print"])
         signal_cmd.extend(["-f","null","-"])
         try:
             p=run(signal_cmd,self.timeout)
         except RuntimeError as exc:
-            if not has_audio:
-                raise
-            # Audio filters differ across some third-party FFmpeg builds. Keep
-            # scene-only review working rather than failing the whole analysis.
-            signal_analysis_warning=f"Audio activity extraction unavailable ({type(exc).__name__}); scene-only fallback used."
-            p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
-                   "-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
+            # Keep older/custom FFmpeg builds usable if a visual filter is absent:
+            # retry the original scene + audio analysis, then scene-only if needed.
+            signal_analysis_warning=(f"Motion signal extraction unavailable ({type(exc).__name__}); "
+                                     "falling back to scene/audio analysis.")
+            fallback_cmd=[self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                          "-vf","select='gt(scene,0.35)',showinfo"]
+            if has_audio:
+                fallback_cmd.extend(["-af","aresample=48000,asetnsamples=n=48000:p=1,"
+                                     "astats=metadata=1:reset=1,ametadata=print"])
+            else:
+                fallback_cmd.append("-an")
+            fallback_cmd.extend(["-f","null","-"])
+            try:
+                p=run(fallback_cmd,self.timeout)
+            except RuntimeError as fallback_exc:
+                if not has_audio:
+                    raise
+                signal_analysis_warning=(f"Motion and audio signal extraction unavailable "
+                                         f"({type(fallback_exc).__name__}); scene-only fallback used.")
+                p=run([self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                       "-vf","select='gt(scene,0.35)',showinfo","-an","-f","null","-"],self.timeout)
         source_stat_after=path.stat()
         if (source_stat_after.st_size,source_stat_after.st_mtime_ns)!=(source_stat_before.st_size,source_stat_before.st_mtime_ns):
             raise RuntimeError("Source media changed during analysis. Let the file finish copying/recording and retry.")
@@ -456,7 +476,39 @@ class Worker(threading.Thread):
             t=float(hit.group(1))
             if 0<=t<duration and (not ts or abs(t-ts[-1])>1): ts.append(t)
         audio_samples=parse_timed_metric(p.stderr,"lavfi.astats.Overall.RMS_level")
-        ranked_moments=rank_highlight_windows(duration,ts,audio_samples)
+        motion_samples=parse_timed_metric(p.stderr,"lavfi.signalstats.YAVG")
+        if len(motion_samples)<3:
+            # Some FFmpeg builds differ in multi-output filter-graph support.
+            # Retry the motion branch as a standalone local pass instead of
+            # silently losing the signal on that platform.
+            c=connect(self.db)
+            try:
+                current_rights=c.execute("""SELECT p.status AS rights_status,p.expires_at
+                    FROM media_assets m JOIN source_permissions p ON p.source_id=m.source_id
+                    WHERE m.id=?""",(job["media_id"],)).fetchone()
+                if (not current_rights or current_rights["rights_status"]!="AUTHORIZED"
+                    or expiry_passed(current_rights["expires_at"])):
+                    raise PermissionError("Rights gate blocked analysis: permission was revoked or expired during media analysis.")
+            finally:
+                c.close()
+            try:
+                motion_cmd=[self.ffmpeg,"-hide_banner","-nostdin","-i",str(path),
+                    "-vf","fps=2,scale=160:90:flags=fast_bilinear,format=gray,"
+                         "tblend=all_mode=difference,signalstats,metadata=print",
+                    "-an","-f","null","-"]
+                motion_result=run(motion_cmd,self.timeout)
+                recovered=parse_timed_metric(motion_result.stderr,"lavfi.signalstats.YAVG")
+                if len(recovered)>=3:
+                    motion_samples=recovered
+                    prior=(signal_analysis_warning+" ") if signal_analysis_warning else ""
+                    signal_analysis_warning=(prior+"Standalone local motion scan recovered visual-motion measurements.").strip()
+                elif not signal_analysis_warning:
+                    signal_analysis_warning="Visual-motion scan produced too few metadata samples; legacy scene/audio ranking was retained."
+            except RuntimeError as motion_exc:
+                suffix=f"Standalone visual-motion scan unavailable ({type(motion_exc).__name__}); legacy scene/audio ranking was retained."
+                signal_analysis_warning=(signal_analysis_warning+" "+suffix).strip()
+        ranked_moments=rank_highlight_windows(duration,ts,audio_samples,video_motion_samples=motion_samples)
+        has_motion_samples=len(motion_samples)>=3
 
         # Reacquire a short write transaction after media processing and recheck permission;
         # revocation/expiry during a long FFmpeg scan must not get ignored.
@@ -481,15 +533,16 @@ class Worker(threading.Thread):
                 }
                 explanation=(
                     f"Local signal rank {score:.2f}/1.00; event={moment['event_type']}; "
-                    "rank uses relative audio activity and scene timing only. "
-                    "It is uncalibrated, does not predict views, and requires human review."
+                    + ("rank uses relative audio activity, low-resolution visual-motion differences, and scene timing. "
+                       if has_motion_samples else "rank uses relative audio activity and scene timing only. ")
+                    + "It is uncalibrated, does not predict views, and requires human review."
                 )
                 cur=c.execute(
                     """INSERT OR IGNORE INTO candidate_moments(
                         id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at
                     ) VALUES(?,?,?,?,?,?,'NEEDS_REVIEW',?)""",
                     (candidate_id,m["id"],moment["start_seconds"],moment["end_seconds"],
-                     "local_audio_scene_ranker_v1",explanation,now()))
+                     ("local_audio_motion_scene_ranker_v2" if has_motion_samples else "local_audio_scene_ranker_v1"),explanation,now()))
                 if cur.rowcount:
                     c.execute(
                         "UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",
@@ -563,14 +616,17 @@ class Worker(threading.Thread):
             summary={"duration_seconds":duration,"candidate_count":added,
                 "ranked_candidate_count":len(ranked_moments),
                 "audio_signal_sample_count":len(audio_samples),
-                "ranking_method":"local_audio_scene_v1",
+                "video_motion_sample_count":len(motion_samples),
+                "ranking_method":"local_audio_motion_scene_v2" if has_motion_samples else "local_audio_scene_v1",
                 "ranking_calibrated":False,
                 "signal_analysis_warning":signal_analysis_warning,
                 "auto_render_queued":auto_render_queued,
                 "auto_render_cap_per_media":AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,
                 "auto_rendered_historically":already_auto_rendered if folder_watch_id else 0,
                 "auto_render_slots_remaining":max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-(already_auto_rendered if folder_watch_id else 0)),
-                "note":"Candidates are ranked by relative audio activity and nearby scene changes. This is an uncalibrated review heuristic, not semantic proof or a prediction of views; human review is required."}; t=now()
+                "note":("Candidates are ranked by relative audio activity, low-resolution visual-motion differences, and nearby scene changes. "
+                        if has_motion_samples else "Candidates are ranked by relative audio activity and nearby scene changes. ")
+                       + "This is an uncalibrated review heuristic, not semantic proof or a prediction of views; human review is required."}; t=now()
             c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
             event(c,"INFO","media.analysis_completed",f"Created {added} locally signal-ranked review candidates; queued {auto_render_queued} supervised auto-render jobs.",{"job_id":job["id"],"media_id":m["id"],**summary}); c.commit()
         finally: c.close()

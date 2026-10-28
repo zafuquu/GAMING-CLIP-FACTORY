@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from app.highlight_detector import audio_activity_scores, parse_timed_metric, rank_highlight_windows
+from app.highlight_detector import audio_activity_scores, parse_timed_metric, rank_highlight_windows, video_motion_activity_scores
 
 
 def test_parse_timed_metric_pairs_ffmpeg_metadata_with_current_frame_time():
@@ -100,6 +100,54 @@ def test_unattended_render_gate_fails_closed_on_malformed_assessments():
     assert not is_render_worthy_vision_assessment({
         "status":"COMPLETED","is_actionable_highlight":True,"event_type":"elimination",
         "highlight_score":float("nan"),"confidence":0.9,"quality_issues":[],"evidence":["HUD"]})
+
+
+def test_parse_timed_metric_keeps_parallel_filter_timestamps_separate():
+    log = """
+[Parsed_ametadata_3 @ 0x1] frame:0 pts:0 pts_time:1
+[Parsed_metadata_7 @ 0x2] frame:0 pts:0 pts_time:2
+[Parsed_metadata_7 @ 0x2] lavfi.signalstats.YAVG=22.000000
+[Parsed_ametadata_3 @ 0x1] lavfi.astats.Overall.RMS_level=-4.000000
+"""
+    assert parse_timed_metric(log, "lavfi.astats.Overall.RMS_level") == [(1.0, -4.0)]
+    assert parse_timed_metric(log, "lavfi.signalstats.YAVG") == [(2.0, 22.0)]
+
+
+def test_video_motion_activity_normalizes_local_motion_bursts():
+    samples = [(t * 0.5, 4.0) for t in range(120)]
+    for index, value in ((46, 18.0), (47, 28.0), (48, 19.0)):
+        samples[index] = (index * 0.5, value)
+    scores = dict(video_motion_activity_scores(samples))
+    assert scores[23.5] == 1.0
+    assert scores[10.0] == 0.0
+
+
+def test_motion_only_events_can_generate_candidates_without_audio_or_ai():
+    samples = [(t * 0.5, 4.0) for t in range(120)]
+    for index, value in ((46, 18.0), (47, 28.0), (48, 19.0)):
+        samples[index] = (index * 0.5, value)
+    candidates = rank_highlight_windows(
+        60.0, [], [], video_motion_samples=samples, max_candidates=10
+    )
+    assert candidates
+    top = candidates[0]
+    assert abs(top["event_time_seconds"] - 23.5) <= 0.5
+    assert top["event_type"] == "visual_motion_peak"
+    assert top["ranking_components"]["method"] == "local_audio_motion_scene_v2"
+    assert top["ranking_components"]["visual_motion_samples_available"] is True
+
+
+def test_motion_spike_can_rescue_candidate_when_audio_is_present_but_quiet():
+    audio = [(float(t), -25.0) for t in range(60)]
+    motion = [(t * 0.5, 4.0) for t in range(120)]
+    for index, value in ((46, 18.0), (47, 28.0), (48, 19.0)):
+        motion[index] = (index * 0.5, value)
+    candidates = rank_highlight_windows(
+        60.0, [12.0, 23.5, 40.0], audio, video_motion_samples=motion, max_candidates=10
+    )
+    assert candidates
+    assert any(abs(item["event_time_seconds"] - 23.5) <= 0.5 for item in candidates)
+
 
 def test_ranker_scales_to_hour_long_recordings_and_keeps_distinct_event_anchors():
     """A normal recording may contain thousands of one-second audio measurements."""

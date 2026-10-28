@@ -13,6 +13,7 @@ from collections import deque
 from collections.abc import Sequence
 
 _TIMESTAMP = re.compile(r"pts_time:([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
+_LOG_PREFIX = re.compile(r"^\[([^\]]+)\]")
 _NUMBER = re.compile(r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
 
 
@@ -25,16 +26,19 @@ def parse_timed_metric(log_text: str, metric_key: str) -> list[tuple[float, floa
     if not isinstance(log_text, str) or not metric_key:
         return []
     samples: list[tuple[float, float]] = []
-    current_time: float | None = None
+    current_time_by_context: dict[str, float | None] = {}
     marker = metric_key + "="
     for line in log_text.splitlines():
+        prefix_match = _LOG_PREFIX.match(line)
+        context = prefix_match.group(1) if prefix_match else "__default__"
         timestamp_match = _TIMESTAMP.search(line)
         if timestamp_match:
             try:
                 timestamp = float(timestamp_match.group(1))
-                current_time = timestamp if math.isfinite(timestamp) and timestamp >= 0 else None
+                current_time_by_context[context] = timestamp if math.isfinite(timestamp) and timestamp >= 0 else None
             except (ValueError, OverflowError):
-                current_time = None
+                current_time_by_context[context] = None
+        current_time = current_time_by_context.get(context)
         index = line.find(marker)
         if index < 0 or current_time is None:
             continue
@@ -99,11 +103,75 @@ def audio_activity_scores(samples: Sequence[tuple[float, float]]) -> list[tuple[
     return output
 
 
+def video_motion_activity_scores(samples: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Normalize frame-difference bursts to 0..1 using a robust source-local baseline.
+
+    The input is FFmpeg signalstats.YAVG from low-resolution, half-second frame
+    differences. It is a cheap motion proxy, not semantic action recognition:
+    camera panning and scene cuts can also produce high values.
+    """
+    cleaned = [
+        (float(timestamp), float(value))
+        for timestamp, value in samples
+        if isinstance(timestamp, (int, float))
+        and isinstance(value, (int, float))
+        and not isinstance(timestamp, bool)
+        and not isinstance(value, bool)
+        and math.isfinite(float(timestamp))
+        and math.isfinite(float(value))
+        and float(timestamp) >= 0
+        and float(value) >= 0
+    ]
+    by_time: dict[float, float] = {}
+    for timestamp, value in sorted(cleaned, key=lambda item: item[0]):
+        by_time[timestamp] = value
+    cleaned = sorted(by_time.items())
+    if len(cleaned) < 3:
+        return [(timestamp, 0.0) for timestamp, _ in cleaned]
+
+    values = [value for _, value in cleaned]
+    baseline = statistics.median(values)
+    deviations = [abs(value - baseline) for value in values]
+    mad = statistics.median(deviations)
+    robust_spread = max(2.0, _quantile(values, 0.95) - baseline, 3.0 * mad)
+    minimum_delta = max(1.0, baseline * 0.20)
+    return [
+        (timestamp, round(min(1.0, max(0.0, (value - baseline - minimum_delta) / robust_spread)), 4))
+        for timestamp, value in cleaned
+    ]
+
+
+def _local_peak_timestamps(
+    samples: Sequence[tuple[float, float]], *, radius_seconds: float, threshold: float
+) -> list[float]:
+    """Find deterministic local maxima in O(n) time using a monotonic deque."""
+    if not samples:
+        return []
+    times = [timestamp for timestamp, _ in samples]
+    values = [score for _, score in samples]
+    peak_window: deque[int] = deque()
+    right = 0
+    peaks: list[float] = []
+    for index, (timestamp, activity) in enumerate(samples):
+        while right < len(samples) and times[right] <= timestamp + radius_seconds:
+            while peak_window and values[peak_window[-1]] < values[right] - 1e-9:
+                peak_window.pop()
+            peak_window.append(right)
+            right += 1
+        while peak_window and times[peak_window[0]] < timestamp - radius_seconds:
+            peak_window.popleft()
+        # Ties keep the earliest sample to make plateaus deterministic.
+        if activity >= threshold and peak_window and peak_window[0] == index:
+            peaks.append(timestamp)
+    return peaks
+
+
 def rank_highlight_windows(
     duration_seconds: float,
     scene_change_seconds: Sequence[float],
     audio_rms_samples: Sequence[tuple[float, float]],
     *,
+    video_motion_samples: Sequence[tuple[float, float]] = (),
     target_seconds: float = 15.0,
     max_candidates: int = 25,
 ) -> list[dict]:
@@ -147,26 +215,17 @@ def rank_highlight_windows(
         and 0 <= float(timestamp) < duration
     ])
     audio_scores = audio_activity_scores(raw_audio)
+    motion_scores = video_motion_activity_scores(video_motion_samples)
     has_audio_samples = len(audio_scores) >= 3
+    has_motion_samples = len(motion_scores) >= 3
     event_times: set[float] = set(scenes)
+    event_times.update(_local_peak_timestamps(audio_scores, radius_seconds=2.0, threshold=0.42))
+    event_times.update(_local_peak_timestamps(motion_scores, radius_seconds=1.0, threshold=0.45))
 
-    # Indexed time windows keep long recordings fast. The monotonic deque
-    # computes each +/-2-second local maximum in O(n); equal peaks keep the
-    # earliest sample so plateaus have stable, deterministic anchors.
     sample_times = [timestamp for timestamp, _ in audio_scores]
     sample_values = [score for _, score in audio_scores]
-    peak_window: deque[int] = deque()
-    right = 0
-    for index, (timestamp, activity) in enumerate(audio_scores):
-        while right < len(audio_scores) and sample_times[right] <= timestamp + 2.0:
-            while peak_window and sample_values[peak_window[-1]] < sample_values[right] - 1e-9:
-                peak_window.pop()
-            peak_window.append(right)
-            right += 1
-        while peak_window and sample_times[peak_window[0]] < timestamp - 2.0:
-            peak_window.popleft()
-        if activity >= 0.42 and peak_window and peak_window[0] == index:
-            event_times.add(timestamp)
+    motion_times = [timestamp for timestamp, _ in motion_scores]
+    motion_values = [score for _, score in motion_scores]
 
     if not event_times:
         return []
@@ -175,6 +234,11 @@ def rank_highlight_windows(
         left = bisect_left(sample_times, timestamp - 2.0)
         right_index = bisect_right(sample_times, timestamp + 2.0)
         return max(sample_values[left:right_index], default=0.0)
+
+    def nearby_visual_motion(timestamp: float) -> float:
+        left = bisect_left(motion_times, timestamp - 1.0)
+        right_index = bisect_right(motion_times, timestamp + 1.0)
+        return max(motion_values[left:right_index], default=0.0)
 
     def scene_proximity(timestamp: float) -> float:
         if not scenes:
@@ -191,13 +255,25 @@ def rank_highlight_windows(
     proposals = []
     for event_time in event_times:
         audio_score = nearby_audio_activity(event_time)
+        motion_score = nearby_visual_motion(event_time)
         scene_score = scene_proximity(event_time)
-        # When usable audio exists, a scene cut alone is not enough evidence.
-        # This prevents quiet menus/outros from becoming gameplay candidates.
-        if has_audio_samples and audio_score < 0.42:
-            continue
-        if has_audio_samples:
+
+        # A candidate must have an actual audio or motion event when those
+        # measurements exist; scene cuts alone remain weak evidence.
+        if has_audio_samples and has_motion_samples:
+            if audio_score < 0.42 and motion_score < 0.45:
+                continue
+            # Audio is intentionally weighted slightly more than generic motion:
+            # camera panning is common in games and is not necessarily exciting.
+            score = 0.10 + 0.60 * audio_score + 0.25 * motion_score + 0.15 * scene_score
+        elif has_audio_samples:
+            if audio_score < 0.42:
+                continue
             score = 0.15 + 0.65 * audio_score + 0.20 * scene_score
+        elif has_motion_samples:
+            if motion_score < 0.45:
+                continue
+            score = 0.15 + 0.65 * motion_score + 0.20 * scene_score
         else:
             # Scene changes alone are weak evidence, so keep their rank low.
             score = 0.15 + 0.35 * scene_score
@@ -208,12 +284,19 @@ def rank_highlight_windows(
         if end - start < min(3.0, duration):
             continue
 
-        if scene_score >= 0.75 and audio_score >= 0.42:
+        if audio_score >= 0.42 and motion_score >= 0.45:
+            event_type = "audio_motion_peak"
+        elif motion_score >= 0.45 and scene_score >= 0.75:
+            event_type = "visual_motion_peak_near_scene_change"
+        elif motion_score >= 0.45:
+            event_type = "visual_motion_peak"
+        elif scene_score >= 0.75 and audio_score >= 0.42:
             event_type = "audio_peak_near_scene_change"
         elif audio_score >= 0.42:
             event_type = "audio_energy_peak"
         else:
             event_type = "scene_change_only"
+        method = "local_audio_motion_scene_v2" if has_motion_samples else "local_audio_scene_v1"
         proposals.append({
             "start_seconds": round(start, 3),
             "end_seconds": round(end, 3),
@@ -221,11 +304,13 @@ def rank_highlight_windows(
             "ranking_score": score,
             "event_type": event_type,
             "ranking_components": {
-                "method": "local_audio_scene_v1",
+                "method": method,
                 "event_type": event_type,
                 "audio_activity": round(audio_score, 4),
+                "visual_motion_activity": round(motion_score, 4),
                 "scene_proximity": round(scene_score, 4),
                 "audio_samples_available": has_audio_samples,
+                "visual_motion_samples_available": has_motion_samples,
                 "score_calibrated": False,
                 "score_meaning": "relative review priority only; not a view or virality prediction",
             },

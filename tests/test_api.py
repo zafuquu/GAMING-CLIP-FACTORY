@@ -134,6 +134,19 @@ def test_new_source_starts_unknown_and_duplicate_blocked(tmp_path):
     c,_=setup_client(tmp_path); sid=add_source(c)
     assert c.get("/api/sources").json()[0]["rights_status"]=="UNKNOWN"
     assert c.post("/api/sources",json={"source_url":"https://example.com/clip/123","platform":"manual"}).status_code==409
+
+
+def test_manual_local_source_needs_no_external_url_or_provider_account(tmp_path):
+    c,_=setup_client(tmp_path)
+    payload={"source_url":"local://owned-gameplay","platform":"manual","title":"My own gameplay","game":"Valorant"}
+    response=c.post("/api/sources",json=payload)
+    assert response.status_code==201,response.text
+    assert response.json()["source_url"]=="local://owned-gameplay"
+    assert response.json()["rights_status"]=="UNKNOWN"
+    assert c.get("/api/sources").json()[0]["source_url"]=="local://owned-gameplay"
+    assert c.post("/api/sources",json=payload).status_code==409
+    invalid=c.post("/api/sources",json={"source_url":"local://not-a-provider","platform":"youtube"})
+    assert invalid.status_code==422
     c.__exit__(None,None,None)
 def test_authorization_requires_explicit_evidence(tmp_path):
     c,_=setup_client(tmp_path); sid=add_source(c)
@@ -1289,7 +1302,7 @@ def test_analysis_releases_sqlite_write_lock_during_ffmpeg_and_rechecks_revoked_
                 "format":{"format_name":"mp4","duration":"10"},
                 "streams":[{"codec_type":"video","codec_name":"h264","width":320,"height":180,"avg_frame_rate":"30/1"}],
             }),stderr="")
-        if args[0]=="fake-ffmpeg" and "-vf" in args:
+        if args[0]=="fake-ffmpeg" and ("-vf" in args or "-filter_complex" in args):
             # This write would time out with sqlite's 10-second busy timeout if the
             # analyzer accidentally kept a write transaction open across the subprocess.
             response=c.put(f"/api/sources/{sid}/rights",json={"status":"REVOKED"})
