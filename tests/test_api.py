@@ -323,8 +323,9 @@ def test_render_review_status_can_be_previewed_but_is_not_publishable(tmp_path):
     assert preview.content==b"preview fixture bytes"
     c.__exit__(None,None,None)
 
-def test_vision_disabled_by_default(tmp_path,monkeypatch):
-    monkeypatch.delenv("GCF_ENABLE_VISION_ANALYSIS",raising=False)
+def test_openrouter_judging_disabled_by_default_when_explicitly_turned_off(tmp_path,monkeypatch):
+    monkeypatch.setenv("GCF_ENABLE_AI_JUDGING","false")
+    monkeypatch.delenv("GCF_OPENROUTER_API_KEY",raising=False)
     c,_=setup_client(tmp_path)
     status=c.get("/api/vision/status").json()
     assert status["enabled"] is False

@@ -11,10 +11,11 @@ from app.main import create_app
 from app.worker import Worker
 import app.worker as worker_module
 
-def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approval(tmp_path,monkeypatch):
+def test_openrouter_candidate_judgment_extracts_frames_and_saves_evidence_without_auto_approval(tmp_path,monkeypatch):
     ffmpeg=shutil.which("ffmpeg")
     if not ffmpeg: pytest.skip("FFmpeg not installed")
-    monkeypatch.setenv("GCF_ENABLE_VISION_ANALYSIS","true")
+    monkeypatch.setenv("GCF_ENABLE_AI_JUDGING","true")
+    monkeypatch.setenv("GCF_OPENROUTER_API_KEY","test-key")
     root=tmp_path/"project"; data=root/"data"; media=data/"media"
     cfg=Settings(root,data,media,data/"vision.sqlite3",ffmpeg,None,60)
     with TestClient(create_app(settings=cfg,start_worker=False)) as client:
@@ -38,26 +39,35 @@ def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approv
             db.execute("UPDATE candidate_moments SET ranking_components_json=? WHERE id=?",(json.dumps({"event_time_seconds":2.0}),cid))
             db.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(jid,"ANALYZE_CANDIDATE_VISION","RUNNING",sid,mid,json.dumps({"candidate_id":cid}),stamp,stamp))
         captured={}
-        def fake_assessment(images,game,source_title,transcript_excerpt="",frame_times_seconds=None):
-            captured.update({"frame_count":len(images),"image_sizes":[len(x) for x in images],"game":game,"title":source_title,"relative_frame_times_seconds":frame_times_seconds})
-            return {"model_name":"fake-local-vision","gameplay_context":"FPS practice footage","event_type":"unknown","visible_event":"No specific event is established by the sampled still frames.","is_actionable_highlight":False,"highlight_score":0.12,"confidence":0.88,"evidence":["The sampled frames do not establish a distinct event."],"quality_issues":["Sparse screenshots cannot prove event timing."],"score_calibrated":False}
-        monkeypatch.setattr(worker_module,"assess_candidate_images",fake_assessment)
+        def fake_assessment(candidates):
+            captured.update({"frame_count":sum(len(item["images"]) for item in candidates),
+                             "image_sizes":[len(frame) for item in candidates for frame in item["images"]],
+                             "game":candidates[0]["game"],"title":candidates[0]["source_title"],
+                             "relative_frame_times_seconds":candidates[0]["frame_times_seconds"]})
+            return [{"candidate_key":candidates[0]["candidate_key"],"model_name":"fake-openrouter-free",
+                     "configured_model":"openrouter/free","gameplay_context":"FPS practice footage",
+                     "event_type":"unknown","visible_event":"No specific event is established by the sampled still frames.",
+                     "is_actionable_highlight":False,"highlight_score":0.12,"confidence":0.88,
+                     "evidence":["The sampled frames do not establish a distinct event."],
+                     "quality_issues":["The sampled frames do not establish a specific worthwhile event."],
+                     "score_calibrated":False,"assessment_method":"openrouter_multimodal_highlight_judge"}]
+        monkeypatch.setattr(worker_module,"assess_candidate_batch",fake_assessment)
         worker=Worker(cfg.database_path,ffmpeg,None,60)
         worker.analyze_candidate_vision({"id":jid,"payload_json":json.dumps({"candidate_id":cid})})
-        assert captured["frame_count"]==5
-        assert captured["relative_frame_times_seconds"]==[0.45,1.39,1.75,2.11,4.05]
+        assert captured["frame_count"]==3
+        assert len(captured["relative_frame_times_seconds"])==3
+        assert min(abs(value-1.75) for value in captured["relative_frame_times_seconds"])<0.8
         assert all(size>0 for size in captured["image_sizes"])
         assert captured["game"]=="Valorant"
         with sqlite3.connect(cfg.database_path) as db:
             visual=db.execute("SELECT status,model_name,event_type,highlight_score,confidence FROM candidate_vision_assessments WHERE candidate_id=?",(cid,)).fetchone()
             ranking=db.execute("SELECT ranking_score,state,ranking_components_json FROM candidate_moments WHERE id=?",(cid,)).fetchone()
             job=db.execute("SELECT status FROM jobs WHERE id=?",(jid,)).fetchone()
-        assert tuple(visual)==("COMPLETED","fake-local-vision","unknown",0.12,0.88)
+        assert tuple(visual)==("COMPLETED","fake-openrouter-free","unknown",0.12,0.88)
         assert 0<=ranking[0]<=1
         assert ranking[1]=="NEEDS_REVIEW"
-        assert json.loads(ranking[2])["vision_score_calibrated"] is False
-        assert json.loads(ranking[2])["vision_sample_count"]==5
-        assert json.loads(ranking[2])["vision_relative_frame_times_seconds"]==[0.45,1.39,1.75,2.11,4.05]
+        assert json.loads(ranking[2])["ai_judge_score_calibrated"] is False
+        assert json.loads(ranking[2])["ai_judge_sample_count"]==3
         assert job[0]=="COMPLETED"
         listed=client.get("/api/candidates").json()
         candidate=next(x for x in listed if x["id"]==cid)
