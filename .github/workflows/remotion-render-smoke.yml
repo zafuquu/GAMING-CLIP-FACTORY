@@ -2,7 +2,7 @@ name: Remotion render smoke test
 
 on:
   push:
-    branches: ["main", "feat/remotion-render-engine"]
+    branches: ["main", "feat/remotion-render-engine", "feat/youtube-highlight-intelligence"]
     paths:
       - "remotion/**"
       - "backend/app/worker.py"
