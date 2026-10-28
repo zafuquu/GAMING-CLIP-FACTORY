@@ -5,7 +5,7 @@ on:
     - cron: "47 5 * * 1"
   workflow_dispatch:
   push:
-    branches: [docs-security-maintenance]
+    branches: [docs-security-maintenance, feat/youtube-highlight-intelligence]
     paths:
       - "backend/requirements*.txt"
       - "frontend/package.json"
