@@ -33,6 +33,9 @@ def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approv
         cid="vision-ci-candidate"; jid="vision-ci-job"; stamp=datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(cfg.database_path) as db:
             db.execute("INSERT INTO candidate_moments(id,media_id,start_seconds,end_seconds,detector,explanation,state,created_at) VALUES(?,?,?,?,?,?,?,?)",(cid,mid,0.25,4.75,"test_fixture","Test only","NEEDS_REVIEW",stamp))
+            # Event time is an absolute source timestamp; vision sampling should
+            # include it closely while retaining early/late context frames.
+            db.execute("UPDATE candidate_moments SET ranking_components_json=? WHERE id=?",(json.dumps({"event_time_seconds":2.0}),cid))
             db.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(jid,"ANALYZE_CANDIDATE_VISION","RUNNING",sid,mid,json.dumps({"candidate_id":cid}),stamp,stamp))
         captured={}
         def fake_assessment(images,game,source_title,transcript_excerpt="",frame_times_seconds=None):
@@ -42,7 +45,7 @@ def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approv
         worker=Worker(cfg.database_path,ffmpeg,None,60)
         worker.analyze_candidate_vision({"id":jid,"payload_json":json.dumps({"candidate_id":cid})})
         assert captured["frame_count"]==5
-        assert captured["relative_frame_times_seconds"]==[0.45,1.35,2.25,3.15,4.05]
+        assert captured["relative_frame_times_seconds"]==[0.45,1.39,1.75,2.11,4.05]
         assert all(size>0 for size in captured["image_sizes"])
         assert captured["game"]=="Valorant"
         with sqlite3.connect(cfg.database_path) as db:
@@ -54,7 +57,7 @@ def test_candidate_vision_extracts_frames_and_saves_evidence_without_auto_approv
         assert ranking[1]=="NEEDS_REVIEW"
         assert json.loads(ranking[2])["vision_score_calibrated"] is False
         assert json.loads(ranking[2])["vision_sample_count"]==5
-        assert json.loads(ranking[2])["vision_relative_frame_times_seconds"]==[0.45,1.35,2.25,3.15,4.05]
+        assert json.loads(ranking[2])["vision_relative_frame_times_seconds"]==[0.45,1.39,1.75,2.11,4.05]
         assert job[0]=="COMPLETED"
         listed=client.get("/api/candidates").json()
         candidate=next(x for x in listed if x["id"]==cid)

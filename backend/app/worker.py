@@ -1,4 +1,4 @@
-import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3, wave, shutil
+import json, re, subprocess, threading, hashlib, os, sys, importlib.util, tempfile, sqlite3, wave, shutil, math
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -475,7 +475,10 @@ class Worker(threading.Thread):
             for moment in ranked_moments:
                 candidate_id=str(uuid4())
                 score=float(moment["ranking_score"])
-                components=moment["ranking_components"]
+                components={
+                    **moment["ranking_components"],
+                    "event_time_seconds":round(float(moment["event_time_seconds"]),3),
+                }
                 explanation=(
                     f"Local signal rank {score:.2f}/1.00; event={moment['event_type']}; "
                     "rank uses relative audio activity and scene timing only. "
@@ -2108,7 +2111,22 @@ class Worker(threading.Thread):
             assessment_id=old_assessment["id"] if old_assessment else str(uuid4())
         finally:
             c.close()
-        frame_fractions=vision_sampling_fractions()
+        try:
+            rank_components=json.loads(row["ranking_components_json"] or "{}")
+        except (ValueError,TypeError):
+            rank_components={}
+        event_fraction=None
+        raw_event_time=rank_components.get("event_time_seconds") if isinstance(rank_components,dict) else None
+        if (
+            isinstance(raw_event_time,(int,float))
+            and not isinstance(raw_event_time,bool)
+            and math.isfinite(float(raw_event_time))
+            and end>start
+        ):
+            candidate_fraction=(float(raw_event_time)-start)/(end-start)
+            if 0.0<=candidate_fraction<=1.0:
+                event_fraction=candidate_fraction
+        frame_fractions=vision_sampling_fractions(event_fraction)
         frame_times=[round(start+(end-start)*fraction,3) for fraction in frame_fractions]
         relative_frame_times=[round(frame_time-start,3) for frame_time in frame_times]
         images=[]

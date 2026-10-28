@@ -97,6 +97,8 @@ def test_media_analysis_ranks_an_audio_event_into_a_shorts_window(tmp_path, monk
         top = max(media_candidates, key=lambda item: item["ranking_score"] or 0)
         assert top["ranking_score"] > 0.7, top
         assert top["start_seconds"] <= 21.0 <= top["end_seconds"], top
+        ranking_components=json.loads(top["ranking_components_json"] or "{}")
+        assert 20.0 <= ranking_components["event_time_seconds"] <= 22.0
         assert top["detector"] == "local_audio_scene_ranker_v1"
         assert "uncalibrated" in top["explanation"].lower()
         # Analysis must never auto-approve or publish a candidate.
