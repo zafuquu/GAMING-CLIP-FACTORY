@@ -45,6 +45,7 @@ Do not interpret any rank as a probability of reaching millions of views. Reliab
 ## Requirements
 
 - Windows 10/11, Python 3.11 or 3.12, Node.js 20.19+ or 22.13+, and npm.
+- An OpenRouter API key for multimodal AI highlight judgment. The `openrouter/free` router is the default; availability and quality depend on the free models currently offered. This is an external API, not a local model.
 - FFmpeg/FFprobe installed separately. The app auto-detects common project-local directories or uses GCF_FFMPEG_PATH/GCF_FFPROBE_PATH.
 - Provider credentials only for integrations you enable.
 
@@ -139,13 +140,44 @@ Voiceover is opt-in and remains local until you approve a clip for rendering. Th
 3. Prefer GCF_WHISPER_MODEL_PATH to an existing local model. Otherwise set GCF_WHISPER_ALLOW_MODEL_DOWNLOAD=true explicitly.
 4. Restart backend; transcription may be queued after media analysis. Inference is local and may be CPU-intensive.
 
-## Optional local vision
+## OpenRouter AI highlight judgment (no local LLM required)
 
-1. Install Ollama and a compatible vision model after reviewing its license and hardware requirements.
-2. Set GCF_ENABLE_VISION_ANALYSIS=true; default endpoint is http://127.0.0.1:11434/api/chat.
-3. Restart backend and use Candidate Review → Analyze with vision, or let enabled media analysis queue assessments.
-4. Scores are subjective and uncalibrated; sampled frames cannot reliably prove event timing. Candidates remain NEEDS_REVIEW.
-5. Remote endpoints are blocked by default because sampled frames may be private. Only set GCF_VISION_ALLOW_REMOTE=true after privacy review.
+The default highlight judge uses `GCF_OPENROUTER_MODEL=openrouter/free`, which routes requests to an available compatible free multimodal model. This is separate from the optional legacy/local vision-analysis feature. You do **not** need Ollama, local LLM weights, a GPU, or a paid model for this highlight-judgment path.
+
+1. Copy `.env.example` to `.env` and set `GCF_OPENROUTER_API_KEY` to your OpenRouter key. Keep the key private and never commit `.env`.
+2. Keep `GCF_ENABLE_AI_JUDGING=true` and `GCF_OPENROUTER_MODEL=openrouter/free` to use the free-model router. You can change the model ID only to a model supported by OpenRouter and compatible with image input.
+3. The local detector proposes moments from audio RMS changes, scene transitions and frame motion. The app shortlists up to `GCF_AI_JUDGE_MAX_CANDIDATES_PER_MEDIA` candidates and samples `GCF_AI_JUDGE_SAMPLE_FRAMES` frames per candidate; `GCF_AI_JUDGE_BATCH_SIZE` bounds each request batch. The full source video is not uploaded to OpenRouter.
+4. The model returns structured event judgments. Auto-render requires an actionable gameplay event, visible evidence, score/confidence at least 0.75, and no reported quality issues. Failed or incomplete judge responses fail safely rather than being treated as a pass.
+5. Free-model availability, latency, rate limits and quality can vary. Scores are subjective and uncalibrated; fast events can be missed or misinterpreted. Review every output and run the real-footage acceptance checklist before relying on unattended rendering.
+
+Privacy note: sampled frames and prompt context leave the machine for OpenRouter processing. If you do not want frames sent to an external provider, disable `GCF_ENABLE_AI_JUDGING` and use manual review or a separately configured local workflow.
+
+## Optional local vision analysis (separate feature)
+
+The legacy local vision-analysis option is distinct from OpenRouter AI highlight judgment and is not required for the default highlight pipeline. If you explicitly choose it, install Ollama and a compatible vision model after reviewing its license/hardware requirements, set `GCF_ENABLE_VISION_ANALYSIS=true`, and use Candidate Review → Analyze with vision. Remote endpoints are blocked by default; only set `GCF_VISION_ALLOW_REMOTE=true` after privacy review. Treat these scores as estimates, not proof of event timing.
+
+## Environment configuration
+
+`.env.example` is the canonical list of supported environment settings. Copy it to `.env` in the repository root and edit only the values for features you use. Empty optional paths use project-local defaults where supported; credentials should remain blank until configured. Restart the application after changing environment settings.
+
+Key settings:
+
+| Setting | Purpose | Default |
+|---|---|---|
+| `GCF_RENDER_ENGINE` | `remotion` recommended; `ffmpeg` fallback | `remotion` |
+| `GCF_REMOTION_CRF` / `GCF_REMOTION_X264_PRESET` | Remotion output quality/speed | `16` / `slow` |
+| `GCF_ENABLE_AI_JUDGING` | OpenRouter multimodal candidate judgment | `true` |
+| `GCF_OPENROUTER_API_KEY` | Required credential for OpenRouter judgment | empty; configure locally |
+| `GCF_OPENROUTER_MODEL` | OpenRouter model/router ID | `openrouter/free` |
+| `GCF_AI_JUDGE_SAMPLE_FRAMES` | Frames sampled per candidate | `3` |
+| `GCF_AI_JUDGE_MAX_CANDIDATES_PER_MEDIA` | Maximum shortlisted candidates per recording | `4` |
+| `GCF_AI_JUDGE_BATCH_SIZE` | Candidates per judge request batch | `4` |
+| `GCF_ENABLE_TRANSCRIPTION` | Optional local Faster-Whisper transcription | `false` |
+| `GCF_ENABLE_NARRATION` | Optional local Piper narration | `false` |
+| `GCF_ENABLE_YOUTUBE_UPLOADS` | Environment gate for YouTube uploads | `false` |
+| `GCF_ALLOW_SCHEDULED_PUBLIC_PUBLISHING` | Separate public-release gate | `false` |
+
+The free OpenRouter router is not a guarantee of unlimited or permanently available inference. API keys, sampled frames, local source media, and OAuth client files must never be committed. See the comments in `.env.example` for each setting's operational constraints.
 
 ## Test and CI
 
