@@ -58,7 +58,7 @@ def test_openrouter_free_router_is_the_default_and_does_not_need_local_model(mon
     assert status["ready"] is False
     assert status["sample_frames"] == 3
     assert status["batch_size"] == 4
-    with pytest.raises(AIJudgeNotConfigured, match="API KEY"):
+    with pytest.raises(AIJudgeNotConfigured, match="OPENROUTER_API_KEY"):
         assess_candidate_batch([_candidate("C1")])
 
 
