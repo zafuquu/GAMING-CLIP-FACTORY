@@ -514,6 +514,8 @@ class Worker(threading.Thread):
             analysis_payload=json.loads(job["payload_json"] or "{}")
         except (ValueError,TypeError):
             analysis_payload={}
+        if not isinstance(analysis_payload,dict):
+            analysis_payload={}
         requested_target=analysis_payload.get("target_seconds",os.getenv("GCF_HIGHLIGHT_TARGET_SECONDS","30"))
         try:
             target_seconds=float(requested_target)
@@ -546,6 +548,7 @@ class Worker(threading.Thread):
             m=dict(current)
             c.execute("UPDATE media_assets SET probe_json=?,state='PROBED' WHERE id=?",(json.dumps(meta),m["id"]))
             added=0
+            created_candidate_ids=[]
             for moment in ranked_moments:
                 candidate_id=str(uuid4())
                 score=float(moment["ranking_score"])
@@ -570,71 +573,16 @@ class Worker(threading.Thread):
                         "UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",
                         (score,json.dumps(components),candidate_id))
                     added+=cur.rowcount
+                    created_candidate_ids.append(candidate_id)
 
-            # Explicitly enabled folder watches can auto-render a small local batch after
-            # rechecking the watch and current source rights. This skips the per-candidate
-            # click but never publishes: QC-passed renders still require owner inspection.
+            # Do not auto-render from stale/local-model judgments here. Auto-render is
+            # deferred until the OpenRouter semantic/evidence gate validates fresh results.
             auto_render_queued=0
             already_auto_rendered=int(c.execute(
                 "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
                 (m["id"],),
             ).fetchone()[0])
-            try:
-                analysis_payload=json.loads(job["payload_json"] or "{}")
-                folder_watch_id=analysis_payload.get("folder_watch_id")
-            except (ValueError,TypeError):
-                folder_watch_id=None
-            if folder_watch_id:
-                watch=c.execute("""SELECT w.id,w.source_id,w.enabled,w.auto_analyze,w.auto_render,
-                    p.status AS rights_status,p.expires_at
-                    FROM media_folder_watches w
-                    JOIN watched_media_files f ON f.watch_id=w.id
-                    JOIN source_permissions p ON p.source_id=w.source_id
-                    WHERE w.id=? AND f.media_id=? AND w.source_id=?""",
-                    (folder_watch_id,m["id"],m["source_id"])).fetchone()
-                paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
-                if (watch and bool(watch["enabled"]) and bool(watch["auto_analyze"])
-                    and bool(watch["auto_render"])
-                    and watch["rights_status"]=="AUTHORIZED"
-                    and not expiry_passed(watch["expires_at"])
-                    and not (paused and paused["value"]=="true")):
-                    # Count every previous supervised auto-render job for this media,
-                    # including failed/completed jobs. Re-analysis or restart cannot consume
-                    # another batch and silently exceed the per-file cap.
-                    remaining_auto_render_slots=max(0,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA-already_auto_rendered)
-                    # Signal-only scores cannot authorize unattended rendering.
-                    # The local vision job queues a render only after the semantic gate passes.
-                    eligible=c.execute("""SELECT cm.id FROM candidate_moments cm
-                        JOIN candidate_vision_assessments va ON va.candidate_id=cm.id
-                        WHERE cm.media_id=? AND cm.state='NEEDS_REVIEW' AND cm.auto_rendered=0
-                          AND va.status='COMPLETED' AND va.is_actionable_highlight=1
-                          AND va.highlight_score>=0.75 AND va.confidence>=0.75
-                          AND va.event_type IN ('clutch','elimination','victory','near_death','team_fight','skill_play')
-                          AND va.quality_issues_json='[]' AND va.evidence_json<>'[]'
-                        ORDER BY va.highlight_score DESC,va.confidence DESC,COALESCE(cm.ranking_score,0) DESC
-                        LIMIT ?""",(m["id"],remaining_auto_render_slots)).fetchall()
-                    for candidate in eligible:
-                        updated=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(candidate["id"],))
-                        if updated.rowcount!=1:
-                            continue
-                        render_job_id=str(uuid4()); render_stamp=now()
-                        c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
-                            VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
-                            (render_job_id,m["source_id"],m["id"],json.dumps({
-                                "candidate_id":candidate["id"],
-                                "render_profile":"blur_fill",
-                                "auto_render_reason":"authorized_folder_watch",
-                                "folder_watch_id":folder_watch_id,
-                                "human_final_review_required":True,
-                            }),render_stamp,render_stamp))
-                        auto_render_queued+=1
-                    if auto_render_queued:
-                        event(c,"INFO","folder_watch.auto_render_queued",
-                            f"Queued {auto_render_queued} local render(s) from an explicitly enabled authorized folder watch.",
-                            {"folder_watch_id":folder_watch_id,"media_id":m["id"],"queued":auto_render_queued,
-                             "cap_per_media":AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,
-                             "rights_rechecked":True,"public_publish_queued":False,
-                             "human_final_review_required":True})
+            folder_watch_id=analysis_payload.get("folder_watch_id")
             summary={"duration_seconds":duration,"candidate_count":added,
                 "ranked_candidate_count":len(ranked_moments),
                 "audio_signal_sample_count":len(audio_samples),
@@ -682,10 +630,14 @@ class Worker(threading.Thread):
                 batch_size=4
             c=connect(self.db)
             try:
-                candidates=c.execute(
-                    "SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY COALESCE(ranking_score,0) DESC,created_at DESC LIMIT ?",
-                    (job["media_id"],maximum),
-                ).fetchall()
+                if created_candidate_ids:
+                    candidate_placeholders=",".join("?" for _ in created_candidate_ids)
+                    candidates=c.execute(
+                        "SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' AND id IN ("+candidate_placeholders+") ORDER BY COALESCE(ranking_score,0) DESC,created_at DESC LIMIT ?",
+                        (job["media_id"],*created_candidate_ids,maximum),
+                    ).fetchall()
+                else:
+                    candidates=[]
                 queued=0
                 stamp=now()
                 for offset in range(0,len(candidates),batch_size):
