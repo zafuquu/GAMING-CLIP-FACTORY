@@ -60,7 +60,7 @@ jobs:
         run: python scripts/live_youtube_e2e.py
       - name: Upload only the JSON acceptance report (never the source or rendered video)
         if: always() && hashFiles('live-youtube-e2e-report.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-youtube-e2e-report
           path: live-youtube-e2e-report.json
