@@ -1275,6 +1275,33 @@ def test_disk_capacity_check_failure_pauses_fail_closed(tmp_path,monkeypatch):
     client.__exit__(None,None,None)
 
 
+def test_auto_produce_requires_openrouter_and_queues_the_requested_target(tmp_path,monkeypatch):
+    import app.main as main_module
+    monkeypatch.setenv("GCF_ENABLE_AI_JUDGING","true")
+    monkeypatch.delenv("GCF_OPENROUTER_API_KEY",raising=False)
+    c,media=setup_client(tmp_path)
+    sid=add_source(c)
+    assert authorize(c,sid).status_code==200
+    media.mkdir(parents=True,exist_ok=True)
+    (media/"match.mp4").write_bytes(b"synthetic media")
+    imported=c.post("/api/media/import",json={"source_id":sid,"path":"match.mp4"})
+    assert imported.status_code==201,imported.text
+    mid=imported.json()["id"]
+    blocked=c.post(f"/api/media/{mid}/analyze",json={"target_seconds":60,"max_candidates":4,"auto_produce":True})
+    assert blocked.status_code==403
+    monkeypatch.setenv("GCF_OPENROUTER_API_KEY","test-key")
+    queued=c.post(f"/api/media/{mid}/analyze",json={"target_seconds":60,"max_candidates":4,"auto_produce":True,"render_profile":"blur_fill"})
+    assert queued.status_code==202,queued.text
+    with sqlite3.connect(c.app.state.settings.database_path) as raw:
+        row=raw.execute("SELECT payload_json FROM jobs WHERE id=?",(queued.json()["id"],)).fetchone()
+    payload=json.loads(row[0])
+    assert payload["target_seconds"]==60
+    assert payload["max_candidates"]==4
+    assert payload["auto_produce"] is True
+    assert payload["render_profile"]=="blur_fill"
+    c.__exit__(None,None,None)
+
+
 def test_analysis_releases_sqlite_write_lock_during_ffmpeg_and_rechecks_revoked_rights(tmp_path, monkeypatch):
     """Dashboard writes must work while FFmpeg is running, and revocation must win."""
     import subprocess
