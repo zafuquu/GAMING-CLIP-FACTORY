@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, AnyHttpUrl, Field, TypeAdapter, ValidationError, model_validator
 from urllib.parse import urlsplit
 from .config import Settings
 from .db import initialize, connect, session, now, event, recover_interrupted_jobs
@@ -33,10 +33,14 @@ class SourceIn(BaseModel):
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}",parsed.netloc)
             and not parsed.path and not parsed.query and not parsed.fragment):
             return self
-        if parsed.scheme.casefold() not in {"http","https"} or not parsed.netloc:
-            raise ValueError("Use local://name for your own local recordings, or an HTTP(S) URL for an external source.")
         if parsed.scheme.casefold()=="local":
             raise ValueError("local:// references are only valid when Platform is manual.")
+        try:
+            # Preserve the same strict URL validation/canonicalization used before
+            # local source references were supported.
+            self.source_url=str(TypeAdapter(AnyHttpUrl).validate_python(self.source_url))
+        except ValidationError as exc:
+            raise ValueError("Use local://name for your own local recordings, or a valid HTTP(S) URL for an external source.") from exc
         return self
 class RightsIn(BaseModel):
     status: str
