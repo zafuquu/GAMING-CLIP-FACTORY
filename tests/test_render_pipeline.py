@@ -324,35 +324,41 @@ def test_mock_production_flow_analysis_review_render_private_upload_and_processi
             and job["status"] == "QUEUED"
         ], "No candidate may auto-render without passing semantic vision review."
 
-        # Seed a completed, strong, evidence-grounded assessment to exercise the
-        # actual worker's post-assessment auto-render gate without requiring Ollama in CI.
+        # Exercise the new OpenRouter judgment pipeline without making real
+        # network requests; only a passing semantic result may queue a render.
         selected = candidates[0]
+        def fake_assessment_batch(batch):
+            return [{
+                "candidate_key": item["candidate_key"],
+                "model_name": "ci-mocked-openrouter-free",
+                "configured_model": "openrouter/free",
+                "gameplay_context": "Competitive shooter gameplay",
+                "event_type": "elimination",
+                "visible_event": "Visible elimination indicator in HUD",
+                "is_actionable_highlight": True,
+                "highlight_score": 0.91,
+                "confidence": 0.89,
+                "evidence": ["Visible elimination indicator in HUD"],
+                "quality_issues": [],
+                "score_calibrated": False,
+                "assessment_method": "openrouter_multimodal_highlight_judge",
+            } for item in batch]
+        monkeypatch.setattr(worker_module, "assess_candidate_batch", fake_assessment_batch)
         stamp = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(cfg.database_path) as db:
             db.execute(
-                """INSERT INTO candidate_vision_assessments(
-                    id,candidate_id,model_name,status,gameplay_context,event_type,visible_event,
-                    is_actionable_highlight,highlight_score,confidence,evidence_json,
-                    quality_issues_json,frame_times_json,raw_response_json,error,created_at,updated_at
-                ) VALUES(?,?,?,'COMPLETED',?,?,?,?,?,?,?,?,?,?, '',?,?)""",
-                (
-                    "vision-gate-ci-assessment", selected["id"], "ci-mocked-local-vision",
-                    "Visible gameplay elimination", "elimination", "Visible elimination indicator",
-                    1, 0.91, 0.89, json.dumps(["Visible elimination indicator in HUD"]),
-                    "[]", "[]", "{}", stamp, stamp,
-                ),
-            )
-            db.execute(
                 """INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
-                   VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?, ?,?,?)""",
+                   VALUES(?,'ANALYZE_CANDIDATE_VISION','QUEUED',?,?, ?,?,?)""",
                 (
-                    "vision-qualified-auto-render", source_id, media_id,
-                    json.dumps({"folder_watch_id": watch_id}), stamp, stamp,
+                    "openrouter-qualified-auto-render", source_id, media_id,
+                    json.dumps({"candidate_ids": [selected["id"]], "auto_produce": False,
+                                "folder_watch_id": watch_id}), stamp, stamp,
                 ),
             )
         assert worker.one() is True
         qualified_job = next(
-            job for job in client.get("/api/jobs").json() if job["id"] == "vision-qualified-auto-render"
+            job for job in client.get("/api/jobs").json()
+            if job["id"] == "openrouter-qualified-auto-render"
         )
         assert qualified_job["status"] == "COMPLETED", qualified_job.get("error")
         qualified_summary = json.loads(qualified_job["payload_json"])
