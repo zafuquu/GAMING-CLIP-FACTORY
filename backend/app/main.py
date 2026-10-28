@@ -7,12 +7,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, AnyHttpUrl, Field, TypeAdapter, ValidationError, model_validator
+from typing import Literal
 from urllib.parse import urlsplit
 from .config import Settings
 from .db import initialize, connect, session, now, event, recover_interrupted_jobs
 from .worker import Worker
 from .integrations.youtube import connected_status, youtube_service, youtube_discovery_available, youtube_oauth_available
-from .vision import vision_status
+from .openrouter_judge import ai_judge_status as vision_status
 from .content_director import plan_candidate
 from .narration import narration_status as get_narration_status, validate_script, NarrationNotConfigured
 from .script_writer import script_drafting_status as get_script_drafting_status
@@ -63,6 +64,12 @@ class RightsIn(BaseModel):
 class MediaIn(BaseModel):
     source_id: str
     path: str
+
+class MediaAnalyzeIn(BaseModel):
+    target_seconds: Literal[30, 60] = 30
+    max_candidates: int = Field(default=4, ge=1, le=12)
+    auto_produce: bool = False
+    render_profile: Literal["blur_fill", "fit_pad"] = "blur_fill"
 class CandidateDecisionIn(BaseModel):
     decision: str
     notes: str = ""
@@ -703,7 +710,10 @@ def create_app(settings=None,start_worker=True):
                 "note":"Single video only; requires documented AUTHORIZED editing/commercial rights. No cookies or access-control bypass is used."}
 
     @app.post("/api/media/{mid}/analyze",status_code=202)
-    def analyze(mid: str):
+    def analyze(mid: str, data: MediaAnalyzeIn = MediaAnalyzeIn()):
+        ai_status=vision_status()
+        if data.auto_produce and not ai_status.get("ready"):
+            raise HTTPException(403,detail="Auto-production requires OpenRouter. Set GCF_OPENROUTER_API_KEY in your local .env and keep GCF_ENABLE_AI_JUDGING=true.")
         with session(cfg.database_path) as c:
             c.execute("BEGIN IMMEDIATE")
             pause=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
@@ -714,9 +724,11 @@ def create_app(settings=None,start_worker=True):
             old=c.execute("SELECT id FROM jobs WHERE media_id=? AND job_type='ANALYZE_MEDIA' AND status IN ('QUEUED','RUNNING')",(mid,)).fetchone()
             if old: return {"id":old["id"],"status":"ALREADY_QUEUED"}
             jid=str(uuid4()); t=now()
-            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,created_at,updated_at) VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?,?,?)",(jid,r["source_id"],mid,t,t))
-            event(c,"INFO","job.queued","Media analysis queued.",{"job_id":jid,"media_id":mid})
-        return {"id":jid,"status":"QUEUED","job_type":"ANALYZE_MEDIA"}
+            c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'ANALYZE_MEDIA','QUEUED',?,?,?,?,?)",
+                      (jid,r["source_id"],mid,json.dumps(data.model_dump()),t,t))
+            event(c,"INFO","job.queued","Media analysis queued.",{"job_id":jid,"media_id":mid,"target_seconds":data.target_seconds,"auto_produce":data.auto_produce})
+        return {"id":jid,"status":"QUEUED","job_type":"ANALYZE_MEDIA","target_seconds":data.target_seconds,
+                "auto_produce":data.auto_produce,"ai_judge_ready":bool(ai_status.get("ready"))}
 
     @app.post("/api/media/{mid}/transcribe",status_code=202)
     def transcribe_media(mid: str):
@@ -992,7 +1004,7 @@ def create_app(settings=None,start_worker=True):
     def queue_candidate_vision(cid: str):
         status=vision_status()
         if not status.get("ready"):
-            raise HTTPException(403,detail="Local vision analysis is not ready. Enable GCF_ENABLE_VISION_ANALYSIS=true and configure a valid local Ollama-compatible endpoint/model.")
+            raise HTTPException(403,detail="OpenRouter AI judging is not ready. Configure GCF_OPENROUTER_API_KEY and GCF_ENABLE_AI_JUDGING=true.")
         if not cfg.ffmpeg_path:
             raise HTTPException(503,detail="FFmpeg is required to extract candidate frames.")
         t=now(); jid=str(uuid4())
@@ -1011,8 +1023,8 @@ def create_app(settings=None,start_worker=True):
             active=c.execute("SELECT id FROM jobs WHERE job_type='ANALYZE_CANDIDATE_VISION' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",("%"+cid+"%",)).fetchone()
             if active: return {"id":active["id"],"status":"ALREADY_QUEUED"}
             c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'ANALYZE_CANDIDATE_VISION','QUEUED',?,?, ?,?,?)",
-                      (jid,row["source_id"],row["media_id"],json.dumps({"candidate_id":cid}),t,t))
-            event(c,"INFO","vision.queued","Local vision assessment queued; candidate remains human-review-only.",{"job_id":jid,"candidate_id":cid,"model":status["model"]})
+                      (jid,row["source_id"],row["media_id"],json.dumps({"candidate_ids":[cid],"auto_produce":False}),t,t))
+            event(c,"INFO","ai_judge.queued","OpenRouter highlight judgment queued; candidate remains in human review.",{"job_id":jid,"candidate_id":cid,"model":status["model"]})
         return {"id":jid,"status":"QUEUED","candidate_id":cid,"model":status["model"],"automatic_approval":False}
 
     @app.post("/api/candidates/{cid}/decision", status_code=202)
