@@ -39,7 +39,7 @@ def _settings():
     local_host=parsed.hostname.lower() in {"127.0.0.1","localhost","::1"}
     if not local_host and os.getenv("GCF_VISION_ALLOW_REMOTE","").strip().lower()!="true":
         raise VisionNotConfigured("Remote vision endpoints are blocked by default. Use loopback, or explicitly set GCF_VISION_ALLOW_REMOTE=true after a privacy review.")
-    model=os.getenv("GCF_VISION_MODEL","llama3.2-vision").strip()
+    model=os.getenv("GCF_VISION_MODEL","qwen3-vl:2b").strip()
     if not model:
         raise VisionNotConfigured("GCF_VISION_MODEL cannot be blank.")
     try:
@@ -56,11 +56,11 @@ def vision_sampling_fractions(event_fraction: float | None = None) -> list[float
     Legacy candidates without an event anchor keep the old uniform policy.
     """
     try:
-        count=int(os.getenv("GCF_VISION_SAMPLE_FRAMES","5"))
+        count=int(os.getenv("GCF_VISION_SAMPLE_FRAMES","3"))
     except (TypeError,ValueError):
-        count=5
+        count=3
     if count not in {3,5}:
-        count=5
+        count=3
 
     valid_event=(
         isinstance(event_fraction,(int,float))
@@ -184,11 +184,11 @@ def vision_status() -> dict:
     loopback=host in {"127.0.0.1","localhost","::1"}
     valid=parsed.scheme=="http" and bool(parsed.hostname) and parsed.path.endswith("/api/chat")
     remote_allowed=os.getenv("GCF_VISION_ALLOW_REMOTE","").strip().lower()=="true"
-    try: max_candidates=max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","25") or "25")))
-    except (TypeError,ValueError): max_candidates=25
+    try: max_candidates=max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","8") or "8")))
+    except (TypeError,ValueError): max_candidates=8
     return {
         "enabled":enabled,
-        "model":os.getenv("GCF_VISION_MODEL","llama3.2-vision").strip() or "unknown",
+        "model":os.getenv("GCF_VISION_MODEL","qwen3-vl:2b").strip() or "unknown",
         "endpoint_valid":valid,
         "endpoint_local":loopback,
         "remote_allowed":remote_allowed,
