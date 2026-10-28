@@ -24,7 +24,7 @@ function run(command, args, timeout = 120000) {
 }
 
 function parseLastJsonLine(output) {
-  const lines = String(output || "").split(/\\r?\\n/).filter((line) => line.trim());
+  const lines = String(output || "").split(String.fromCharCode(10)).map((line) => line.trim()).filter(Boolean);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     try {
       const parsed = JSON.parse(lines[index]);
