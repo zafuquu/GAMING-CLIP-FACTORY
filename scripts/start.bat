@@ -139,6 +139,7 @@ if /I "%GCF_STARTUP_SKIP_BROWSER%"=="true" (
 echo.
 echo The backend runs in the background; use STOP.bat to stop it.
 echo Keep this window open to see startup status. Closing it will not stop the backend.
+if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 0
 pause
 exit /b 0
 
@@ -155,5 +156,6 @@ if exist "data\logs\backend.stdout.log" powershell -NoProfile -ExecutionPolicy B
 if exist "data\logs\backend.stderr.log" powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 60 -ErrorAction SilentlyContinue 'data\logs\backend.stderr.log'"
 echo.
 echo The startup window will remain open so you can read this error.
+if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 1
 pause
 exit /b 1
