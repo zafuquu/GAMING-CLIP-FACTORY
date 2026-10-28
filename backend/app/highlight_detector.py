@@ -332,7 +332,7 @@ def rank_highlight_windows(
 
 VISION_RENDER_MIN_SCORE = 0.75
 VISION_RENDER_MIN_CONFIDENCE = 0.75
-VISION_RENDER_ALLOWED_EVENTS = frozenset({"clutch", "elimination", "victory", "near_death", "team_fight", "skill_play"})
+VISION_RENDER_ALLOWED_EVENTS = frozenset({"clutch", "elimination", "victory", "near_death", "team_fight", "skill_play", "funny_moment", "close_call"})
 
 
 def is_render_worthy_vision_assessment(assessment: dict) -> bool:

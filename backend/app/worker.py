@@ -12,7 +12,7 @@ from .thumbnail_art import generate_shorts_thumbnail
 from .content_director import plan_candidate
 from .highlight_detector import parse_timed_metric, rank_highlight_windows, is_render_worthy_vision_assessment
 from .render_profiles import build_video_filter, profile_warning
-from .vision import assess_candidate_images, VisionNotConfigured, vision_sampling_fractions
+from .openrouter_judge import AIJudgeNotConfigured, ai_judge_status, assess_candidate_batch, sampling_fractions
 from .narration import synthesize_piper, NarrationNotConfigured, NarrationError, narration_status as get_narration_status, validate_script
 from .script_writer import generate_narration_draft, script_drafting_status as get_script_drafting_status
 
@@ -44,7 +44,7 @@ def escape_filter_path(path):
 SCENE=re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
 # Supervised folder auto-production is deliberately capped; scene changes are not a
 # calibrated highlight score, so excess candidates remain in the owner's review queue.
-AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA = 3
+AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA = 4
 
 def run(args,timeout,cwd=None):
     try: p=subprocess.run(args,capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=timeout,shell=False,cwd=str(cwd) if cwd else None)
@@ -292,7 +292,7 @@ class Worker(threading.Thread):
                     if published_id:
                         c.execute("UPDATE published_videos SET publishing_status='RECONCILE_REQUIRED',updated_at=? WHERE id=?",(t,published_id))
                 else:
-                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,(YouTubeNotConfigured,VisionNotConfigured,NarrationNotConfigured)) and bool(getattr(e,"retryable",True))
+                    retryable = not isinstance(e,PermissionError) and not isinstance(e,ValueError) and not isinstance(e,(YouTubeNotConfigured,AIJudgeNotConfigured,NarrationNotConfigured)) and bool(getattr(e,"retryable",True))
                     should_retry = bool(r and r["attempt_count"]<r["max_attempts"] and retryable)
                     status="QUEUED" if should_retry else "FAILED"
                     next_attempt = None
@@ -342,9 +342,12 @@ class Worker(threading.Thread):
                         pass
                 if status == "FAILED" and job["job_type"] == "ANALYZE_CANDIDATE_VISION":
                     try:
-                        cid=json.loads(job["payload_json"] or "{}").get("candidate_id")
-                        if cid:
-                            model=os.getenv("GCF_VISION_MODEL","llama3.2-vision").strip() or "unknown"
+                        payload=json.loads(job["payload_json"] or "{}")
+                        candidate_ids=payload.get("candidate_ids")
+                        if not isinstance(candidate_ids,list):
+                            candidate_ids=[payload.get("candidate_id")]
+                        model=os.getenv("GCF_OPENROUTER_MODEL","openrouter/free").strip() or "unknown"
+                        for cid in {str(value) for value in candidate_ids if value}:
                             c.execute("""INSERT INTO candidate_vision_assessments(id,candidate_id,model_name,status,error,created_at,updated_at)
                                 VALUES(?,?,?,'FAILED',?,?,?)
                                 ON CONFLICT(candidate_id) DO UPDATE SET model_name=excluded.model_name,status='FAILED',error=excluded.error,updated_at=excluded.updated_at""",
@@ -507,7 +510,26 @@ class Worker(threading.Thread):
             except RuntimeError as motion_exc:
                 suffix=f"Standalone visual-motion scan unavailable ({type(motion_exc).__name__}); legacy scene/audio ranking was retained."
                 signal_analysis_warning=(signal_analysis_warning+" "+suffix).strip()
-        ranked_moments=rank_highlight_windows(duration,ts,audio_samples,video_motion_samples=motion_samples)
+        try:
+            analysis_payload=json.loads(job["payload_json"] or "{}")
+        except (ValueError,TypeError):
+            analysis_payload={}
+        requested_target=analysis_payload.get("target_seconds",os.getenv("GCF_HIGHLIGHT_TARGET_SECONDS","30"))
+        try:
+            target_seconds=float(requested_target)
+        except (TypeError,ValueError):
+            target_seconds=30.0
+        if target_seconds not in {30.0,60.0}:
+            target_seconds=30.0
+        requested_max=analysis_payload.get("max_candidates",os.getenv("GCF_AI_JUDGE_MAX_CANDIDATES_PER_MEDIA","4"))
+        try:
+            max_candidates=max(1,min(12,int(requested_max)))
+        except (TypeError,ValueError):
+            max_candidates=4
+        ranked_moments=rank_highlight_windows(
+            duration,ts,audio_samples,video_motion_samples=motion_samples,
+            target_seconds=target_seconds,max_candidates=max_candidates,
+        )
         has_motion_samples=len(motion_samples)>=3
 
         # Reacquire a short write transaction after media processing and recheck permission;
@@ -646,22 +668,57 @@ class Worker(threading.Thread):
                 try:
                     event(c,"WARNING","transcription.not_installed","Transcription is enabled but faster-whisper is not installed; install backend/requirements-ml.txt.",{"media_id":job["media_id"]}); c.commit()
                 finally: c.close()
-        if os.getenv("GCF_ENABLE_VISION_ANALYSIS","").lower()=="true":
-            try: maximum=max(1,min(100,int(os.getenv("GCF_VISION_MAX_CANDIDATES_PER_MEDIA","25"))))
-            except (TypeError,ValueError): maximum=25
+        # Judge a bounded shortlist with OpenRouter. Four candidates are packed
+        # into one multimodal request to conserve the free-router request quota.
+        judge_status=ai_judge_status()
+        if judge_status.get("ready"):
+            try:
+                maximum=max(1,min(12,int(analysis_payload.get("max_candidates",judge_status.get("max_candidates_per_media",4)))))
+            except (TypeError,ValueError):
+                maximum=4
+            try:
+                batch_size=max(1,min(4,int(judge_status.get("batch_size",4))))
+            except (TypeError,ValueError):
+                batch_size=4
             c=connect(self.db)
             try:
-                candidates=c.execute("SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY COALESCE(ranking_score,0) DESC,created_at DESC LIMIT ?",(job["media_id"],maximum)).fetchall()
-                queued=0; stamp=now()
-                for candidate in candidates:
-                    active=c.execute("SELECT id FROM jobs WHERE job_type='ANALYZE_CANDIDATE_VISION' AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ?",("%"+candidate["id"]+"%",)).fetchone()
-                    if active: continue
+                candidates=c.execute(
+                    "SELECT id FROM candidate_moments WHERE media_id=? AND state='NEEDS_REVIEW' ORDER BY COALESCE(ranking_score,0) DESC,created_at DESC LIMIT ?",
+                    (job["media_id"],maximum),
+                ).fetchall()
+                queued=0
+                stamp=now()
+                for offset in range(0,len(candidates),batch_size):
+                    candidate_ids=[item["id"] for item in candidates[offset:offset+batch_size]]
+                    if not candidate_ids:
+                        continue
+                    placeholders=",".join("?" for _ in candidate_ids)
+                    active=c.execute(
+                        "SELECT id FROM jobs WHERE job_type='ANALYZE_CANDIDATE_VISION' AND status IN ('QUEUED','RUNNING') AND media_id=? AND payload_json LIKE ? LIMIT 1",
+                        (job["media_id"],"%" + candidate_ids[0] + "%"),
+                    ).fetchone()
+                    if active:
+                        continue
                     jid=str(uuid4())
-                    c.execute("INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'ANALYZE_CANDIDATE_VISION','QUEUED',?,?, ?,?,?)",
-                              (jid,job["source_id"],job["media_id"],json.dumps({"candidate_id":candidate["id"]}),stamp,stamp))
+                    vision_payload={
+                        "candidate_ids":candidate_ids,
+                        "auto_produce":bool(analysis_payload.get("auto_produce")),
+                        "render_profile":analysis_payload.get("render_profile","blur_fill"),
+                        "max_auto_outputs":min(maximum,AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA),
+                        "target_seconds":target_seconds,
+                        "folder_watch_id":analysis_payload.get("folder_watch_id"),
+                    }
+                    c.execute(
+                        "INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at) VALUES(?,'ANALYZE_CANDIDATE_VISION','QUEUED',?,?,?,?,?)",
+                        (jid,job["source_id"],job["media_id"],json.dumps(vision_payload),stamp,stamp),
+                    )
                     queued+=1
                 if queued:
-                    event(c,"INFO","vision.batch_queued","Optional local vision assessment jobs queued after media analysis.",{"media_id":job["media_id"],"queued":queued,"maximum":maximum})
+                    event(c,"INFO","ai_judge.batch_queued",
+                        "OpenRouter multimodal highlight judgment queued for local signal-ranked candidates.",
+                        {"media_id":job["media_id"],"batch_jobs":queued,"candidate_count":len(candidates),
+                         "model":judge_status.get("model"),"target_seconds":target_seconds,
+                         "auto_produce":bool(analysis_payload.get("auto_produce"))})
                     c.commit()
             finally:
                 c.close()
@@ -2140,137 +2197,229 @@ class Worker(threading.Thread):
 
     def analyze_candidate_vision(self, job):
         payload=json.loads(job["payload_json"] or "{}")
-        cid=payload.get("candidate_id")
-        if not cid: raise ValueError("Vision analysis job is missing candidate_id.")
-        if not self.ffmpeg: raise RuntimeError("FFmpeg is required to sample candidate frames for vision assessment.")
+        raw_ids=payload.get("candidate_ids")
+        if not isinstance(raw_ids,list):
+            raw_ids=[payload.get("candidate_id")]
+        candidate_ids=list(dict.fromkeys(str(value) for value in raw_ids if value))
+        if not candidate_ids or len(candidate_ids)>4:
+            raise ValueError("OpenRouter judgment jobs require 1–4 unique candidate IDs.")
+        if not self.ffmpeg:
+            raise RuntimeError("FFmpeg is required to sample candidate frames for AI judgment.")
+        placeholders=",".join("?" for _ in candidate_ids)
         c=connect(self.db)
         try:
-            row=c.execute("""SELECT cm.*,m.original_path,m.source_id,m.id AS media_id,s.game,s.title AS source_title,
+            rows=c.execute(f"""SELECT cm.*,m.original_path,m.source_id,m.id AS media_id,s.game,s.title AS source_title,
                 p.status AS rights_status,p.expires_at
                 FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
                 JOIN sources s ON s.id=m.source_id JOIN source_permissions p ON p.source_id=s.id
-                WHERE cm.id=?""",(cid,)).fetchone()
-            if not row: raise FileNotFoundError("Candidate for vision analysis not found.")
-            if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
-                raise PermissionError("Rights gate blocked vision analysis: current AUTHORIZED permission is required.")
-            if row["state"]!="NEEDS_REVIEW":
-                raise PermissionError(f"Vision analysis only runs on human-review candidates (state={row['state']}).")
-            source=Path(row["original_path"])
-            if not source.is_file(): raise FileNotFoundError("Source media for vision analysis is missing.")
-            start=float(row["start_seconds"]); end=float(row["end_seconds"])
-            if start<0 or end<=start: raise ValueError("Candidate time boundaries are invalid.")
+                WHERE cm.id IN ({placeholders}) ORDER BY COALESCE(cm.ranking_score,0) DESC""",candidate_ids).fetchall()
+            if len(rows)!=len(candidate_ids):
+                raise FileNotFoundError("One or more candidates for AI judgment no longer exist.")
+            rows=[dict(row) for row in rows]
+            if len({row["media_id"] for row in rows})!=1:
+                raise ValueError("A batched AI judgment must contain candidates from one source video.")
+            for row in rows:
+                if row["rights_status"]!="AUTHORIZED" or expiry_passed(row["expires_at"]):
+                    raise PermissionError("Rights gate blocked AI judgment: current AUTHORIZED permission is required.")
+                if row["state"]!="NEEDS_REVIEW":
+                    raise PermissionError(f"AI judgment only runs on human-review candidates (state={row['state']}).")
+                if not Path(row["original_path"]).is_file():
+                    raise FileNotFoundError("Source media for AI judgment is missing.")
             transcript_rows=c.execute("""SELECT ts.start_seconds,ts.end_seconds,ts.text FROM transcript_segments ts
-                JOIN transcripts tr ON tr.id=ts.transcript_id WHERE tr.media_id=? AND ts.end_seconds>? AND ts.start_seconds<?
-                ORDER BY ts.start_seconds LIMIT 20""",(row["media_id"],start,end)).fetchall()
-            transcript_excerpt=" ".join(str(x["text"]) for x in transcript_rows)[:1200]
-            old_assessment=c.execute("SELECT id FROM candidate_vision_assessments WHERE candidate_id=?",(cid,)).fetchone()
-            assessment_id=old_assessment["id"] if old_assessment else str(uuid4())
+                JOIN transcripts tr ON tr.id=ts.transcript_id WHERE tr.media_id=?
+                ORDER BY ts.start_seconds""",(rows[0]["media_id"],)).fetchall()
+            transcript_rows=[dict(item) for item in transcript_rows]
+            old_assessments={
+                item["candidate_id"]:item["id"]
+                for item in c.execute(
+                    "SELECT id,candidate_id FROM candidate_vision_assessments WHERE candidate_id IN ("+placeholders+")",
+                    candidate_ids,
+                ).fetchall()
+            }
         finally:
             c.close()
-        try:
-            rank_components=json.loads(row["ranking_components_json"] or "{}")
-        except (ValueError,TypeError):
-            rank_components={}
-        event_fraction=None
-        raw_event_time=rank_components.get("event_time_seconds") if isinstance(rank_components,dict) else None
-        if (
-            isinstance(raw_event_time,(int,float))
-            and not isinstance(raw_event_time,bool)
-            and math.isfinite(float(raw_event_time))
-            and end>start
-        ):
-            candidate_fraction=(float(raw_event_time)-start)/(end-start)
-            if 0.0<=candidate_fraction<=1.0:
-                event_fraction=candidate_fraction
-        frame_fractions=vision_sampling_fractions(event_fraction)
-        frame_times=[round(start+(end-start)*fraction,3) for fraction in frame_fractions]
-        relative_frame_times=[round(frame_time-start,3) for frame_time in frame_times]
-        images=[]
-        with tempfile.TemporaryDirectory(prefix="gcf-vision-") as temp:
-            for index,frame_time in enumerate(frame_times):
-                frame=Path(temp)/f"frame-{index}.jpg"
-                args=[self.ffmpeg,"-hide_banner","-loglevel","error","-nostdin","-ss",f"{frame_time:.3f}","-i",str(source),"-frames:v","1","-vf","scale=768:-2","-q:v","3","-y",str(frame)]
-                run(args,min(45,self.timeout))
-                if not frame.is_file() or frame.stat().st_size<=0:
-                    raise RuntimeError(f"FFmpeg did not extract candidate sample frame at {frame_time:.3f}s.")
-                images.append(frame.read_bytes())
-        result=assess_candidate_images(images,str(row["game"] or ""),str(row["source_title"] or ""),transcript_excerpt,frame_times_seconds=relative_frame_times)
+
+        batched_inputs=[]
+        sampled_by_id={}
+        with tempfile.TemporaryDirectory(prefix="gcf-openrouter-frames-") as temp:
+            for index,row in enumerate(rows, start=1):
+                start=float(row["start_seconds"])
+                end=float(row["end_seconds"])
+                if start<0 or end<=start:
+                    raise ValueError("Candidate time boundaries are invalid.")
+                try:
+                    components=json.loads(row["ranking_components_json"] or "{}")
+                except (ValueError,TypeError):
+                    components={}
+                raw_event_time=components.get("event_time_seconds") if isinstance(components,dict) else None
+                event_fraction=None
+                if isinstance(raw_event_time,(int,float)) and not isinstance(raw_event_time,bool) and math.isfinite(float(raw_event_time)) and end>start:
+                    candidate_fraction=(float(raw_event_time)-start)/(end-start)
+                    if 0<=candidate_fraction<=1:
+                        event_fraction=candidate_fraction
+                fractions=sampling_fractions(event_fraction)
+                frame_times=[round(start+(end-start)*fraction,3) for fraction in fractions]
+                relative_times=[round(value-start,3) for value in frame_times]
+                images=[]
+                for frame_index,frame_time in enumerate(frame_times):
+                    frame=Path(temp)/f"candidate-{index}-frame-{frame_index}.jpg"
+                    args=[self.ffmpeg,"-hide_banner","-loglevel","error","-nostdin","-ss",f"{frame_time:.3f}",
+                          "-i",str(Path(row["original_path"]).resolve()),"-frames:v","1",
+                          "-vf","scale=512:-2:flags=fast_bilinear","-q:v","5","-y",str(frame)]
+                    run(args,min(45,self.timeout))
+                    if not frame.is_file() or frame.stat().st_size<=0:
+                        raise RuntimeError(f"FFmpeg did not extract AI-judgment frame at {frame_time:.3f}s.")
+                    images.append(frame.read_bytes())
+                excerpts=[
+                    str(item["text"]) for item in transcript_rows
+                    if float(item["end_seconds"])>start and float(item["start_seconds"])<end
+                ]
+                candidate_key=f"C{index}"
+                sampled_by_id[row["id"]]={"source_times":frame_times,"relative_times":relative_times}
+                batched_inputs.append({
+                    "candidate_key":candidate_key,
+                    "images":images,
+                    "game":str(row["game"] or ""),
+                    "source_title":str(row["source_title"] or ""),
+                    "start_seconds":start,
+                    "end_seconds":end,
+                    "event_time_seconds":round(float(raw_event_time)-start,3) if isinstance(raw_event_time,(int,float)) and not isinstance(raw_event_time,bool) and math.isfinite(float(raw_event_time)) else None,
+                    "signal_score":float(row["ranking_score"]) if row["ranking_score"] is not None else 0.0,
+                    "transcript_excerpt":" ".join(excerpts)[:600],
+                    "frame_times_seconds":relative_times,
+                })
+
+            results=assess_candidate_batch(batched_inputs)
+
+        result_by_id={row["id"]:dict(result) for row,result in zip(rows,results)}
+        # Persist results only after the complete batch validates. Rights and candidate
+        # state are checked again after network inference before any record is changed.
         t=now()
         c=connect(self.db)
         try:
-            # Re-check rights after inference, immediately before persisting/ranking.
-            latest=c.execute("""SELECT cm.state,p.status AS rights_status,p.expires_at,cm.ranking_score,cm.ranking_components_json
-                FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
-                JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
-            if not latest: raise FileNotFoundError("Candidate disappeared during vision analysis.")
-            if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
-                raise PermissionError("Rights expired during vision analysis; results were not applied.")
-            if latest["state"]!="NEEDS_REVIEW":
-                raise PermissionError("Candidate state changed while vision analysis was running; results were not applied.")
-            c.execute("""INSERT INTO candidate_vision_assessments(id,candidate_id,model_name,status,gameplay_context,event_type,visible_event,
-                is_actionable_highlight,highlight_score,confidence,evidence_json,quality_issues_json,frame_times_json,raw_response_json,error,created_at,updated_at)
-                VALUES(?,?,?,'COMPLETED',?,?,?,?,?,?,?,?,?,?, '',?,?)
-                ON CONFLICT(candidate_id) DO UPDATE SET model_name=excluded.model_name,status='COMPLETED',
-                gameplay_context=excluded.gameplay_context,event_type=excluded.event_type,visible_event=excluded.visible_event,
-                is_actionable_highlight=excluded.is_actionable_highlight,highlight_score=excluded.highlight_score,confidence=excluded.confidence,
-                evidence_json=excluded.evidence_json,quality_issues_json=excluded.quality_issues_json,frame_times_json=excluded.frame_times_json,
-                raw_response_json=excluded.raw_response_json,error='',updated_at=excluded.updated_at""",
-                (assessment_id,cid,result["model_name"],result["gameplay_context"],result["event_type"],result["visible_event"],
-                 int(result["is_actionable_highlight"]),result["highlight_score"],result["confidence"],json.dumps(result["evidence"]),
-                 json.dumps(result["quality_issues"]),json.dumps(frame_times),json.dumps(result),t,t))
-            try: components=json.loads(latest["ranking_components_json"] or "{}")
-            except (ValueError,TypeError): components={}
-            base=float(latest["ranking_score"]) if latest["ranking_score"] is not None else 0.45
-            confidence=result["confidence"]
-            evidence_score=(0.7*result["highlight_score"]+0.3*base)
-            combined=round(max(0,min(1,confidence*evidence_score+(1-confidence)*base)),4)
-            components.update({"vision_model":result["model_name"],"vision_event_type":result["event_type"],
-                "vision_confidence":confidence,"vision_highlight_score":result["highlight_score"],
-                "vision_assessment_method":"local-vision-model-estimate","vision_score_calibrated":False,
-                "vision_frame_times_seconds":frame_times,"vision_relative_frame_times_seconds":relative_frame_times,"vision_sample_count":len(frame_times)})
-            c.execute("UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",(combined,json.dumps(components),cid))
-            # Opt-in unattended rendering is allowed only after the conservative
-            # semantic gate passes. Signal-only heuristics never select content for
-            # automatic rendering; the rendered artifact still requires QC and owner review.
-            auto_render_queued=False
-            if is_render_worthy_vision_assessment(result):
+            c.execute("BEGIN IMMEDIATE")
+            paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
+            if paused and paused["value"]=="true":
+                raise PermissionError("AI judgment completed while processing was paused; results were not applied.")
+            try:
+                max_auto_outputs=max(1,min(AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA,int(payload.get("max_auto_outputs",AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA))))
+            except (TypeError,ValueError):
+                max_auto_outputs=AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA
+            auto_produce=bool(payload.get("auto_produce"))
+            render_profile=payload.get("render_profile","blur_fill")
+            if render_profile not in {"blur_fill","fit_pad"}:
+                render_profile="blur_fill"
+            summaries=[]
+            auto_render_count=0
+            for row in rows:
+                cid=row["id"]
+                result=result_by_id[cid]
+                frame_data=sampled_by_id[cid]
+                latest=c.execute("""SELECT cm.state,cm.ranking_score,cm.ranking_components_json,
+                    p.status AS rights_status,p.expires_at
+                    FROM candidate_moments cm JOIN media_assets m ON m.id=cm.media_id
+                    JOIN source_permissions p ON p.source_id=m.source_id WHERE cm.id=?""",(cid,)).fetchone()
+                if not latest:
+                    raise FileNotFoundError("Candidate disappeared during OpenRouter inference.")
+                if latest["rights_status"]!="AUTHORIZED" or expiry_passed(latest["expires_at"]):
+                    raise PermissionError("Rights expired during AI judgment; results were not applied.")
+                if latest["state"]!="NEEDS_REVIEW":
+                    raise PermissionError("Candidate state changed while AI judgment was running; results were not applied.")
+                assessment_id=old_assessments.get(cid) or str(uuid4())
+                saved_result={key:value for key,value in result.items() if key!="candidate_key"}
+                saved_result["source_frame_times_seconds"]=frame_data["source_times"]
+                saved_result["sample_frame_times_seconds"]=frame_data["relative_times"]
+                c.execute("""INSERT INTO candidate_vision_assessments(id,candidate_id,model_name,status,gameplay_context,event_type,visible_event,
+                    is_actionable_highlight,highlight_score,confidence,evidence_json,quality_issues_json,frame_times_json,raw_response_json,error,created_at,updated_at)
+                    VALUES(?,?,?,'COMPLETED',?,?,?,?,?,?,?,?,?,?, '',?,?)
+                    ON CONFLICT(candidate_id) DO UPDATE SET model_name=excluded.model_name,status='COMPLETED',
+                    gameplay_context=excluded.gameplay_context,event_type=excluded.event_type,visible_event=excluded.visible_event,
+                    is_actionable_highlight=excluded.is_actionable_highlight,highlight_score=excluded.highlight_score,confidence=excluded.confidence,
+                    evidence_json=excluded.evidence_json,quality_issues_json=excluded.quality_issues_json,frame_times_json=excluded.frame_times_json,
+                    raw_response_json=excluded.raw_response_json,error='',updated_at=excluded.updated_at""",
+                    (assessment_id,cid,result["model_name"],result["gameplay_context"],result["event_type"],result["visible_event"],
+                     int(result["is_actionable_highlight"]),result["highlight_score"],result["confidence"],json.dumps(result["evidence"]),
+                     json.dumps(result["quality_issues"]),json.dumps(frame_data["source_times"]),json.dumps(saved_result),t,t))
+                try:
+                    components=json.loads(latest["ranking_components_json"] or "{}")
+                except (ValueError,TypeError):
+                    components={}
+                base=float(latest["ranking_score"]) if latest["ranking_score"] is not None else 0.45
+                confidence=float(result["confidence"])
+                evidence_score=0.7*float(result["highlight_score"])+0.3*base
+                combined=round(max(0,min(1,confidence*evidence_score+(1-confidence)*base)),4)
+                components.update({
+                    "ai_judge_provider":"OpenRouter",
+                    "ai_judge_model":result["model_name"],
+                    "ai_judge_configured_model":result.get("configured_model",os.getenv("GCF_OPENROUTER_MODEL","openrouter/free")),
+                    "ai_judge_event_type":result["event_type"],
+                    "ai_judge_confidence":confidence,
+                    "ai_judge_highlight_score":result["highlight_score"],
+                    "ai_judge_assessment_method":"openrouter_multimodal_highlight_judge",
+                    "ai_judge_score_calibrated":False,
+                    "ai_judge_source_frame_times_seconds":frame_data["source_times"],
+                    "ai_judge_sample_count":len(frame_data["source_times"]),
+                })
+                c.execute("UPDATE candidate_moments SET ranking_score=?,ranking_components_json=? WHERE id=?",
+                          (combined,json.dumps(components),cid))
+
                 watch=c.execute("""SELECT w.id,w.enabled,w.auto_analyze,w.auto_render,
                     p.status AS rights_status,p.expires_at
-                    FROM media_folder_watches w
-                    JOIN watched_media_files f ON f.watch_id=w.id
+                    FROM media_folder_watches w JOIN watched_media_files f ON f.watch_id=w.id
                     JOIN source_permissions p ON p.source_id=w.source_id
-                    WHERE w.source_id=? AND f.media_id=?""",(row["source_id"],row["media_id"])).fetchone()
-                paused=c.execute("SELECT value FROM settings WHERE key='global_paused'").fetchone()
-                already_auto_rendered=int(c.execute("SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",(row["media_id"],)).fetchone()[0])
-                if (watch and bool(watch["enabled"]) and bool(watch["auto_analyze"]) and bool(watch["auto_render"])
+                    WHERE w.source_id=? AND f.media_id=? AND w.enabled=1
+                    ORDER BY w.created_at DESC LIMIT 1""",(row["source_id"],row["media_id"])).fetchone()
+                folder_auto_render=bool(
+                    watch and watch["enabled"] and watch["auto_analyze"] and watch["auto_render"]
                     and watch["rights_status"]=="AUTHORIZED" and not expiry_passed(watch["expires_at"])
-                    and not (paused and paused["value"]=="true")
-                    and already_auto_rendered < AUTO_RENDER_MAX_CANDIDATES_PER_MEDIA):
+                )
+                should_auto_render=auto_produce or folder_auto_render
+                already_auto_rendered=int(c.execute(
+                    "SELECT COUNT(*) FROM candidate_moments WHERE media_id=? AND auto_rendered=1",
+                    (row["media_id"],),
+                ).fetchone()[0])
+                if (should_auto_render and is_render_worthy_vision_assessment(result)
+                    and already_auto_rendered < max_auto_outputs):
                     changed=c.execute("UPDATE candidate_moments SET state='APPROVED',auto_rendered=1 WHERE id=? AND state='NEEDS_REVIEW' AND auto_rendered=0",(cid,))
                     if changed.rowcount==1:
                         render_job_id=str(uuid4()); render_stamp=now()
                         c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
                             VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
                             (render_job_id,row["source_id"],row["media_id"],json.dumps({
-                                "candidate_id":cid,"render_profile":"blur_fill",
-                                "auto_render_reason":"authorized_folder_watch_vision_gate",
-                                "folder_watch_id":watch["id"],"human_final_review_required":True,
-                                "vision_gate":{"event_type":result["event_type"],"highlight_score":result["highlight_score"],
-                                    "confidence":result["confidence"],"quality_issues":result["quality_issues"]},
+                                "candidate_id":cid,"render_profile":render_profile,
+                                "auto_render_reason":"openrouter_ai_judged_highlight",
+                                "folder_watch_id":watch["id"] if watch else payload.get("folder_watch_id"),
+                                "human_final_review_required":True,"public_publish_queued":False,
+                                "ai_judge_gate":{"model":result["model_name"],"event_type":result["event_type"],
+                                    "highlight_score":result["highlight_score"],"confidence":confidence,
+                                    "quality_issues":result["quality_issues"]},
                             }),render_stamp,render_stamp))
-                        auto_render_queued=True
-                        event(c,"INFO","folder_watch.auto_render_queued","Queued a vision-qualified candidate for local rendering; owner review remains required.",
-                            {"candidate_id":cid,"media_id":row["media_id"],"rights_rechecked":True,"public_publish_queued":False,
-                             "human_final_review_required":True,"vision_gate_passed":True})
-            summary={"candidate_id":cid,"assessment_id":assessment_id,"model_name":result["model_name"],"event_type":result["event_type"],
-                "highlight_score":result["highlight_score"],"confidence":confidence,"combined_ranking_score":combined,
-                "score_calibrated":False,"automatic_approval":auto_render_queued,"auto_render_queued":auto_render_queued,"vision_render_gate_passed":is_render_worthy_vision_assessment(result),"sampled_frame_times_seconds":frame_times,"relative_frame_times_seconds":relative_frame_times,"sample_count":len(frame_times)}
-            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",(json.dumps(summary),t,t,job["id"]))
-            event(c,"INFO","vision.assessment_completed","Local vision assessment saved; unattended rendering occurs only when the explicit folder-watch and strict semantic quality gates pass.",{"job_id":job["id"],**summary})
+                        auto_render_count+=1
+                summaries.append({
+                    "candidate_id":cid,"assessment_id":assessment_id,"model_name":result["model_name"],
+                    "event_type":result["event_type"],"highlight_score":result["highlight_score"],
+                    "confidence":confidence,"combined_ranking_score":combined,"score_calibrated":False,
+                    "auto_render_queued":bool(c.execute(
+                        "SELECT 1 FROM jobs WHERE job_type='RENDER_CANDIDATE' AND media_id=? AND status IN ('QUEUED','RUNNING') AND payload_json LIKE ? LIMIT 1",
+                        (row["media_id"],"%" + cid + "%"),
+                    ).fetchone()),
+                    "sampled_frame_times_seconds":frame_data["source_times"],
+                    "relative_frame_times_seconds":frame_data["relative_times"],
+                    "sample_count":len(frame_data["source_times"]),
+                })
+            c.execute("UPDATE jobs SET status='COMPLETED',payload_json=?,error='',updated_at=?,finished_at=? WHERE id=?",
+                      (json.dumps({"candidate_count":len(summaries),"candidates":summaries,"provider":"OpenRouter",
+                                   "configured_model":os.getenv("GCF_OPENROUTER_MODEL","openrouter/free"),
+                                   "auto_produce":auto_produce,"auto_render_queued":auto_render_count,
+                                   "automatic_approval":False,"public_publish_queued":False}),t,t,job["id"]))
+            event(c,"INFO","ai_judge.batch_completed",
+                "OpenRouter multimodal highlight judgment saved; approved outputs were queued for local rendering only where the semantic gate passed.",
+                {"job_id":job["id"],"media_id":rows[0]["media_id"],"candidate_count":len(summaries),
+                 "auto_produce":auto_produce,"auto_render_queued":auto_render_count,"public_publish_queued":False})
             c.commit()
-        finally:
-            c.close()
-
+        except Exception:
+            c.rollback()
+            raise
 
     def draft_narration_script(self, job):
         if os.getenv("GCF_ENABLE_SCRIPT_DRAFTING","").lower()!="true":
