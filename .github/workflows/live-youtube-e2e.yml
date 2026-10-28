@@ -7,7 +7,7 @@ on:
         description: "HTTPS URL of a video you own or have explicit editing permission for"
         required: true
         type: string
-        default: "https://www.youtube.com/watch?v=W8bIC5C8FgU"
+        default: ""
       owner_authorized:
         description: "Confirm that you own this video or have explicit permission to download/edit it"
         required: true
@@ -28,13 +28,13 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: "22.13.1"
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install FFmpeg
@@ -48,9 +48,9 @@ jobs:
           & (Join-Path $chocoBin "ffprobe.exe") -version
       - name: Install hashed backend dependencies
         run: python -m pip install --require-hashes -r backend/requirements-lock-win-py312.txt
-      - name: Install Remotion dependencies
+      - name: Install locked Remotion dependencies
         working-directory: remotion
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       - name: Download the authorized video, analyze it, and render a Short
         shell: pwsh
         env:

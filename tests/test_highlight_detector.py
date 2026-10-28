@@ -100,3 +100,23 @@ def test_unattended_render_gate_fails_closed_on_malformed_assessments():
     assert not is_render_worthy_vision_assessment({
         "status":"COMPLETED","is_actionable_highlight":True,"event_type":"elimination",
         "highlight_score":float("nan"),"confidence":0.9,"quality_issues":[],"evidence":["HUD"]})
+
+def test_ranker_scales_to_hour_long_recordings_and_keeps_distinct_event_anchors():
+    """A normal recording may contain thousands of one-second audio measurements."""
+    duration = 3600.0
+    samples = [(float(t), -30.0) for t in range(int(duration))]
+    for peak in (705, 2205, 3305):
+        samples[peak - 1] = (float(peak - 1), -8.0)
+        samples[peak] = (float(peak), -2.0)
+        samples[peak + 1] = (float(peak + 1), -7.0)
+    scenes = [float(t) for t in range(0, int(duration), 17)]
+
+    candidates = rank_highlight_windows(duration, scenes, samples, max_candidates=25)
+
+    assert candidates
+    event_times = [item["event_time_seconds"] for item in candidates]
+    assert any(abs(t - 705.0) <= 1.0 for t in event_times)
+    assert any(abs(t - 2205.0) <= 1.0 for t in event_times)
+    assert any(abs(t - 3305.0) <= 1.0 for t in event_times)
+    assert len(candidates) <= 25
+    assert all(0 <= item["start_seconds"] < item["end_seconds"] <= duration for item in candidates)

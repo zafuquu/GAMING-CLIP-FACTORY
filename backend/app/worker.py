@@ -544,7 +544,7 @@ class Worker(threading.Thread):
                             VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
                             (render_job_id,m["source_id"],m["id"],json.dumps({
                                 "candidate_id":candidate["id"],
-                                "render_profile":"fit_pad",
+                                "render_profile":"blur_fill",
                                 "auto_render_reason":"authorized_folder_watch",
                                 "folder_watch_id":folder_watch_id,
                                 "human_final_review_required":True,
@@ -703,7 +703,7 @@ class Worker(threading.Thread):
             captions_burned=False
             caption_filter_warning=False
             remotion_captions=[]
-            render_profile=str(payload.get("render_profile","fit_pad"))
+            render_profile=str(payload.get("render_profile","blur_fill"))
             subtitle_filter=None
             if caption_rows:
                 caption_path=output.with_suffix(".srt")
@@ -768,6 +768,7 @@ class Worker(threading.Thread):
                     args += ["-map","0:a?"]
             args += ["-c:v","libx264","-preset","veryfast","-crf","21","-pix_fmt","yuv420p","-c:a","aac","-b:a","128k","-movflags","+faststart",str(output)]
             remotion_props_path=None
+            remotion_encoder_settings=None
             try:
                 if render_engine=="remotion":
                     remotion_props_path=output_dir/(".remotion-props-"+uuid4().hex+".json")
@@ -785,7 +786,16 @@ class Worker(threading.Thread):
                         remotion_timeout=max(self.timeout,min(3600,max(30,int(os.getenv("GCF_REMOTION_TIMEOUT_SECONDS","900")))))
                     except (TypeError,ValueError):
                         remotion_timeout=max(self.timeout,900)
-                    run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],remotion_timeout)
+                    remotion_result=run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],remotion_timeout)
+                    try:
+                        remotion_summary=json.loads(remotion_result.stdout or "")
+                    except (ValueError,TypeError) as exc:
+                        raise RuntimeError("Remotion renderer did not return valid structured output metadata.") from exc
+                    if not isinstance(remotion_summary,dict) or remotion_summary.get("ok") is not True:
+                        raise RuntimeError("Remotion renderer did not confirm a successful output.")
+                    remotion_encoder_settings=remotion_summary.get("encoding")
+                    if not isinstance(remotion_encoder_settings,dict) or remotion_encoder_settings.get("crf") is None:
+                        raise RuntimeError("Remotion renderer omitted the encoder quality settings from its output report.")
                     captions_burned=bool(remotion_captions)
                 else:
                     run(args,self.timeout)
@@ -883,7 +893,7 @@ class Worker(threading.Thread):
                     try: thumbnail.unlink(missing_ok=True)
                     except OSError: pass
                     warnings.append("local_thumbnail_generation_failed")
-            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"render_engine":render_engine,"profile_notes":profile_warning(render_profile),"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
+            report={"passed":qc_status=="PASS","checks":{"nonempty":True,"video_stream":True,"dimensions":"1080x1920","video_codec":video.get("codec_name"),"audio_codec":audio.get("codec_name") if audio else None,"duration_seconds":duration,"source_audio_present":source_has_audio,"output_audio_present":bool(audio),"narration_mixed":bool(narration_path),"narration_audio_path":str(narration_path) if narration_path else None,"narration_audio_sha256":narration_sha,"narration_audio_duration_seconds":narration_duration,"ffmpeg_decode_scan":"PASS","black_intervals":black_events,"freeze_intervals":freeze_events,"local_thumbnail_generated":bool(thumbnail_path),"local_thumbnail_dimensions":[thumbnail_width,thumbnail_height] if thumbnail_path else None,"local_thumbnail_error":thumbnail_error},"layout":render_profile,"render_profile":render_profile,"render_engine":render_engine,"profile_notes":profile_warning(render_profile),"remotion_encoder_settings":remotion_encoder_settings,"caption_safe_area":{"style_margin_v":180,"automated_visual_safe_area_check":False},"caption_sidecar_path":str(caption_path) if caption_path and caption_path.is_file() else None,"captions_burned":captions_burned,"warnings":warnings}
             out_id=str(uuid4()); t=now()
             # Serialize the final authorization check with permission revocation and record
             # the render plus any automated private-upload intent in the same SQLite transaction.
@@ -2163,7 +2173,7 @@ class Worker(threading.Thread):
                         c.execute("""INSERT INTO jobs(id,job_type,status,source_id,media_id,payload_json,created_at,updated_at)
                             VALUES(?,'RENDER_CANDIDATE','QUEUED',?,?, ?,?,?)""",
                             (render_job_id,row["source_id"],row["media_id"],json.dumps({
-                                "candidate_id":cid,"render_profile":"fit_pad",
+                                "candidate_id":cid,"render_profile":"blur_fill",
                                 "auto_render_reason":"authorized_folder_watch_vision_gate",
                                 "folder_watch_id":watch["id"],"human_final_review_required":True,
                                 "vision_gate":{"event_type":result["event_type"],"highlight_score":result["highlight_score"],

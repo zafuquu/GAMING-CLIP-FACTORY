@@ -47,11 +47,26 @@ try {
     outputPath,
     startSeconds: 0.5,
     durationSeconds: 2,
-    profile: "fit_pad",
+    profile: "blur_fill",
     captions: [{ startFrame: 5, endFrame: 25, text: "Synthetic render test" }],
   }), "utf8");
 
-  run(node, [path.join(ROOT, "render.mjs"), "--props-file", propsPath], 240000);
+  const renderResult = run(node, [path.join(ROOT, "render.mjs"), "--props-file", propsPath], 240000);
+  const renderSummary = JSON.parse(renderResult.stdout);
+  const expectedCrf = Number(process.env.GCF_REMOTION_CRF ?? "16");
+  const expectedPreset = String(process.env.GCF_REMOTION_X264_PRESET ?? "slow").toLowerCase();
+  const expectedAudioBitrate = String(process.env.GCF_REMOTION_AUDIO_BITRATE ?? "192K").toUpperCase();
+  if (
+    renderSummary.ok !== true ||
+    renderSummary.profile !== "blur_fill" ||
+    renderSummary.encoding?.codec !== "h264" ||
+    renderSummary.encoding?.crf !== expectedCrf ||
+    renderSummary.encoding?.x264Preset !== expectedPreset ||
+    renderSummary.encoding?.audioCodec !== "aac" ||
+    renderSummary.encoding?.audioBitrate !== expectedAudioBitrate
+  ) {
+    throw new Error(`Remotion reported unexpected output/encoder settings: ${JSON.stringify(renderSummary)}`);
+  }
 
   const probe = run(ffprobe, [
     "-v", "error", "-show_streams", "-show_format", "-of", "json", outputPath,
@@ -74,6 +89,17 @@ try {
   if (outputStat.size <= 1000) {
     throw new Error("Smoke render output is unexpectedly small.");
   }
+  const frameProbe = run(ffmpeg, [
+    "-hide_banner", "-loglevel", "error", "-i", outputPath,
+    "-vf", "fps=2,scale=32:32", "-f", "framemd5", "-",
+  ]);
+  const frameHashes = frameProbe.stdout
+    .split(/\r?\n/)
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => line.split(",").pop().trim());
+  if (new Set(frameHashes).size < 2) {
+    throw new Error("Rendered output did not preserve changing gameplay frames.");
+  }
 
   process.stdout.write(JSON.stringify({
     ok: true,
@@ -83,6 +109,9 @@ try {
     video: { codec: video.codec_name, width: video.width, height: video.height },
     audio: { codec: audio.codec_name, sampleRate: audio.sample_rate },
     durationSeconds: duration,
+    profile: renderSummary.profile,
+    encoding: renderSummary.encoding,
+    distinctSampledFrames: new Set(frameHashes).size,
   }, null, 2) + "\n");
 } finally {
   await rm(workDir, { recursive: true, force: true });

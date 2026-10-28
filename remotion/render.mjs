@@ -21,6 +21,28 @@ async function exists(file) {
   }
 }
 
+const VALID_X264_PRESETS = new Set([
+  "ultrafast", "superfast", "veryfast", "faster", "fast",
+  "medium", "slow", "slower", "veryslow", "placebo",
+]);
+
+function resolveEncodingSettings() {
+  const rawCrf = process.env.GCF_REMOTION_CRF ?? "16";
+  const crf = Number(rawCrf);
+  if (!Number.isInteger(crf) || crf < 12 || crf > 24) {
+    fail("GCF_REMOTION_CRF must be an integer from 12 to 24 (lower means higher quality and larger files).");
+  }
+  const x264Preset = String(process.env.GCF_REMOTION_X264_PRESET ?? "slow").trim().toLowerCase();
+  if (!VALID_X264_PRESETS.has(x264Preset)) {
+    fail("GCF_REMOTION_X264_PRESET must be a valid x264 preset (for high quality, use slow or slower).");
+  }
+  const audioBitrate = String(process.env.GCF_REMOTION_AUDIO_BITRATE ?? "192K").trim().toUpperCase();
+  if (!["128K", "160K", "192K", "256K", "320K"].includes(audioBitrate)) {
+    fail("GCF_REMOTION_AUDIO_BITRATE must be one of 128K, 160K, 192K, 256K, or 320K.");
+  }
+  return { crf, x264Preset, audioBitrate };
+}
+
 function parseArgs(argv) {
   const result = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -62,6 +84,7 @@ async function main() {
   if (!profile) {
     fail("Unsupported Remotion profile. Expected fit_pad or blur_fill.");
   }
+  const encoding = resolveEncodingSettings();
   if (await exists(outputPath)) {
     fail("Remotion refuses to overwrite an existing output file.");
   }
@@ -132,10 +155,10 @@ async function main() {
       inputProps,
       codec: "h264",
       audioCodec: "aac",
-      audioBitrate: "128K",
+      audioBitrate: encoding.audioBitrate,
       pixelFormat: "yuv420p",
-      crf: 21,
-      x264Preset: "veryfast",
+      crf: encoding.crf,
+      x264Preset: encoding.x264Preset,
       concurrency: Math.max(1, Math.min(2, os.cpus().length)),
       logLevel: "error",
     });
@@ -153,6 +176,14 @@ async function main() {
       durationSeconds,
       width: 1080,
       height: 1920,
+      profile,
+      encoding: {
+        codec: "h264",
+        crf: encoding.crf,
+        x264Preset: encoding.x264Preset,
+        audioCodec: "aac",
+        audioBitrate: encoding.audioBitrate,
+      },
     }) + "\n");
   } finally {
     if (!succeeded) {

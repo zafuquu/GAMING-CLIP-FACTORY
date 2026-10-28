@@ -46,7 +46,7 @@ class MediaIn(BaseModel):
 class CandidateDecisionIn(BaseModel):
     decision: str
     notes: str = ""
-    render_profile: str = "fit_pad"
+    render_profile: str = "blur_fill"
     @model_validator(mode="after")
     def check_decision(self):
         if self.decision not in {"approve","reject"}:

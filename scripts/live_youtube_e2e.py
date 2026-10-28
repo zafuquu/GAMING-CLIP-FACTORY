@@ -169,7 +169,7 @@ def main() -> int:
             decision = client.post(f"/api/candidates/{candidate['id']}/decision", json={
                 "decision": "approve",
                 "notes": "Owner-authorized acceptance test; verify render mechanics, not highlight quality.",
-                "render_profile": "fit_pad",
+                "render_profile": "blur_fill",
             })
             require(decision.status_code == 202, f"Candidate approval/render queue failed: {decision.text}")
             render_job = wait_job(client, worker, decision.json()["job_id"], timeout=3600)

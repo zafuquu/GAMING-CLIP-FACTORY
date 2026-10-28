@@ -8,6 +8,8 @@ from __future__ import annotations
 import math
 import re
 import statistics
+from bisect import bisect_left, bisect_right
+from collections import deque
 from collections.abc import Sequence
 
 _TIMESTAMP = re.compile(r"pts_time:([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
@@ -148,37 +150,42 @@ def rank_highlight_windows(
     has_audio_samples = len(audio_scores) >= 3
     event_times: set[float] = set(scenes)
 
-    # Only local maxima become audio event anchors. A single loud passage should
-    # not create one nearly-identical candidate for every one-second sample.
+    # Indexed time windows keep long recordings fast. The monotonic deque
+    # computes each +/-2-second local maximum in O(n); equal peaks keep the
+    # earliest sample so plateaus have stable, deterministic anchors.
+    sample_times = [timestamp for timestamp, _ in audio_scores]
+    sample_values = [score for _, score in audio_scores]
+    peak_window: deque[int] = deque()
+    right = 0
     for index, (timestamp, activity) in enumerate(audio_scores):
-        if activity < 0.42:
-            continue
-        neighborhood = [
-            score for other_time, score in audio_scores
-            if abs(other_time - timestamp) <= 2.0
-        ]
-        if not neighborhood or activity < max(neighborhood) - 1e-9:
-            continue
-        earlier_tie = any(
-            other_time < timestamp
-            and abs(other_time - timestamp) <= 2.0
-            and score >= activity - 1e-9
-            for other_time, score in audio_scores
-        )
-        if not earlier_tie:
+        while right < len(audio_scores) and sample_times[right] <= timestamp + 2.0:
+            while peak_window and sample_values[peak_window[-1]] < sample_values[right] - 1e-9:
+                peak_window.pop()
+            peak_window.append(right)
+            right += 1
+        while peak_window and sample_times[peak_window[0]] < timestamp - 2.0:
+            peak_window.popleft()
+        if activity >= 0.42 and peak_window and peak_window[0] == index:
             event_times.add(timestamp)
 
     if not event_times:
         return []
 
     def nearby_audio_activity(timestamp: float) -> float:
-        nearby = [score for sample_time, score in audio_scores if abs(sample_time - timestamp) <= 2.0]
-        return max(nearby, default=0.0)
+        left = bisect_left(sample_times, timestamp - 2.0)
+        right_index = bisect_right(sample_times, timestamp + 2.0)
+        return max(sample_values[left:right_index], default=0.0)
 
     def scene_proximity(timestamp: float) -> float:
         if not scenes:
             return 0.0
-        distance = min(abs(value - timestamp) for value in scenes)
+        index = bisect_left(scenes, timestamp)
+        distances = []
+        if index < len(scenes):
+            distances.append(abs(scenes[index] - timestamp))
+        if index > 0:
+            distances.append(abs(scenes[index - 1] - timestamp))
+        distance = min(distances, default=math.inf)
         return round(max(0.0, 1.0 - distance / 4.0), 4)
 
     proposals = []
