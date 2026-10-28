@@ -12,3 +12,4 @@ frontend/dist/
 *.sqlite3*
 logs/
 outputs/
+remotion/.gcf-dependency-locks.sha256

@@ -49,6 +49,12 @@ if not "%TEST_STATUS%"=="0" (
   echo ERROR: Remotion smoke test failed. Keep GCF_RENDER_ENGINE=ffmpeg until this is fixed.
   exit /b 1
 )
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\remotion-lock-state.ps1" -Mode write
+if errorlevel 1 (
+  echo ERROR: Could not record the successful Remotion dependency lock fingerprint.
+  exit /b 1
+)
 echo.
 echo Remotion runtime installed and the synthetic render smoke test passed.
 echo To use Remotion, set GCF_RENDER_ENGINE=remotion in .env and restart the app.

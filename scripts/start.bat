@@ -78,6 +78,8 @@ findstr /R /C:"^[ ]*GCF_RENDER_ENGINE=remotion[ ]*$" ".env" >nul
 if errorlevel 1 goto remotion_ready
 if not exist "remotion\node_modules\@remotion\renderer\package.json" goto setup_remotion_runtime
 if not exist "remotion\node_modules\@remotion\bundler\package.json" goto setup_remotion_runtime
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\remotion-lock-state.ps1" -Mode test >nul 2>nul
+if errorlevel 1 goto setup_remotion_runtime
 goto remotion_ready
 :setup_remotion_runtime
 echo.
