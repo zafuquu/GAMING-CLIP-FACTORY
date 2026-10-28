@@ -2,6 +2,23 @@
 
 Local-first, rights-gated Windows software for producing gaming clips. This repository now contains a substantial development alpha: local API/dashboard, persistent jobs, metadata discovery, optional local transcription and OpenRouter AI highlight judgment, FFmpeg rendering/QC, thumbnails and credential-gated YouTube services. It is **not fully hands-off end-to-end on a fresh machine**: provider credentials, actual footage rights, optional model weights, a YouTube channel connection and local acceptance tests are still needed.
 
+## One-click Windows install, start, and stop
+
+The repository root now includes three double-click launchers:
+
+- `INSTALL.bat` — one-time setup. It checks/attempts to install Python, Node.js, and FFmpeg with Windows Package Manager (winget) when missing, installs the pinned application dependencies, and installs Remotion and runs its synthetic render smoke test. If a newly installed tool is not visible until PATH refreshes, close the window and run `INSTALL.bat` again.
+- `START.bat` — builds/checks the dashboard as needed, starts the local backend/worker, runs readiness checks, and opens the dashboard.
+- `STOP.bat` — safely stops the app's managed backend process.
+
+Recommended first run:
+
+1. Install Git and clone/download this repository.
+2. Double-click `INSTALL.bat` and let it finish. If Windows asks for confirmation to install prerequisites, review and approve the package-manager prompts.
+3. Edit `.env` and add your private `GCF_OPENROUTER_API_KEY`. Keep YouTube publishing disabled while testing.
+4. Double-click `START.bat`; use `STOP.bat` when finished.
+
+The installer does not install optional local LLMs, download model weights, or enable YouTube publishing. It requires Windows Package Manager for automatic prerequisite installation; if winget is unavailable, install missing prerequisites manually. A successful installation or synthetic render is not proof that real gameplay highlights are accurate—the real-footage workflow must still be tested locally.
+
 ## Windows-first setup for OpenRouter AI highlight judgment
 
 Gaming Clip Factory detects candidate events locally with FFmpeg (audio RMS changes, scene transitions, and low-resolution visual motion). For semantic judgment, it can send a bounded batch of candidate frames to OpenRouter's `openrouter/free` router, which chooses an available free model that supports image input. The full source video stays on your computer; sampled frames and prompt context are sent to OpenRouter. No local LLM weights, paid model, or local model server are required.
