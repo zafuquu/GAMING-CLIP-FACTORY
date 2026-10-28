@@ -69,9 +69,14 @@ jobs:
   remotion-render-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
+      - name: Checkout PR head for lockfile bootstrap
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref || github.sha }}
+          fetch-depth: 0
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -86,9 +91,28 @@ jobs:
           sudo apt-get install --yes ffmpeg
       - name: Install backend test dependencies
         run: python -m pip install --require-hashes -r backend/requirements-lock-linux-py312.txt
-      - name: Install exact top-level Remotion dependencies
+      - name: Generate Remotion package lock
         working-directory: remotion
         run: npm install --no-audit --no-fund
+      - name: One-time bootstrap commit for the missing lockfile
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
+        run: |
+          git add remotion/package-lock.json
+          if git diff --cached --quiet -- remotion/package-lock.json; then
+            echo "Remotion lockfile already committed; no bootstrap commit needed."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(remotion): add reproducible dependency lock"
+            git push origin "HEAD:${BRANCH_NAME}"
+          fi
+      - name: Verify a clean reproducible Remotion install
+        working-directory: remotion
+        run: |
+          rm -rf node_modules
+          npm ci --no-audit --no-fund
       - name: Render a synthetic clip and validate its streams
         working-directory: remotion
         run: npm run test:render
@@ -121,7 +145,7 @@ jobs:
         shell: pwsh
         run: |
           choco install ffmpeg --yes --no-progress --execution-timeout=300
-          $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
+          $chocoBin = Join-Path $env:ProgramData "chocolatey\\bin"
           $env:Path = "$chocoBin;$env:Path"
           $chocoBin | Out-File -FilePath $env:GITHUB_PATH -Append
           & (Join-Path $chocoBin "ffmpeg.exe") -version
