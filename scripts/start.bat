@@ -137,8 +137,9 @@ if /I "%GCF_STARTUP_SKIP_BROWSER%"=="true" (
   start "" "http://127.0.0.1:8765"
 )
 echo.
-echo The backend runs in the background; use scripts\stop.bat to stop it.
-echo This launcher window can now be closed.
+echo The backend runs in the background; use STOP.bat to stop it.
+echo Keep this window open to see startup status. Closing it will not stop the backend.
+pause
 exit /b 0
 
 :launch_backend
@@ -152,6 +153,7 @@ echo.
 echo Startup could not safely complete. See the message above.
 if exist "data\logs\backend.stdout.log" powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 40 -ErrorAction SilentlyContinue 'data\logs\backend.stdout.log'"
 if exist "data\logs\backend.stderr.log" powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Tail 60 -ErrorAction SilentlyContinue 'data\logs\backend.stderr.log'"
-if /I "%GCF_STARTUP_NO_PAUSE%"=="true" exit /b 1
+echo.
+echo The startup window will remain open so you can read this error.
 pause
 exit /b 1
