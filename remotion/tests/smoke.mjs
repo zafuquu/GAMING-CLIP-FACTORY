@@ -23,6 +23,19 @@ function run(command, args, timeout = 120000) {
   return result;
 }
 
+function parseLastJsonLine(output) {
+  const lines = String(output || "").split(/\\r?\\n/).filter((line) => line.trim());
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const parsed = JSON.parse(lines[index]);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      // Remotion/Chromium may emit informational lines before the renderer summary.
+    }
+  }
+  throw new Error(`Remotion did not emit a JSON summary. Output tail: ${lines.slice(-8).join("\\n")}`);
+}
+
 const workDir = await mkdtemp(path.join(os.tmpdir(), "gcf-remotion-smoke-"));
 try {
   const mediaDir = path.join(workDir, "media");
@@ -52,7 +65,7 @@ try {
   }), "utf8");
 
   const renderResult = run(node, [path.join(ROOT, "render.mjs"), "--props-file", propsPath], 240000);
-  const renderSummary = JSON.parse(renderResult.stdout);
+  const renderSummary = parseLastJsonLine(renderResult.stdout);
   const expectedCrf = Number(process.env.GCF_REMOTION_CRF ?? "16");
   const expectedPreset = String(process.env.GCF_REMOTION_X264_PRESET ?? "slow").toLowerCase();
   const expectedAudioBitrate = String(process.env.GCF_REMOTION_AUDIO_BITRATE ?? "192K").toUpperCase();

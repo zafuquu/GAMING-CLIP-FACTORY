@@ -787,10 +787,15 @@ class Worker(threading.Thread):
                     except (TypeError,ValueError):
                         remotion_timeout=max(self.timeout,900)
                     remotion_result=run([remotion_node,str(remotion_script),"--props-file",str(remotion_props_path)],remotion_timeout)
-                    try:
-                        remotion_summary=json.loads(remotion_result.stdout or "")
-                    except (ValueError,TypeError) as exc:
-                        raise RuntimeError("Remotion renderer did not return valid structured output metadata.") from exc
+                    remotion_summary=None
+                    for output_line in reversed((remotion_result.stdout or "").splitlines()):
+                        try:
+                            parsed_line=json.loads(output_line)
+                        except (ValueError,TypeError):
+                            continue
+                        if isinstance(parsed_line,dict):
+                            remotion_summary=parsed_line
+                            break
                     if not isinstance(remotion_summary,dict) or remotion_summary.get("ok") is not True:
                         raise RuntimeError("Remotion renderer did not confirm a successful output.")
                     remotion_encoder_settings=remotion_summary.get("encoding")
