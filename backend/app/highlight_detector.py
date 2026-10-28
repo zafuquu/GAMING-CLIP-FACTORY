@@ -230,6 +230,25 @@ def rank_highlight_windows(
     if not event_times:
         return []
 
+    # Form short activity clusters from the already-computed audio/motion tracks.
+    # Isolated bursts get a little lead-in and aftermath instead of a full 30/60s
+    # of mostly unrelated gameplay. Sustained action can still fill the max duration.
+    activity_points = sorted({
+        round(float(timestamp), 3)
+        for timestamp, score in audio_scores
+        if score >= 0.30
+    } | {
+        round(float(timestamp), 3)
+        for timestamp, score in motion_scores
+        if score >= 0.32
+    })
+    activity_clusters: list[list[float]] = []
+    for timestamp in activity_points:
+        if not activity_clusters or timestamp - activity_clusters[-1][-1] > 2.5:
+            activity_clusters.append([timestamp])
+        else:
+            activity_clusters[-1].append(timestamp)
+
     def nearby_audio_activity(timestamp: float) -> float:
         left = bisect_left(sample_times, timestamp - 2.0)
         right_index = bisect_right(sample_times, timestamp + 2.0)
@@ -279,8 +298,29 @@ def rank_highlight_windows(
             score = 0.15 + 0.35 * scene_score
         score = round(min(1.0, max(0.0, score)), 4)
 
-        start = max(0.0, min(event_time - target * 0.40, duration - target))
-        end = min(duration, start + target)
+        matched_clusters = [
+            cluster for cluster in activity_clusters
+            if cluster[0] - 2.0 <= event_time <= cluster[-1] + 2.0
+        ]
+        if matched_clusters:
+            cluster = min(
+                matched_clusters,
+                key=lambda item: abs((item[0] + item[-1]) / 2.0 - event_time),
+            )
+            start = max(0.0, cluster[0] - 3.0)
+            end = min(duration, cluster[-1] + 4.0)
+            # Keep brief events watchable; do not force every output to the target.
+            minimum_window = min(8.0, target, duration)
+            if end - start < minimum_window:
+                center = event_time
+                start = max(0.0, min(center - minimum_window * 0.40, duration - minimum_window))
+                end = min(duration, start + minimum_window)
+            if end - start > target:
+                start = max(0.0, min(event_time - target * 0.40, duration - target))
+                end = min(duration, start + target)
+        else:
+            start = max(0.0, min(event_time - target * 0.40, duration - target))
+            end = min(duration, start + target)
         if end - start < min(3.0, duration):
             continue
 

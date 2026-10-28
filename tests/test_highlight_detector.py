@@ -38,18 +38,33 @@ def test_ranker_creates_ranked_short_window_around_audio_peak():
     assert candidates
     top = candidates[0]
     assert top["start_seconds"] <= 29.0 <= top["end_seconds"]
-    assert 20.0 <= top["end_seconds"] - top["start_seconds"] <= 24.0
+    assert 6.0 <= top["end_seconds"] - top["start_seconds"] <= 24.0
     assert top["ranking_score"] > 0.7
     assert top["ranking_components"]["score_calibrated"] is False
     assert "virality" in top["ranking_components"]["score_meaning"]
 
 
-def test_default_candidate_window_is_tight_shorts_length():
+def test_default_candidate_window_trims_quiet_edges_instead_of_forcing_full_length():
     samples = [(float(t), -20.0) for t in range(60)]
+    samples[28] = (28.0, -5.0)
     samples[29] = (29.0, -3.0)
+    samples[30] = (30.0, -4.0)
     candidates = rank_highlight_windows(60.0, [], samples)
     assert candidates
-    assert all(14.9 <= item["end_seconds"] - item["start_seconds"] <= 15.0 for item in candidates)
+    assert all(6.0 <= item["end_seconds"] - item["start_seconds"] <= 15.0 for item in candidates)
+    assert all(item["start_seconds"] >= 20.0 and item["end_seconds"] <= 40.0 for item in candidates)
+
+
+def test_long_target_means_maximum_clip_length_not_required_padding():
+    samples = [(float(t), -20.0) for t in range(120)]
+    samples[55] = (55.0, -5.0)
+    samples[56] = (56.0, -3.0)
+    samples[57] = (57.0, -4.0)
+    for target in (30.0, 60.0):
+        candidates = rank_highlight_windows(120.0, [], samples, target_seconds=target)
+        assert candidates
+        assert all(6.0 <= item["end_seconds"] - item["start_seconds"] <= target for item in candidates)
+        assert candidates[0]["end_seconds"] - candidates[0]["start_seconds"] < target
 
 
 def test_scene_only_fallback_is_low_confidence_and_stays_review_only():
